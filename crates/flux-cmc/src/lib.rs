@@ -92,6 +92,8 @@ impl RetryConfig {
         let g = |k: &str| std::env::var(k).ok().and_then(|s| s.trim().parse::<u64>().ok());
         if let Some(v) = g("FLUX_CMC_MAX_RETRIES") { c.max_retries = v as u32; }
         if let Some(v) = g("FLUX_CMC_MIN_INTERVAL_MS") { c.min_interval_ms = v; }
+        if let Some(v) = g("FLUX_CMC_BASE_BACKOFF_MS") { c.base_backoff_ms = v; }
+        if let Some(v) = g("FLUX_CMC_CAP_BACKOFF_MS") { c.cap_backoff_ms = v; }
         if let Some(v) = g("FLUX_CMC_TIMEOUT_S") { c.timeout_s = v.max(1); }
         c
     }

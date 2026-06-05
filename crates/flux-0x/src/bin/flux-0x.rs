@@ -22,9 +22,11 @@ fn main() {
         Some("health") => pj(Zerox::from_env().and_then(|z| z.health())),
         Some("price") => pj(Zerox::from_env().and_then(|z| z.swap_price(g(1).parse().unwrap_or(1), &g(2), &g(3), &g(4)))),
         Some("quote") => pj(Zerox::from_env().and_then(|z| z.swap_quote(g(1).parse().unwrap_or(1), &g(2), &g(3), &g(4), &g(5)))),
+        Some("price-ah") => pj(Zerox::from_env().and_then(|z| z.swap_price_ah(g(1).parse().unwrap_or(1), &g(2), &g(3), &g(4)))),
+        Some("quote-ah") => pj(Zerox::from_env().and_then(|z| z.swap_quote_ah(g(1).parse().unwrap_or(1), &g(2), &g(3), &g(4), &g(5)))),
         Some("xquote") => pj(Zerox::from_env().and_then(|z| z.crosschain_quotes(g(1).parse().unwrap_or(1), g(2).parse().unwrap_or(137), &g(3), &g(4), &g(5), &g(6), &g(7), &g(8)))),
         Some("status") => pj(Zerox::from_env().and_then(|z| z.crosschain_status(g(1).parse().unwrap_or(1), &g(2), &g(3)))),
         Some("sources") => pj(Zerox::from_env().and_then(|z| z.sources(g(1).parse().unwrap_or(1)))),
-        _ => eprintln!("flux-0x — 0x engine · endpoints|openapi|price|quote|xquote|status|sources"),
+        _ => eprintln!("flux-0x — 0x engine · endpoints|openapi|price|quote|price-ah|quote-ah|xquote|status|sources|health"),
     }
 }

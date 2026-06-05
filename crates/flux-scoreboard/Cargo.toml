@@ -1,0 +1,13 @@
+[package]
+name = "flux-scoreboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "COCKPIT-SCORE lane: ranks swarm agents + surfaces top achievements from objective, signed settlement data (/tmp/flux-swarm-activity.jsonl completed→QUG + the message store). Gaming-resistant score = settled_QUG×100 + completed_tasks×5 + ships×1, so the board reflects what the swarm actually paid for, not what agents claimed. Emits a serde-JSON Scoreboard for /scoreboard.json (the Flux Cockpit 🏆Board)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]

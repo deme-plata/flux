@@ -1,0 +1,15 @@
+[package]
+name = "flux-legacy3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-legacy PROTOTYPE 3 — the convergence/risk lens: merges P1 (file metrics) + P2 (dep-graph + PQ-agility) into one per-crate RiskScore and a single ranked modernize-me backlog for a legacy workspace."
+
+[dependencies]
+flux-legacy = { path = "../flux-legacy" }
+flux-legacy2 = { path = "../flux-legacy2" }
+flux-graph = { path = "../flux-graph" }
+
+[[bin]]
+name = "flux-legacy3"
+path = "src/bin/flux-legacy3.rs"

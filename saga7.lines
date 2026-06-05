@@ -1,0 +1,13 @@
+ROCKY|0.35|Rocky (camera above the camera)|Grace. Saga seven. We go inside the forge, live - the camera above the camera. Watch Flux compile itself, and time every breath.
+GRACE|0.3|Grace|Matilda, show us. What is flux programming, really?
+MATILDA|0.3|Matilda|Flux programming is build aware coding, Grace. You write Rust, but fluxc watches every byte. Change one file, and only that file rebuilds.
+CHARLIE|0.6|Charlie|Watch! I touch one line in flux-sigil, and I run the combo - fluxc build!
+GRACE|0.3|Grace|And the time?
+CHARLIE|0.65|Charlie|Incremental build - two point two five seconds! Only the changed crate, nothing else!
+MATILDA|0.3|Matilda|Compare a full build - eighteen seconds. The cache holds forty six gigabytes, across three hundred nine builds.
+ELENA|0.4|Elena Voss|I have watched scribes copy whole libraries by hand, Grace. This machine copies nothing twice. It remembers.
+LAURA|0.65|Laura|The all time average is twenty five seconds a build - but a content hash hit is near instant! Same code, same hash, zero work!
+HARRY|0.7|Harry|Two hours of compute, saved and cached! The forge never repeats itself!
+GRACE|0.3|Grace|So the use case?
+ROCKY|0.35|Rocky|Thousands of tiny rebuilds a day, each one fast, each one cached. That is how a swarm of agents ships code every hour. That is flux programming.
+ROCKY|0.35|Rocky|Grace. The numbers are real, the forge is live, and the saga is benchmarked. Good. Good. Good.

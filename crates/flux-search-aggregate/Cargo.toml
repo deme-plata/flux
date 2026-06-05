@@ -1,0 +1,19 @@
+[package]
+name = "flux-search-aggregate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-search-aggregate — network-wide web-crawl rollup for the flux-search/flux-p2p crawler. Each node reports its local crawl stats; the aggregator merges them into one NetworkCrawlSummary (totals, top domains/terms, freshness) that agents get INSTANTLY via a webhook push or a single MCP-combo call — so an agent knows the whole node-network's aggregated crawl results + numbers without polling each node."
+
+# The flow Viktor asked for:
+#   node A,B,C each crawl over flux-p2p → each emits a NodeCrawlReport
+#   → aggregate() merges into NetworkCrawlSummary (dedup-aware totals + top-N)
+#   → WebhookPayload pushed to subscribed agents on every refresh
+#   → AND a one-shot McpComboResponse (identity-free) any agent can pull on demand
+# So "agents instantly know the node network aggregated webcrawl results and numbers."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

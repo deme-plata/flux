@@ -1,0 +1,11 @@
+[package]
+name = "flux-nations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-nations — identity + citizenship + attestation substrate for SIGIL Nation. A citizen Identity is a key + human alias; a citizen is ADMITTED only with a hardware-rooted Attestation that a QUORUM of attestors signed (reuses flux-quorum, so no single authority can forge a citizen); the Nation commits its citizen set in a merkle root anyone verifies. The decentralized 'who-is-real' layer."
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+flux-quorum = { path = "../flux-quorum" }
+flux-email  = { path = "../flux-email" }

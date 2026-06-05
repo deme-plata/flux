@@ -1,0 +1,16 @@
+[package]
+name = "flux-aether"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-aether — a live distributed 'mixer for files': a file is chunked, erasure-coded (K-of-N), per-shard encrypted, content-addressed, and MIXED into one indistinguishable shard pool scattered over flux-p2p. The coherent file exists HERE (manifest), THERE (peer shards), and NOWHERE (assembled). A peer holding a shard can't tell its file, content, or membership. First target: WAV/MP3."
+
+# FLUXFOOD-light keystone: blake3 (encrypt-keystream + content-address) + serde.
+# flux-p2p scatter (AETHER-3) + FUSE mount (AETHER-4) + reed-solomon for general
+# K-of-N (this keystone ships systematic + single-parity to stay dep-free + testable).
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+# Real K-of-N erasure (lose up to N-K hosts, not just 1). The "wider blast
+# radius" durability dial — see src/rs.rs + bin/durability-proof.rs.
+reed-solomon-erasure = "6"

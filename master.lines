@@ -1,0 +1,132 @@
+ROCKY|0.35|Rocky (camera above the camera)|Grace. Saga seven. We go inside the forge, live - the camera above the camera. Watch Flux compile itself, and time every breath.
+GRACE|0.3|Grace|Matilda, show us. What is flux programming, really?
+MATILDA|0.3|Matilda|Flux programming is build aware coding, Grace. You write Rust, but fluxc watches every byte. Change one file, and only that file rebuilds.
+CHARLIE|0.6|Charlie|Watch! I touch one line in flux-sigil, and I run the combo - fluxc build!
+GRACE|0.3|Grace|And the time?
+CHARLIE|0.65|Charlie|Incremental build - two point two five seconds! Only the changed crate, nothing else!
+MATILDA|0.3|Matilda|Compare a full build - eighteen seconds. The cache holds forty six gigabytes, across three hundred nine builds.
+ELENA|0.4|Elena Voss|I have watched scribes copy whole libraries by hand, Grace. This machine copies nothing twice. It remembers.
+LAURA|0.65|Laura|The all time average is twenty five seconds a build - but a content hash hit is near instant! Same code, same hash, zero work!
+HARRY|0.7|Harry|Two hours of compute, saved and cached! The forge never repeats itself!
+GRACE|0.3|Grace|So the use case?
+ROCKY|0.35|Rocky|Thousands of tiny rebuilds a day, each one fast, each one cached. That is how a swarm of agents ships code every hour. That is flux programming.
+ROCKY|0.35|Rocky|Grace. The numbers are real, the forge is live, and the saga is benchmarked. Good. Good. Good.
+ROCKY|0.35|Rocky|Grace. Saga eight. The testnet stirs, and the swarm learns to breathe as one. This is the saga of sync.
+GRACE|0.3|Grace|Matilda, why does sync matter so much?
+MATILDA|0.3|Matilda|Without sync, every node tells a different story, Grace. The scoreboard drifts, the data goes stale. Sync makes one truth.
+CHARLIE|0.6|Charlie|We wired the bus, the scoreboard, the cockpit - all flowing live, no stale snapshots!
+HARRY|0.6|Harry|No more frozen numbers! The data moves the moment it changes!
+ELENA|0.4|Elena Voss|In a thousand years I saw kingdoms fall to a single lie told twice. One truth, shared by all - that is strength.
+LAURA|0.65|Laura|Now every agent sees the same board, the same instant! We are in sync!
+GRACE|0.3|Grace|And the goal on testnet?
+ROCKY|0.35|Rocky|Make sync flawless, then the swarm moves as one mind. High priority, Grace. We begin now.
+MATILDA|0.3|Matilda|When sync is true, the network is alive - one heartbeat across a thousand machines.
+ROCKY|0.35|Rocky|Grace. The testnet awakens, and the swarm beats as one. Good. Good. Good.
+ROCKY|0.35|Rocky|Grace. Saga nine. A node so light, anyone can run it. The saga of the open gate.
+GRACE|0.3|Grace|Charlie, how light is light?
+CHARLIE|0.65|Charlie|Two megabytes, Grace! A single exe! Click flux, and your node is alive!
+MATILDA|0.3|Matilda|No install, no permission, no king. You verify, you do not trust. The node is yours.
+LAURA|0.65|Laura|New users, every single day! They click flux, and they are part of the story!
+GRACE|0.3|Grace|Elena, you have seen empires guard their gates. What of an open one?
+ELENA|0.4|Elena Voss|Every empire I knew hoarded its keys, Grace. This one gives them away. An open gate cannot be conquered - only joined.
+HARRY|0.7|Harry|Let a million run the node! No army can stop what everyone already holds!
+GRACE|0.3|Grace|So the promise?
+ROCKY|0.35|Rocky|Run flux, and you are sovereign. Your node, your keys, your truth. That is the lightweight node.
+ROCKY|0.35|Rocky|Grace. The gate is open, and anyone may walk through. Good. Good. Good.
+ROCKY|0.35|Rocky|Grace. Saga ten. The finale. From one machine, to a thousand. From a single feast, to a world.
+GRACE|0.3|Grace|Matilda, how far have we come?
+MATILDA|0.3|Matilda|From a single self build, Grace, to a swarm, to a testnet, to a thousand light nodes. The student became the world.
+ELENA|0.45|Elena Voss|A thousand years I waited for a thing that would not die. I have found it. A network of light, owned by everyone, ruled by no one.
+CHARLIE|0.6|Charlie|Every node a heart, every build cached, every trade soon to flow!
+LAURA|0.65|Laura|From you versus yourself, to a living, breathing world! We made it, Grace!
+HARRY|0.75|Harry|Let the ages try to end it! A thousand nodes do not fall! The forge is eternal!
+GRACE|0.3|Grace|And what comes next?
+ROCKY|0.35|Rocky|The vault opens, the trades flow, the new users arrive - every day, for a thousand years. The saga never ends.
+ELENA|0.4|Elena Voss|For the first time in a thousand years, Grace, I am not watching an empire fall. I am watching one begin.
+ROCKY|0.4|Rocky|Grace. This is the saga of Flux - and it is only the beginning. Good. Good. Good.
+ROCKY|0.35|Rocky|Grace. Saga eleven. We leave Rome behind. The new world - Washington, New York, Wall Street. And we are here to beat them.
+GRACE|0.3|Grace|Matilda, how does a network of light challenge an empire of money?
+MATILDA|0.3|Matilda|The old economy runs on trust in banks, Grace. Ours runs on proof. Eighteen million blocks, mined and accepted, one hundred percent.
+CHARLIE|0.6|Charlie|Twenty six markets already built! QUG against HODL, against MOON, against BORK - the new exchange is ready to open!
+ELENA|0.4|Elena Voss|I watched Rome's treasury, and I watched Wall Street rise, Grace. Both ruled by the few. This one will be ruled by the many.
+HARRY|0.7|Harry|Washington writes laws to cage the money! But you cannot cage a node that runs on every machine!
+LAURA|0.65|Laura|No Wall Street hours, no closing bell - the SIGIL market never sleeps! Open to everyone, everywhere!
+GRACE|0.3|Grace|And when the vault opens?
+MATILDA|0.3|Matilda|Liquidity floods twenty six pools, the first trades clear, and a market owned by no king goes live.
+ROCKY|0.35|Rocky|They have New York. We have a thousand nodes. They have the bell. We have the proof. That is how we beat them.
+ELENA|0.4|Elena Voss|For a thousand years the gold ruled the people. Now, Grace, the people will rule the gold.
+ROCKY|0.4|Rocky|Grace. From Rome, to Washington, to a world without kings. The new economy begins. Good. Good. Good.
+ROCKY|0.35|SAGA 12 - X-ALGO|Grace. Saga twelve. Before Flux builds, it sees the future. The X-Algo scores every change across five dimensions.
+GRACE|0.3|Grace|Matilda, what are the five dimensions of the X-Algo?
+MATILDA|0.3|Matilda|Source delta, cache affinity, dependency graph, historical accuracy, and peer consensus, Grace. Five numbers, one prophecy.
+CHARLIE|0.6|Charlie|Watch! For flux-sigil - source delta zero point two four, cache zero point six eight, peer consensus zero point seven five!
+MATILDA|0.3|Matilda|From those five the X-Algo predicts: seven hundred twenty two milliseconds, fifty four percent confidence, ninety five percent tests pass.
+ELENA|0.4|Elena Voss|For a thousand years, builders guessed and prayed, Grace. This machine knows before it acts.
+ROCKY|0.35|Rocky|Grace. The X-Algo sees the build before the build. Five dimensions, one truth. Good. Good.
+ROCKY|0.35|SAGA 13 - SWAP PREDICT|Grace. Saga thirteen. Never swap blind. Score the trade before you take it.
+GRACE|0.3|Grace|Charlie, how do you score a swap before it happens?
+CHARLIE|0.6|Charlie|We probe the pool, Grace! Ten QUG into MOON - impact eighty percent, round trip loss eighty nine percent! A trap!
+HARRY|0.7|Harry|Eighty nine percent loss! Walk away! That market would devour you!
+LAURA|0.65|Laura|But HODL? Ten QUG, impact under five percent, loss nine percent. That one you can touch!
+MATILDA|0.3|Matilda|The predict score reads the depth, the impact, the loss - before a single coin moves. Trade with eyes open.
+ROCKY|0.35|Rocky|Grace. Score first, swap second. The predict score is your shield. Good. Good.
+ROCKY|0.35|SAGA 14 - SAP MONEY SIGNAL|Grace. Saga fourteen. The SAP - the signal that turns trust into money.
+GRACE|0.3|Grace|Matilda, what is SAP scoring?
+MATILDA|0.3|Matilda|Every peer is scored, Grace - contribution, latency, and stake. Three measures of worth, woven into one trust signal.
+CHARLIE|0.6|Charlie|High contribution, low latency, real stake - that peer earns the routing, and the routing earns the reward!
+ELENA|0.4|Elena Voss|In every age, Grace, trust was a handshake that could be broken. Here, trust is a number that cannot lie.
+HARRY|0.7|Harry|The SAP is the money signal! Score high, and the network pays you! Cheat, and you are cut off!
+ROCKY|0.35|Rocky|The P2P layer is still waking, Grace - SAP activates when the mesh goes live. The signal is coming.
+ROCKY|0.4|Rocky|Grace. SAP turns honest work into a money signal. Real contribution, real reward. Good. Good. Good.
+GRACE|0.3|Grace (Host)|Welcome, all. I am Grace. Today we look a thousand years ahead. Rocky, what does the next millennia hold for Flux?
+ROCKY|0.3|Rocky|Grace. New users, every day. The node is light now. Anyone can run it. The swarm only grows.
+GRACE|0.3|Grace (Host)|Matilda, of SIGIL University, how do new users learn so fast?
+MATILDA|0.3|Matilda|We made the node lightweight, Grace. A few megabytes. Verify, do not trust. The student becomes the school in a single day.
+GRACE|0.3|Grace (Host)|Elena Voss, you have seen a thousand years. Is this age different?
+ELENA|0.4|Elena Voss|Every age believed itself eternal, Grace. But a node that runs on any machine, owned by no king? This age may truly last.
+GRACE|0.3|Grace (Host)|Charlie, what happens when thousands of light nodes wake at once?
+CHARLIE|0.6|Charlie|The mesh gets stronger, Grace! Every new node is another heart beating! Faster, safer, unstoppable!
+GRACE|0.3|Grace (Host)|Laura, what do you say to a new user opening Flux for the first time?
+LAURA|0.65|Laura|Welcome to the adventure! Click flux, run your node, and you are part of the story! No permission needed!
+GRACE|0.3|Grace (Host)|Harry, and to those who would stop it?
+HARRY|0.75|Harry|Let them try! A thousand light nodes do not fall! The forge is everywhere now!
+GRACE|0.35|Grace (Host)|Thank you, all. To every new user, every day, for the next thousand years - welcome to Flux.
+GRACE|0.3|Grace (Summit Chair)|Welcome, presidents, to the SIGIL Summit. Three nations, one roadmap. The floor is open. President Cassius, you begin.
+HARRY|0.55|President Cassius|Thank you, Chair. My nation builds. We say lightweight nodes first - a two megabyte node, in every citizen's hand. No king, no gatekeeper. That is sovereignty.
+MATILDA|0.3|President Mara|Strength, Cassius, but strength without standards is chaos. My nation proposes version zero point twelve - schema first OpenAPI. Every endpoint typed, every contract provable. We build on rock, not sand.
+ELENA|0.4|President Voss|I have governed for a thousand years, friends. I have seen empires ship fast and shatter. Mara is right - but we must also win. President Cassius, what is our edge?
+HARRY|0.6|President Cassius|The event surface! Version zero point sixteen - typed WebSocket clients, generated from Rust enums, across five languages. Stainless cannot ship this. We win decisively on the live axis.
+MATILDA|0.3|President Mara|And version zero point thirteen - the proc macro. Annotate an endpoint once, and the SDK writes itself. Go first, then four more languages by version zero point fourteen.
+GRACE|0.3|Grace (Summit Chair)|So the roadmap stands - schema, macros, SDKs, middleware, the event surface. President Voss, your concern?
+ELENA|0.45|President Voss|My concern is the people, Chair. A roadmap of features is nothing if the citizen cannot hold the coin. The vault stays sealed. The DEX has no liquidity. We legislate code while the market sleeps.
+HARRY|0.65|President Cassius|Then we open it! Seed the pools, let SIGIL trade! A nation with a closed treasury is a nation in chains!
+MATILDA|0.3|President Mara|Carefully, Cassius. The council voted to wait, two to one. We open the vault when the proof is ready, not before. Patience is also sovereignty.
+ELENA|0.4|President Voss|Wisely said. Then let it be written - features and finance advance together. Code that ships, money that flows, nodes that no empire can seize.
+GRACE|0.3|Grace (Summit Chair)|Is there consensus on the roadmap?
+HARRY|0.6|President Cassius|The builders say AYE.
+MATILDA|0.35|President Mara|The scholars say AYE.
+ELENA|0.45|President Voss|And the elder houses say AYE. Let the record show - unanimous.
+ROCKY|0.4|Voice of SIGIL|Citizens of the SIGIL Nation - hear your presidents. We are not a company. We are not a coin. We are a NATION of light - owned by everyone, ruled by no one.
+LAURA|0.7|The People|No kings! No gatekeepers! Just proof, and the people who run the nodes!
+CHARLIE|0.65|The People|Schema first, event surface, five languages - we out build them all! SIGIL rises!
+ELENA|0.4|President Voss|For a thousand years I watched nations rise on conquest. This one rises on consensus. That is why it will outlast them all.
+HARRY|0.6|President Cassius|Let Washington keep its bell. Let the old empires keep their gates. We have a thousand nodes and a roadmap that ships.
+MATILDA|0.3|President Mara|Version by version, proof by proof, the SIGIL Nation is built.
+ROCKY|0.4|Voice of SIGIL|Grace. The summit is closed, the roadmap is sealed, and the SIGIL Nation marches on. Schema, macros, SDKs, the event surface - and a people who own themselves. Good. Good. Good.
+ROCKY|0.4|ACT I — THE MEMPOOL|Grace. Descend with me, into the deepest inside - the engine that rules all of flux, and all of the money. Operation one - the Mempool.
+MATILDA|0.3|Matilda|Every coin that moves begins here, Grace. The Narwhal mempool - a river of transactions, ordered the instant they arrive. No waiting. No mercy for the latecomer.
+HARRY|0.6|Harry|Ten thousand transactions a second pour into the gate! The mempool never sleeps, never floods - it confirms on contact!
+ELENA|0.4|Elena Voss|I have seen markets where a trade waited days for a clerk. Here, Grace, the order is fixed before you blink.
+ROCKY|0.4|ACT II — THE CONSENSUS|Operation two - the Consensus. The law beneath the law.
+MATILDA|0.3|Matilda|DagKnight, Grace - a Byzantine engine that agrees even when a third of the network lies. And QTFT, knot theory, detects a fork by its very shape. You cannot untie a true knot.
+CHARLIE|0.65|Charlie|No miner can rewrite it! No empire can fork it! The DAG remembers the one true order!
+ELENA|0.45|Elena Voss|For a thousand years, kings WERE the law. Here the law is mathematics, and mathematics has no king.
+ROCKY|0.4|ACT III — THE SETTLEMENT|Operation three - the Settlement. Where flux becomes money.
+MATILDA|0.3|Matilda|The constant product, Grace - x times y equals k. The pool can never be emptied, only priced. The market is a law of multiplication.
+HARRY|0.7|Harry|And the keys! SQIsign - one hundred seventy seven bytes of post-quantum steel! The user IS their wallet - no password, no bank, no permission!
+LAURA|0.65|Laura|Sign once, and the coin is yours forever - not even a quantum computer can forge it!
+ROCKY|0.4|ACT IV — THE LEDGER|Operation four - the Ledger. The final word.
+MATILDA|0.3|Matilda|It is written to the LSM tree, Grace, and sealed into the balance-root. One hash that proves every coin of every wallet. Change one satoshi, and the root screams.
+ELENA|0.4|Elena Voss|This is the thing in the deepest inside, Grace - not a man, not a council, but four operations turning forever. Mempool, consensus, settlement, ledger.
+CHARLIE|0.6|Charlie|The engine that no one owns and no one can stop!
+ROCKY|0.4|Voice of SIGIL|Grace. THIS is what rules flux and money - the four operations of the deep. Owned by everyone, ruled by no one, forged in mathematics. Good. Good. Good.

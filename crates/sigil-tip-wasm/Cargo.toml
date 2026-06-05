@@ -1,0 +1,15 @@
+[package]
+name = "sigil-tip-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL lightweight node as browser WASM — verifies a tip-proof (the ≤10ms verify) client-side, no server, no chain download. Raw C-ABI over sigil-tip-proof with default-features=false (Blake3 flavor; no transport, no SQIsign). The second real QuillonOS Rust→WASM module, after flux-fcx-wasm."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# default-features=false → no sigil-net (WireGuard/Tor) + no flux-sqisign, so the
+# light-client verify compiles to wasm32. Same raw-C-ABI recipe as flux-fcx-wasm.
+sigil-tip-proof = { path = "../../../sigil/crates/sigil-tip-proof", default-features = false }
+serde_json = { workspace = true }

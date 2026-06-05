@@ -1,0 +1,17 @@
+[package]
+name = "flux-sigil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Post-quantum keyed hashing — BLAKE3 keyed-hash and streaming hasher bound to SQIsign identities"
+
+[dependencies]
+blake3 = "1"
+flux-sqisign = { path = "../flux-sqisign" }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "sigil_bench"
+harness = false

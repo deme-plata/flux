@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>flux-arena — Live Compile Garden</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #0c0e14; color: #e2e8f0; font-family: -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; }
+  #hud { position: fixed; top: 0; left: 0; padding: 12px 16px; font-size: 13px; pointer-events: none; z-index: 2; }
+  #hud .v { color: #fbbf24; }
+  #hud .ok { color: #86efac; }
+  #hud .fail { color: #fca5a5; }
+  #legend { position: fixed; bottom: 12px; left: 16px; font-size: 12px; opacity: 0.6; z-index: 2; }
+  #ws { position: fixed; top: 12px; right: 16px; font-size: 12px; padding: 4px 10px; border-radius: 6px; background: #1e293b; z-index: 2; }
+  #ws.connected { background: #064e3b; color: #86efac; }
+  #ws.disconnected { background: #4c1d24; color: #fca5a5; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div><span class="v">flux-arena</span> — Live Compile Garden</div>
+  <div>crates: <span id="crate-count">0</span> · events: <span id="event-count">0</span> · last: <span id="last-event">—</span></div>
+  <div>pass: <span class="ok" id="pass-total">0</span> · fail: <span class="fail" id="fail-total">0</span></div>
+</div>
+<div id="ws">connecting…</div>
+<div id="legend">scroll = zoom · drag = rotate · taller = more LOC · greener = higher arch score</div>
+
+<!-- Three.js + OrbitControls from a single ES-modules CDN bundle -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0c0e14);
+scene.fog = new THREE.Fog(0x0c0e14, 80, 280);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 800);
+camera.position.set(60, 50, 80);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// ── lights ──
+scene.add(new THREE.AmbientLight(0xb0b8ff, 0.35));
+const sun = new THREE.DirectionalLight(0xffd9a3, 0.9);
+sun.position.set(80, 120, 60);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -120;
+sun.shadow.camera.right = 120;
+sun.shadow.camera.top = 120;
+sun.shadow.camera.bottom = -120;
+scene.add(sun);
+
+// ── ground ──
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(150, 64),
+  new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.95 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Concentric guide rings — visual cue for the spiral layout.
+for (let r = 30; r <= 120; r += 30) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(r - 0.1, r + 0.1, 96),
+    new THREE.MeshBasicMaterial({ color: 0x1e293b, side: THREE.DoubleSide }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.01;
+  scene.add(ring);
+}
+
+// ── compile towers ──
+const towers = new Map(); // crate name → { mesh, baseHeight, color, vines, particles, label }
+
+const archColor = (score) => {
+  // 0 → red (0xef4444), 50 → amber (0xfbbf24), 80 → green (0x10b981), 100 → cyan (0x06b6d4)
+  if (score >= 80) return 0x10b981;
+  if (score >= 70) return 0x84cc16;
+  if (score >= 60) return 0xfbbf24;
+  if (score >= 50) return 0xf97316;
+  return 0xef4444;
+};
+
+function spawnTower(crate, slot, total) {
+  // Sunflower-spiral layout — distributes crates evenly without grid lines.
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const r = 18 + 10 * Math.sqrt(slot);
+  const theta = slot * golden;
+  const x = Math.cos(theta) * r;
+  const z = Math.sin(theta) * r;
+
+  const baseHeight = 2 + Math.log10(Math.max(crate.loc || 100, 100)) * 4;
+  const color = archColor(crate.score || 50);
+  const geom = new THREE.BoxGeometry(2.4, baseHeight, 2.4);
+  const mat = new THREE.MeshStandardMaterial({
+    color,
+    emissive: color,
+    emissiveIntensity: 0.25,
+    metalness: 0.3,
+    roughness: 0.55,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(x, baseHeight / 2, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  // Tiny label (canvas-textured sprite).
+  const label = makeLabel(crate.name);
+  label.position.set(x, baseHeight + 1.6, z);
+  scene.add(label);
+
+  towers.set(crate.name, {
+    mesh,
+    label,
+    baseHeight,
+    color,
+    vines: [],
+    flash: 0,
+  });
+}
+
+function makeLabel(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b1020dd';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = 'bold 22px -apple-system, "Segoe UI", "Helvetica Neue", sans-serif';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(8, 2, 1);
+  return sprite;
+}
+
+// ── boot: fetch workspace topology and spawn towers ──
+async function boot() {
+  const ws_status = document.getElementById('ws');
+  try {
+    const r = await fetch('/v1/workspace');
+    const data = await r.json();
+    const crates = data.crates || [];
+    document.getElementById('crate-count').textContent = crates.length;
+    crates.forEach((c, i) => spawnTower(c, i, crates.length));
+  } catch (e) {
+    console.warn('workspace fetch failed', e);
+  }
+  // If we got zero crates, fall back to a synthetic 32-crate demo so the
+  // viewer isn't empty before fluxc-mcp wires up.
+  if (towers.size === 0) {
+    const demoNames = [
+      'fluxc','fluxc-core','fluxc-mcp','flux-cache','flux-db','flux-record',
+      'flux-graph','flux-bench','flux-p2p','flux-gpu','flux-zk','flux-sigil',
+      'flux-sqisign','flux-science','flux-architect','flux-frontend',
+      'flux-backend','flux-optimize','flux-search','flux-mempool','flux-qug',
+      'flux-self-heal','flux-sniff','flux-hotswap','flux-api','flux-driver',
+      'flux-gui','flux-refactor','flux-macros','fluxc-gemma','flux-ai',
+      'flux-ue-bridge',
+    ];
+    demoNames.forEach((n, i) =>
+      spawnTower({ name: n, loc: 200 + i * 80, score: 50 + (i * 7) % 40 }, i, demoNames.length));
+    document.getElementById('crate-count').textContent = demoNames.length;
+  }
+}
+
+// ── WebSocket subscription ──
+function connect() {
+  const ws_status = document.getElementById('ws');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/v1/events`);
+  ws.addEventListener('open', () => {
+    ws_status.className = 'connected';
+    ws_status.textContent = '● live';
+  });
+  ws.addEventListener('close', () => {
+    ws_status.className = 'disconnected';
+    ws_status.textContent = '● disconnected · reconnecting in 2s';
+    setTimeout(connect, 2000);
+  });
+  ws.addEventListener('error', () => {
+    ws_status.className = 'disconnected';
+    ws_status.textContent = '● error';
+  });
+  ws.addEventListener('message', (e) => onEvent(JSON.parse(e.data)));
+}
+
+let eventCount = 0, passTotal = 0, failTotal = 0;
+function onEvent(ev) {
+  eventCount++;
+  document.getElementById('event-count').textContent = eventCount;
+  document.getElementById('last-event').textContent =
+    `${ev.type}${ev.package ? ' · ' + ev.package : ''}`;
+
+  if (ev.type === 'iterate_complete') {
+    const t = towers.get(ev.package);
+    if (t) {
+      // Color flash — green on success, red on failure.
+      const target = ev.success ? 0x10b981 : 0xef4444;
+      t.flash = 1.0;
+      t.flashColor = target;
+      // Rise a tiny amount on success.
+      if (ev.success) t.mesh.scale.y = Math.min(t.mesh.scale.y + 0.05, 1.8);
+    }
+  } else if (ev.type === 'test_complete') {
+    passTotal += ev.passed; failTotal += ev.failed;
+    document.getElementById('pass-total').textContent = passTotal;
+    document.getElementById('fail-total').textContent = failTotal;
+    const t = towers.get(ev.package);
+    if (t && ev.passed > 0) {
+      // Spawn green vines = visual count of passing tests.
+      for (let i = 0; i < Math.min(ev.passed, 30); i++) addVine(t);
+    }
+  } else if (ev.type === 'build_failed') {
+    const t = towers.get(ev.package);
+    if (t) { t.flash = 1.0; t.flashColor = 0xef4444; }
+  } else if (ev.type === 'hello') {
+    console.log('bridge', ev.bridge_version, ev.workspace_path);
+  }
+}
+
+function addVine(tower) {
+  const h = tower.baseHeight * (0.4 + Math.random() * 0.6);
+  const vine = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.06, h, 6),
+    new THREE.MeshStandardMaterial({ color: 0x4ade80, emissive: 0x065f46, emissiveIntensity: 0.4 }),
+  );
+  const angle = Math.random() * Math.PI * 2;
+  const r = 1.4;
+  vine.position.set(
+    tower.mesh.position.x + Math.cos(angle) * r,
+    h / 2 + 0.1,
+    tower.mesh.position.z + Math.sin(angle) * r,
+  );
+  vine.castShadow = true;
+  scene.add(vine);
+  tower.vines.push({ mesh: vine, age: 0 });
+}
+
+// ── animation loop ──
+const clock = new THREE.Clock();
+function tick() {
+  const dt = clock.getDelta();
+  for (const t of towers.values()) {
+    if (t.flash > 0) {
+      t.flash = Math.max(0, t.flash - dt * 1.4);
+      const k = t.flash;
+      const f = new THREE.Color(t.flashColor);
+      const base = new THREE.Color(t.color);
+      t.mesh.material.color.copy(base).lerp(f, k);
+      t.mesh.material.emissiveIntensity = 0.25 + k * 1.2;
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+boot().then(() => { connect(); tick(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Rust build artifacts
+/target
+target/
+**/target/
+.target-shared/
+*.rlib
+*.rmeta
+
+# Backup / editor
+*.swp
+*~
+.DS_Store
+
+# Local env / secrets
+.env
+*.key
+.flux-agent-key.json
+
+# Node (for embedded vite/gui apps)
+node_modules/
+dist/
+
+# Logs
+*.log

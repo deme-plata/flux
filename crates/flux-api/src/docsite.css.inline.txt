@@ -1,0 +1,23 @@
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1em; color: #0a2540; }
+h1 { border-bottom: 2px solid #0a6ebd; padding-bottom: 0.2em; }
+h2 { color: #0a6ebd; margin-top: 2.5em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
+.sub { color: #555; margin-top: -0.5em; }
+section.endpoint, section.event { background: #f7f9fc; border-left: 3px solid #0a6ebd; padding: 0.6em 1em; margin: 0.8em 0; border-radius: 0 6px 6px 0; }
+section.event { border-left-color: #6e1fb6; }
+section h3 { margin: 0 0 0.5em 0; font-size: 1.05em; }
+.verb { display: inline-block; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.8em; font-weight: bold; color: white; margin-right: 0.4em; }
+.verb-get { background: #0a6ebd; }
+.verb-post { background: #2a9d3f; }
+.verb-put { background: #b78705; }
+.verb-delete { background: #c93030; }
+.verb-patch { background: #6e1fb6; }
+code { background: #eef2f8; padding: 0.05em 0.3em; border-radius: 3px; font-size: 0.9em; }
+table { border-collapse: collapse; margin-top: 0.5em; font-size: 0.9em; }
+th, td { text-align: left; padding: 0.3em 0.7em; border-bottom: 1px solid #ddd; }
+th { background: #eef2f8; }
+.summary { color: #555; margin: 0.3em 0; }
+.body { font-size: 0.9em; color: #555; }
+.empty { color: #999; font-style: italic; }
+details { margin-top: 2em; }
+details summary { cursor: pointer; color: #0a6ebd; }
+details pre { background: #0a2540; color: #cfe7ff; padding: 1em; border-radius: 4px; overflow-x: auto; font-size: 0.8em; }

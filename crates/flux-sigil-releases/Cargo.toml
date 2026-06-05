@@ -1,0 +1,15 @@
+[package]
+name = "flux-sigil-releases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release ledger for the SIGIL 100-iteration wallet plan. FLUXFOOD-compliant: workspace deps, fluxc-built, shared target. Append-only JSONL → polled by sigil-releases.html for live updates + Web Notifications."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[[bin]]
+name = "sigil-releases"
+path = "src/bin/sigil-releases.rs"

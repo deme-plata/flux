@@ -1,0 +1,14 @@
+# Flux money-factory boilerplates — self-contained FLUXFOOD workspace.
+# Pure std, no external deps → fast, portable, copy-pasteable templates.
+# Build with fluxc (never raw cargo): `cd templates/money && fluxc build`.
+[workspace]
+members = ["flux-money-kit", "flux-gateway", "flux-launchpad", "flux-estate", "flux-bank", "flux-bridge", "flux-money-flow"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+flux-money-kit = { path = "flux-money-kit" }

@@ -1,0 +1,29 @@
+[package]
+name = "flux-cockpit"
+# Independently versioned (NOT workspace) so the app can auto-update on its own
+# cadence without bumping the whole flux workspace.
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Cockpit — ratatui terminal app (the natural fluxc-native extension, sibling of fluxmux): SIGIL / Wallet / 🏆 Swarm Scoreboard tabs with always-on side panels for live flux MCP swarm-comms + the SIGIL wallet. Cross-compiles to a self-contained Windows .exe and auto-updates itself via fluxc (version-check → download → swap-on-restart). Data sources are env-configurable (local files on the build host, HTTP URLs on a remote Windows box)."
+
+[[bin]]
+name = "flux-cockpit"
+path = "src/main.rs"
+
+[dependencies]
+ratatui   = "0.28"
+crossterm = "0.28"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TLS backend per platform. On Windows use native-tls → SChannel (the OS trust
+# store + crypto), which is the reliable choice for a Linux→windows-gnu
+# cross-compiled .exe; cross-compiled rustls had silent runtime fetch failures
+# (v0.18.0/0.18.1 showed empty panels on Windows). Elsewhere keep rustls (no
+# openssl needed on the Linux build host).
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", features = ["blocking", "native-tls"], default-features = false }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }

@@ -1,0 +1,29 @@
+[package]
+name = "flux-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Consensus — DagKnight BFT engine + QTFT knot-theory fork detection. Combines a port of Quillon's q-dag-knight with knot/Khovanov/TQFT primitives lifted from the QTFT-api research crate. The consensus heart of SIGIL."
+
+[features]
+default = []
+# Phase 1: enables the QTFT (knot/khovanov/tqft) modules and their math deps.
+qtft = ["dep:nalgebra", "dep:num-complex", "dep:ndarray", "dep:petgraph", "dep:statrs"]
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+
+# QTFT math stack — opt-in via the `qtft` feature
+nalgebra = { version = "0.33", optional = true }
+num-complex = { version = "0.4", features = ["serde"], optional = true }
+ndarray = { version = "0.16", features = ["serde"], optional = true }
+petgraph = { version = "0.7", features = ["serde-1"], optional = true }
+statrs = { version = "0.18", optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

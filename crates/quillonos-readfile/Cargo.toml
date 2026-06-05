@@ -1,0 +1,10 @@
+[package]
+name = "quillonos-readfile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuillonOS `readfile` — std::fs::read_to_string demo. Validates the OPFS-backed WASI path_open / fd_read surface end-to-end."
+
+[[bin]]
+name = "readfile"
+path = "src/main.rs"

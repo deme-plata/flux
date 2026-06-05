@@ -1,0 +1,24 @@
+// FCX v0.4 showcase — multi-component + lists + conditionals + state, one file.
+// Authored like Vite/TS; cross-builds to a native ~3.6MB Slint .exe. No Electron.
+
+export function Banner() {
+  return (
+    <vbox>
+      <text>Flux apps ship native — zero Chromium, zero Node.</text>
+    </vbox>
+  );
+}
+
+export function App() {
+  const [items, setItems] = useState(["Parse FCX", "Emit Slint", "Cross-build .exe"]);
+  const [count, setCount] = useState(0);
+  return (
+    <vbox>
+      <Banner/>
+      <text>Tasks shipped: {count}</text>
+      {items.map(item => <text>{item}</text>)}
+      <button onClick={() => setCount(count + 1)}>Ship one</button>
+      {count > 0 && <text>You just shipped — natively.</text>}
+    </vbox>
+  );
+}

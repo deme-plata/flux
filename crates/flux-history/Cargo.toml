@@ -1,0 +1,25 @@
+[package]
+name = "flux-history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-history — an append-only, time-ordered history DB plugin. flux-db is the durable source of truth (time-sorted keys → O(range) chronological retrieval, secondary kind/tag indexes → O(range) filter); flux-search is the derived full-text index (TF-IDF + ranking) rebuilt from the DB on open. Plus filesystem ingestion: index a directory of files into searchable history. Usable by SIGIL (blocks/txs/events/swarm-msgs) and any Flux app."
+
+# The split (read this before changing it):
+#  - flux-db = persistence + ordering. Primary key `h:<ts_be><seq_be>` makes
+#    iter_from() yield entries in chronological order with zero re-sorting.
+#    Secondary keys `k:<kind>:<ts_be><seq_be>` and `g:<tagk>=<tagv>:<ts_be>`
+#    give O(range) filter-by-kind / filter-by-tag.
+#  - flux-search = the derived inverted index for full-text. NOT the source of
+#    truth — rebuilt from flux-db on open() so search survives restarts.
+#  - filesystem = ingest_file/ingest_dir turn files into HistoryEntry rows.
+
+[dependencies]
+flux-db = { path = "../flux-db" }
+flux-search = { path = "../flux-search" }
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

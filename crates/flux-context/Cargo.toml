@@ -1,0 +1,16 @@
+[package]
+name = "flux-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-context — measure and optimize how an AI agent spends its (1M-token) context window. Inventories every loaded context source (CLAUDE.md, the memory index, skill docs, the tool catalog, file reads, conversation) with its token cost, and computes the Context Utilization Ratio (CUR) = tokens-referenced / tokens-loaded. The optimizer flags dead weight (large + loaded + unreferenced) and recommends levers: slice the runbook, top-K the memory, digest the skill doc, or proactively resident-load a whole subsystem's source instead of Read-ing 200 lines at a time. Pairs with X-Algo: predict CUR before a task, measure after, feed back to calibrate."
+
+# Separate crate (not a fluxc-core edit) because context budgeting is a
+# cross-cutting *measurement* concern with its own data model and rubric, the
+# same way flux-glossary is data+rubric independent of flux-search. fluxc-mcp
+# will depend on it for the flux_context_audit tool; X-Algo can depend on it to
+# fold CUR into its prediction loop.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

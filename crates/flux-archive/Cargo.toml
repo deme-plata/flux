@@ -1,0 +1,14 @@
+[package]
+name = "flux-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-archive — content-addressed backup for Flux/SIGIL. snapshot a dir → BLAKE3-address every file, dedup into a store, manifest the set; restore re-materializes + VERIFIES each file's hash (a corrupt backup cannot restore wrong bytes — the integrity gate). Pairs with flux-db + chronos; the backup half of flux-aether's content-addressing."
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "flux-archive-cli"
+path = "src/bin/flux-archive-cli.rs"

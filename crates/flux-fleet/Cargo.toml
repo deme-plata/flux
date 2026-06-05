@@ -1,0 +1,18 @@
+[package]
+name = "flux-fleet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-fleet — discover your machines from the SSH keys you already have, then (with confirmation) spread Flux across them over the flux-p2p mesh. Verify-don't-trust: every line is a fact it just checked. Dependency-light (std + serde_json) so it builds warm."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# flux:// content addressing — artifacts + command results are named by blake3,
+# so installs are content-verified (verify-don't-trust) and the run-cache is
+# proof-addressed.
+blake3     = "1"
+
+[[bin]]
+name = "flux-fleet"
+path = "src/main.rs"

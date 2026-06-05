@@ -1,0 +1,25 @@
+    Checking fluxc-gemma v0.9.16 (/home/storage/deepseek-codewhale/flux/crates/fluxc-gemma)
+error: expected one of `.`, `;`, `?`, `}`, or an operator, found doc comment `/// Automated Dev Interview — Gemma4 reflects post-commit`
+   --> crates/fluxc-gemma/src/lib.rs:118:1
+    |
+116 |     serde_json::json!({"code":output,"gen_conf":gen.confidence,"review_conf":review.confidence,"cascade":cascade,"deepseek_needed":ds,"cost":if ds{"~$0.0003"}else{"$0.00"}})
+    |                                                                                                                                                                              - expected one of `.`, `;`, `?`, `}`, or an operator
+117 |
+118 | /// Automated Dev Interview — Gemma4 reflects post-commit
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unexpected token
+    |
+help: add a space before the last `/` to write a regular comment
+    |
+118 | // / Automated Dev Interview — Gemma4 reflects post-commit
+    |   +
+
+warning: unused variable: `gemma_cost`
+  --> crates/fluxc-gemma/src/lib.rs:89:9
+   |
+89 |     let gemma_cost = 0.0; // FREE
+   |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gemma_cost`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fluxc-gemma` (lib) generated 1 warning
+error: could not compile `fluxc-gemma` (lib) due to 1 previous error; 1 warning emitted

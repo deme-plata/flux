@@ -1,0 +1,21 @@
+# Agentic-money boilerplates for Flux dev — an ISOLATED nested workspace.
+# The parent flux workspace globs only `crates/*`, and this `[workspace]` block
+# makes this dir its own workspace root, so forking/building these templates
+# never touches the main build.
+#
+# Build everything:   fluxc build         (run from this directory)
+# Build one template:  fluxc build -p safe-trader
+[workspace]
+resolver = "2"
+members = ["kit", "safe-trader", "wallet-onboard", "webhook-agent", "llm-trader"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+agentic-money-kit = { path = "kit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"

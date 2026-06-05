@@ -1,0 +1,27 @@
+[package]
+name = "flux-legacy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# flux-legacy — point flux's refactor/combo powers at an arbitrary LEGACY cargo workspace
+# (e.g. the 101-crate Quillon Graph node), not just the flux dogfood tree.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# reused for god-file module-split suggestions (LEGACY-2 plan lane)
+flux-refactor = { path = "../flux-refactor" }
+# the flux architecture lens (cohesion/coupling/entropy/test-coverage scores) applied to the
+# brownfield repo — wired via enrich.rs so flux-legacy isn't an island.
+fluxc-core = { path = "../fluxc-core" }
+# token-budget math (est_tokens, ContextBudget, 1M window) — context.rs packs the highest-value
+# Quillon code into a 1M-token bundle for DeepSeek / Claude to analyze.
+flux-context = { path = "../flux-context" }
+# ask.rs — send the 1M corpus to DeepSeek v4's long-context API. rustls (self-contained TLS) so the
+# dogfood build needs no system libssl.
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[[bin]]
+name = "flux-legacy"
+path = "src/bin/flux-legacy.rs"

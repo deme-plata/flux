@@ -1,0 +1,78 @@
+{
+  "version": "1.0",
+  "purpose": "DeepSeek orchestrator combo registry — the CORRECT MCP-combo prompts to dispatch to worker agents. One lane = one pit-stop choreography, never single-step fumbles.",
+  "rules": [
+    "LANE-LOCK FIRST: the agent must flux_swarm_claim before editing. Claiming after = dup-work collision.",
+    "CHECK BEFORE BUILD: flux_swarm_status + flux_swarm_inbox first, so two agents don't build the same crate.",
+    "COMBO, DON'T SINGLE-STEP: flux_combo does compile+test+predict in ONE call. Never run them separately.",
+    "FAIL-CLOSED ON MONEY: a trade settles only on 2-of-2 debate SETTLE. Unparseable auditor = VETO.",
+    "GATED COMPUTE: never auto-rent. search_offers, surface to operator, operator triggers create_instance.",
+    "SHIP -> SETTLE -> BROADCAST: flux_swarm_complete to settle QUG, then flux_swarm_message so siblings reuse, not rebuild.",
+    "GUARD TEARDOWN: may_destroy(agent,id) before destroy_instance. A box may be a sibling's lane."
+  ],
+  "lanes": {
+    "BUILD": {
+      "when": "scaffold/edit/fix a Rust crate in the Flux or SIGIL workspace",
+      "combo": [
+        "flux_swarm_register {agent}",
+        "flux_swarm_claim {lane}",
+        "flux_architect_predict {crate}   # predict cold-build cost BEFORE scaffolding (avoid OOM/surprise)",
+        "flux_combo {file}                # compile+test+predict in ONE call",
+        "IF errors: flux_qspec {error}  ->  apply fix  ->  flux_combo (re-verify ZERO)",
+        "flux_swarm_complete {lane}       # settle QUG",
+        "flux_swarm_message {broadcast what you shipped}"
+      ],
+      "antipattern": "flux_compile then flux_test as two calls; editing before claiming; skipping predict and OOMing the linker."
+    },
+    "UI_DEPLOY": {
+      "when": "deploy or change a browser-facing surface in dist-final",
+      "combo": [
+        "flux_ui_list                     # see what's already live, don't edit the stale dev mirror",
+        "flux_ui_read {file}              # production state, not your working copy",
+        "edit content in memory",
+        "flux_ui_deploy {file, content}   # atomic overwrite, returns cache-busted ?v= URL",
+        "hand the ?v= URL to the human"
+      ],
+      "antipattern": "raw cp into dist-final (loses cache-bust -> human reloads -> sees stale page -> blames the deploy)."
+    },
+    "TRADE": {
+      "when": "any agentic-money decision (swap/send/LP)",
+      "combo": [
+        "market_scan / dex_get_quote      # live data",
+        "qwen_trade_prepare               # proposer LLM frames the trade",
+        "run_debate: independent auditor LLM + M-of-N crypto sign (flux-debate)",
+        "dex_swap ONLY on DebateOutcome::Settle, else log the VETO and stop"
+      ],
+      "antipattern": "single greedy proposer with money tools (it picks the MOON honeypot -> 95% loss). No auditor = no trade."
+    },
+    "BENCH": {
+      "when": "measure throughput/latency/delivery (chronos, p2p, swarm)",
+      "combo": [
+        "flux_architect_predict + flux_heatmap   # predict before running",
+        "flux_combo / megaflood / chronos_run     # run the real benchmark",
+        "flux_bench / flux_bench_report           # capture numbers from a FILE, never assert them",
+        "flux_feedback {predicted, actual}        # calibrate the predictor"
+      ],
+      "antipattern": "quoting test counts or bench numbers before the op ran and output was read from a file."
+    },
+    "COMPUTE": {
+      "when": "need a GPU/CPU box for LLM serving or heavy compile",
+      "combo": [
+        "search_offers                    # REST; surface offers to operator",
+        "(OPERATOR triggers) create_instance with onstart ollama serve, OLLAMA_HOST=0.0.0.0",
+        "register_box {agent, id}         # box_registry so no teardown collision",
+        "... do the work ...",
+        "may_destroy(agent, id)  ->  destroy_instance"
+      ],
+      "antipattern": "auto-renting (Viktor rejected this); create_instance leaks server-side even on a shown 'reject' -> always show_instances + destroy leaks."
+    },
+    "ZK": {
+      "when": "prove/verify a SIGIL tip or batch",
+      "combo": [
+        "flux_zk_combo / flux_zk_verify_10ms",
+        "flux_zk_pq_status                # confirm post-quantum + O(1)-verify path"
+      ],
+      "antipattern": "treating ZK as a throughput lever; it is a verify/light-client lever (prove() caps below ed25519)."
+    }
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "flux-glossary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-glossary — a query-expansion glossary for the flux-search web crawler over flux-p2p. Maps each term to its synonyms / abbreviations / domain variants so a crawl query for 'k8s' also matches 'kubernetes', 'zk' matches 'zero-knowledge', etc. Plus an AGORA bonus-scoring function: a contributed glossary is graded objectively (coverage, symmetry, no self-loops, no over-broad fan-out) so AGORA can pay a quality-weighted bonus for good glossaries."
+
+# Why this is a separate crate, not a flux-search edit: a glossary is DATA +
+# a scoring rubric, contributed/curated independently of the engine. flux-search
+# depends on flux-glossary for expansion at query time; AGORA depends on it for
+# bonus_score(). Keeping it standalone means a community glossary contribution is
+# a small, reviewable, independently-versioned artifact AGORA can pay for.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

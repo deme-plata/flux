@@ -1,0 +1,21 @@
+[package]
+name = "fluxmux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FluxMux — Terminal multiplexer dashboard with ratatui. Build/P2P/Self-Heal/Stats/Journal tabs."
+
+[[bin]]
+name = "fluxmux"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.28"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+flux-macros = { path = "../flux-macros" }
+tiny_http = "0.12"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

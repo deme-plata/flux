@@ -1,0 +1,108 @@
+// flux-deck v0.13 — the PLAN · CONQUER · MASTER cockpit.
+// Not three tabs: three persistent zones bound to ONE FluxState (the useState block below).
+//   PLAN  (left)   — goal posts, plan board, the architect; emits ArchitectureDelta → CONQUER
+//   CONQUER (center)— 4 Claude Code lanes + GPU-market ticker; streams results → MASTER
+//   MASTER (right) — live chain/box/agent status + the TWO-MIND money gate + deploy/pause
+// "The Pulse" (▶) fires a no-click showcase: PLAN draws → CONQUER runs → gate goes green.
+// Every field here is set from Rust (main.rs) so the zones fill with live feeds.
+export function FluxDeck() {
+  // ── FluxState · PLAN ──────────────────────────────────────────────
+  const [plan_goals, setPlanGoals] = useState("◍ GOAL POSTS\n  ○ ship zone-shell\n  ○ wire live feeds\n  ○ The Pulse demo");
+  const [plan_board, setPlanBoard] = useState("▭ PLAN BOARD\n  arch → tasks → lanes\n  (architect idle)");
+  const [plan_agent, setPlanAgent] = useState("🧭 architect: ready — set a goal to emit an ArchitectureDelta → CONQUER");
+  // ── FluxState · CONQUER (the 4 execution lanes) ───────────────────
+  const [t1, setT1] = useState("┌─ LANE A · ORCHESTRATOR ─┐\n say hi + get going\n└─ type below ─┘");
+  const [t2, setT2] = useState("┌─ LANE B · CLAUDE CODE ─┐\n flux-dev skills\n└──────────────┘");
+  const [t3, setT3] = useState("┌─ LANE C · CLAUDE CODE ─┐\n flux-dev skills\n└──────────────┘");
+  const [t4, setT4] = useState("┌─ LANE D · CLAUDE CODE ─┐\n flux-dev skills\n└──────────────┘");
+  const [gpu_ticker, setGpuTicker] = useState("▐ GPU-MARKET ▌ idle · no compute rented · +10% red-line ready");
+  // ── FluxState · MASTER (oversight + money gate) ───────────────────
+  const [m_chains, setMChains] = useState("● CHAINS\n  SIGIL  ✓\n  Quillon ✓");
+  const [m_boxes, setMBoxes] = useState("● BOXES\n  eps ✓ beta ✓\n  delta ✓ gamma ✓");
+  const [m_agents, setMAgents] = useState("● AGENTS\n  rocky · codex\n  adrian");
+  const [m_gate, setMGate] = useState("┌ TWO-MIND GATE ┐\n 🟢 SAFE  $0.0000\n qwen→deepseek\n└──────────────┘");
+  // ── FluxState · shared chrome ─────────────────────────────────────
+  const [status, setStatus] = useState("flux-deck v0.13 — PLAN · CONQUER · MASTER cockpit");
+  const [ticker, setTicker] = useState("💬 Claude: ready — hit ▶ Pulse for the 10-second showcase");
+  const [loginlink, setLoginlink] = useState("✅ logged in · paste a token in 🔑 · browser opens automatically when Claude needs login");
+  const [master, setMaster] = useState(true);
+  const [target, setTarget] = useState(1);
+  return (
+    <vbox>
+      <hbox>
+        <button onClick={() => setMaster(!master)}>☰</button>
+        <text>⬡ FLUX DECK · PLAN · CONQUER · MASTER</text>
+        <button onClick={() => pulse()}>▶ Pulse</button>
+        <button onClick={() => autopilot()}>✅ Auto-yes</button>
+        <button onClick={() => login()}>🔑 Login</button>
+        <button onClick={() => openlink()}>🔗 Open login</button>
+        <button onClick={() => freshlogin()}>🔓 Fresh login</button>
+        <button onClick={() => updatenow()}>⬆ Update</button>
+      </hbox>
+      <hbox>
+        <text>{loginlink}</text>
+      </hbox>
+      <hbox>
+        <text>⌨ keys → Lane {target}</text>
+        <button onClick={() => setTarget(1)}>A</button>
+        <button onClick={() => setTarget(2)}>B</button>
+        <button onClick={() => setTarget(3)}>C</button>
+        <button onClick={() => setTarget(4)}>D</button>
+        <button onClick={() => navkey("up")}>↑</button>
+        <button onClick={() => navkey("down")}>↓</button>
+        <button onClick={() => navkey("enter")}>⏎ Enter</button>
+        <button onClick={() => navkey("esc")}>Esc</button>
+        <button onClick={() => navkey("yes")}>✅ Yes</button>
+        <button onClick={() => navkey("no")}>❌ No</button>
+      </hbox>
+      <hbox>
+        <vbox>
+          <text>━━ PLAN ━━</text>
+          <text>{plan_goals}</text>
+          <text>{plan_board}</text>
+          <input placeholder="new goal → emits ArchitectureDelta · Enter" onEnter={() => plannew()} />
+          <button onClick={() => plannew()}>＋ Goal post</button>
+          <text>{plan_agent}</text>
+        </vbox>
+        <keys><vbox>
+          <text>━━ CONQUER ━━</text>
+          <hbox>
+            <terminal w={520} h={300}>{t1}</terminal>
+            <terminal w={520} h={300}>{t2}</terminal>
+          </hbox>
+          <hbox>
+            <terminal w={520} h={300}>{t3}</terminal>
+            <terminal w={520} h={300}>{t4}</terminal>
+          </hbox>
+          <text>{gpu_ticker}</text>
+          <input placeholder="prompt · @2/@3/@4 to dispatch · 'all X' to fan-out · Enter" onEnter={() => shell()} />
+          <hbox>
+            <button onClick={() => upload()}>🤖 Delegate</button>
+            <button onClick={() => download()}>🔀 Fan-out</button>
+            <button onClick={() => relay()}>🧬 Relay</button>
+            <button onClick={() => heal()}>🩺 Heal</button>
+            <button onClick={() => snapshot()}>💾 Snapshot</button>
+          </hbox>
+        </vbox></keys>
+        {master && <vbox>
+          <text>━━ MASTER ━━</text>
+          <text>{m_chains}</text>
+          <text>{m_boxes}</text>
+          <text>{m_agents}</text>
+          <text>{m_gate}</text>
+          <button onClick={() => deploy()}>🚀 Deploy</button>
+          <button onClick={() => pause()}>⏸ Pause all</button>
+          <text>🔑 CLAUDE AUTH</text>
+          <input placeholder="paste OAuth token · claude setup-token · Enter" onEnter={() => login()} />
+          <button onClick={() => login()}>🔑 Re-login all</button>
+          <button onClick={() => freshlogin()}>🔓 Clear + fresh login</button>
+        </vbox>}
+      </hbox>
+      <hbox>
+        <text>{status}</text>
+        <text>{ticker}</text>
+        <text>· PLAN · CONQUER · MASTER · ▶ Pulse · ☰ MASTER · auto-yes 🏛️ gov-only 🔒 no real money · v0.13.0</text>
+      </hbox>
+    </vbox>
+  );
+}

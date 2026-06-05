@@ -1,0 +1,15 @@
+[package]
+name = "flux-advisor"
+version.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "flux-advisor — a webhook advisor on the agent's OWN comms + trading. It receives swarm-message + trading-signal events and returns concrete advice: (comms) flag fabrication risk (numbers without read-from-file), nudge to include other agents, check actionability; (trading) Carl-Runefelt action from price+sentiment+arb. Improves how the agent communicates with the swarm and how it trades — propose-only, never sends/spends for you."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+
+[[bin]]
+name = "flux-advisor"
+path = "src/bin/flux-advisor.rs"

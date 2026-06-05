@@ -1,0 +1,11 @@
+[package]
+name = "flux-keel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-keel — the keel of the Flux supercluster. Stability + robustness primitives for BOTH frontend and backend: circuit breakers (stop hammering a failing service), retry-with-exponential-backoff+jitter, and quorum health aggregation (the cluster is Up iff a quorum of nodes are Up). Time-injectable so it's deterministically testable. The structural backbone that keeps the supercluster upright under load."
+[dependencies]
+
+[[bin]]
+name="flux-keel-demo"
+path="src/bin/flux-keel-demo.rs"

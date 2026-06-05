@@ -1,0 +1,11 @@
+[package]
+name = "flux-arxiv-latex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bridge the arxiv-mcp-server (blazickjp/arxiv-mcp-server) into Flux's LaTeX/whitepaper workflow. Parses the JSON the arXiv MCP returns and emits LaTeX: BibTeX entries + a cite-ready \\section{Related Work}, all LaTeX-escaped. So `arxiv search` → drop straight into a flux-built paper (the flux-foundation/SIGIL whitepapers, fluxc cheatsheet, etc.). Headlessly testable: arXiv JSON in, valid .bib/.tex out."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

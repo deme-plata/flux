@@ -1,0 +1,21 @@
+[package]
+name = "flux-burst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FLUXBURST — trustless elastic build mesh. BURST-3: Verifiable Build Consensus (VBC) — N workers compile the same unit; quorum agreement on the artifact hash + per-worker provenance proof makes distributed compilation on stranger hardware trustless. 'Build divergence is impossible to hide' — SIGIL's exit-78 primitive applied to compilation."
+
+# FLUXFOOD: hot path stays light — blake3 + serde only. flux-p2p / SQIsign
+# bindings land in BURST-2/4, behind the worker, not in the verifier core.
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+# BURST-5 mesh demo runs the workers/coordinator on the chronos SimNode trait —
+# the SAME code runs in-memory (deterministic) and over real flux-p2p via the
+# CHRONOS-T transport adapter. flux-chronos core is light (no libp2p).
+serde_json   = { workspace = true }
+flux-chronos = { path = "../flux-chronos" }
+
+[[bin]]
+name = "burst-mesh-demo"
+path = "src/bin/burst-mesh-demo.rs"

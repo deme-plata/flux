@@ -1,0 +1,15 @@
+[package]
+name = "fluxc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fluxc"
+path = "src/main.rs"
+
+[dependencies]
+fluxc-core = { path = "../fluxc-core" }
+fluxc-mcp = { path = "../fluxc-mcp" }
+flux-graph = { path = "../flux-graph" }
+serde_json = "1"

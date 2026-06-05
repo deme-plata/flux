@@ -1,0 +1,12 @@
+[package]
+name = "flux-fcx-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-fcx as a browser WASM module — transpile_fcx() running client-side in QuillonOS (the OS terminal `fcx` command). Raw C-ABI, no wasm-bindgen: fcx_alloc + fcx_transpile(ptr,len)->packed(ptr<<32|len). First real QuillonOS Rust→WASM module."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+flux-fcx = { path = "../flux-fcx" }

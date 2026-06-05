@@ -1,0 +1,13 @@
+[package]
+name = "flux-fcx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FCX → Slint transpiler — the Vite/TS → custom-Slint bridge that lets Flux beat Electron. Author desktop UI in a constrained TSX dialect (FCX: fn component + useState + JSX tree + onClick); flux-fcx parses it to a platform-neutral UI-IR and emits .slint markup (rendered native by flux-gui, cross-compiled by fluxc). No Chromium, no bundled JS runtime. MVP = FCX-PARSE + FCX-SLINTGEN; FCX-LOGIC (QuickJS) + FCX-PACK (fluxc build --app) are follow-up lanes."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]

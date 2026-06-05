@@ -1,0 +1,20 @@
+[package]
+name = "flux-market"
+version.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "flux-market — the trading-intelligence substrate for the SIGIL bridge: a live Binance price feed, a DCA engine (Quillon q-trading-bot dca.rs, Flux-native), and an arbitrage-spread detector between Binance and on-chain wBTC/USDS. USDS is the stablecoin quote unit. Pure-logic + a thin live HTTP price client, so fluxc-mcp can wrap it as flux_market_* combos. Polymarket scanner + on-chain price wiring are follow-on modules."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# live price client — rustls (no openssl) so it stays a portable single binary.
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+[[bin]]
+name = "flux-market-demo"
+path = "src/bin/flux-market-demo.rs"
+
+[[bin]]
+name = "flux-arb-scan"
+path = "src/bin/flux-arb-scan.rs"

@@ -1,0 +1,11 @@
+[package]
+name = "flux-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-orchestrator — conduct an AI-agent ensemble like a symphony. Instruments = agents/models; the flux MCP combo plays each part (build+test+predict); the orchestrator MEASURES whether 'the music is coherent' — in time, in tune, in unison — supports solo vs tutti, and a Conductor (user OR the AI) drives the whole performance with one call. The working realization of the 'direction' idea."
+
+# FLUXFOOD-light: blake3 (artifact agreement / unison hashing) + serde only.
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }

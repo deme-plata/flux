@@ -1,0 +1,18 @@
+[package]
+name = "flux-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Record — ffmpeg-driven Claude Code session recorder. Cinematic captures, tool-call overlays, auto YouTube chapters, vertical Shorts auto-clipper, karaoke captions."
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# Tiny stdlib-only HTTP listener for the HMR control server — no extra deps.
+
+[[bin]]
+name = "flux-record"
+path = "src/main.rs"

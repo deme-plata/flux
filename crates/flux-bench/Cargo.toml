@@ -1,0 +1,25 @@
+[package]
+name = "flux-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Bench — P2P benchmark suite with adaptive profiling, SQLite history, and chaos testing"
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+parking_lot = "0.12"
+tracing = "0.1"
+
+# For the real benchmark binary
+flux-p2p = { path = "../flux-p2p" }
+libp2p = { version = "0.54", features = ["gossipsub", "request-response", "cbor"] }
+
+[[bin]]
+name = "flux-bench-p2p"
+path = "src/bin/bench_p2p.rs"

@@ -1,0 +1,10 @@
+[package]
+name = "flux-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Real-time GPU render-spec + millisecond inspection of native Flux builds: webhook-fed area events → render tiles the GPU draws → AI error-correction MCP combos per errored area."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

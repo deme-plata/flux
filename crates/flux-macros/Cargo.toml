@@ -1,0 +1,6 @@
+[package]
+name = "flux-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Macros — declarative macros for fast iteration: version_bump, hot_fn, heal_on_fail, benchmark"

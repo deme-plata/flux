@@ -1,0 +1,24 @@
+[package]
+name = "flux-game-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Game-event sink for flux-arena. Accepts POSTs on /v1/game, appends each event as one JSONL line to a configurable path. Used as the persistent log behind the live mid-match play-by-play in Claude / Garden / any tail-based consumer."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "signal", "fs", "time"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "test-util", "fs"] }
+tempfile = "3"
+
+[[bin]]
+name = "flux-game-log"
+path = "src/main.rs"

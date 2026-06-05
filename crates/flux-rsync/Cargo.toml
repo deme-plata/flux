@@ -1,0 +1,12 @@
+[package]
+name = "flux-rsync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-rsync — a better rsync. Content-addressed (BLAKE3) batch copy/sync: skip files whose content hash already matches at dest (true dedup, not mtime/size guessing), VERIFY every copied file hashes correctly, parallel across files, streaming for large files. The file-level twin of turbo-sync's block-level batch sync; MCP-controllable with webhooks for AI-driven large copies."
+[dependencies]
+blake3 = { workspace = true }
+
+[[bin]]
+name="flux-rsync"
+path="src/bin/flux-rsync.rs"

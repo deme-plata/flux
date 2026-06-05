@@ -1,0 +1,22 @@
+[package]
+name = "flux-vite-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "fluxc visual dev engine for Vite + TypeScript + React projects. Spawns vite as a child process, parses HMR + transform events from stdout, exposes a typed event stream + state snapshot suitable for the vite-garden.html surface."
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[example]]
+name = "attach"
+path = "examples/attach.rs"

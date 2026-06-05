@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Flux AI Cursor — QuillonOS</title>
+<style>
+:root{--bg:#0a0e14;--fg:#c9d1d9;--accent:#06b6d4;--gold:#d4af37;--green:#00ff88;--red:#ff4444;--card:#111820;--border:#1e293b}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--fg);height:100vh;overflow:hidden}
+#desktop{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at center,#1a1040 0%,#0a0a1a 70%)}
+#cursor{position:absolute;width:24px;height:24px;pointer-events:none;z-index:9999;transition:all .3s cubic-bezier(.4,0,.2,1)}
+#cursor svg{filter:drop-shadow(0 0 8px rgba(6,182,212,.6))}
+#trail{position:absolute;pointer-events:none;z-index:9998}
+#log{position:absolute;bottom:40px;left:10px;right:10px;background:rgba(17,24,32,.95);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:120px;overflow-y:auto;font-size:10px;color:#8b949e}
+#log .entry{padding:2px 0;border-bottom:1px solid rgba(30,41,59,.3)}
+#log .entry .cmd{color:var(--accent)}#log .entry .ok{color:var(--green)}#log .entry .err{color:var(--red)}
+#toolbar{position:absolute;top:10px;left:10px;right:10px;display:flex;gap:8px;z-index:10}
+#toolbar button{background:var(--card);border:1px solid var(--border);color:var(--fg);padding:6px 14px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:11px}
+#toolbar button:hover{background:var(--accent);color:#000}
+#toolbar .path{flex:1;background:var(--card);border:1px solid var(--border);color:var(--accent);padding:6px 12px;border-radius:4px;font-size:11px;display:flex;align-items:center}
+.ide-window{position:absolute;background:var(--card);border:1px solid var(--border);border-radius:8px;min-width:400px;min-height:300px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.ide-title{background:#1a2332;padding:6px 12px;border-radius:8px 8px 0 0;font-size:10px;color:#8b949e;display:flex;justify-content:space-between}
+.ide-content{padding:12px;font-size:11px;color:var(--fg);max-height:300px;overflow-y:auto;white-space:pre-wrap;font-family:monospace}
+.ide-content .line{color:#6b7280;margin-right:8px;user-select:none}
+.ide-content .keyword{color:var(--accent)}.ide-content .string{color:var(--green)}.ide-content .comment{color:#484f58}
+#status{position:absolute;top:10px;right:10px;background:var(--card);border:1px solid var(--border);padding:8px 14px;border-radius:4px;font-size:10px;z-index:10}
+#status .agent{color:var(--accent)}#status .mode{color:var(--gold)}
+</style></head><body>
+<div id="desktop">
+<div id="trail"><svg width="100%" height="100%"></svg></div>
+<div id="cursor"><svg width="24" height="24" viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-4 6-4-16z" fill="#06b6d4" stroke="#d4af37" stroke-width="1"/></svg></div>
+<div id="toolbar">
+<button onclick="runMCP('compile')">⚡ Compile</button>
+<button onclick="runMCP('test')">🧪 Test</button>
+<button onclick="runMCP('deploy')">🚀 Deploy</button>
+<button onclick="runMCP('search')">🔍 Search</button>
+<button onclick="runMCP('wallet')">👛 Wallet</button>
+<button onclick="runMCP('git')">🔀 Git</button>
+<div class="path" id="path">~/flux/crates/fluxc/src/main.rs</div>
+</div>
+<div id="status"><span class="agent">🤖 DeepSeek V4</span> · <span class="mode" id="mode">IDLE</span> · <span id="pos">x:0 y:0</span></div>
+<div class="ide-window" id="ide" style="top:80px;left:50%;transform:translateX(-50%)">
+<div class="ide-title">📝 Flux IDE — agentic-money-ai-cursor.rs <span style="color:var(--green)">● MCP Connected</span></div>
+<div class="ide-content" id="code">
+<span class="line"> 1</span> <span class="comment">// Agentic Money AI Cursor — QuillonOS MCP Controller</span>
+<span class="line"> 2</span> <span class="comment">// Built with Flux · flux builds flux</span>
+<span class="line"> 3</span> 
+<span class="line"> 4</span> <span class="keyword">use</span> flux_mcp::<span class="string">{Cursor, Navigation, IDE}</span>;
+<span class="line"> 5</span> 
+<span class="line"> 6</span> <span class="keyword">pub struct</span> AgenticCursor {
+<span class="line"> 7</span>     position: (f64, f64),
+<span class="line"> 8</span>     target: (f64, f64),
+<span class="line"> 9</span>     trail: Vec<(f64, f64)>,
+<span class="line">10</span>     mode: CursorMode,
+<span class="line">11</span> }
+<span class="line">12</span> 
+<span class="line">13</span> <span class="keyword">impl</span> AgenticCursor {
+<span class="line">14</span>     <span class="keyword">fn</span> navigate_to(&<span class="keyword">mut</span> self, x: f64, y: f64) {
+<span class="line">15</span>         self.target = (x, y);
+<span class="line">16</span>         self.trail.push((x, y));
+<span class="line">17</span>     }
+<span class="line">18</span> }
+</div></div>
+<div id="log"></div>
+</div>
+<script>
+var cursor=document.getElementById('cursor'),trailSvg=document.getElementById('trail').querySelector('svg'),
+pos={x:400,y:300},target={x:400,y:300},trail=[],maxTrail=30,mode='IDLE',path='~/flux/crates/fluxc/src/main.rs';
+var waypoints=[
+{x:200,y:200,label:'compile'},{x:600,y:150,label:'test'},{x:500,y:400,label:'deploy'},
+{x:300,y:350,label:'search'},{x:150,y:500,label:'wallet'},{x:650,y:450,label:'git'},
+{x:400,y:250,label:'code'},{x:550,y:300,label:'build'}
+];
+function log(cmd,status,msg){
+var l=document.getElementById('log'),d=document.createElement('div');
+d.className='entry';d.innerHTML='<span class="cmd">'+cmd+'</span> <span class="'+(status==='ok'?'ok':'err')+'">'+(status==='ok'?'✓':'✗')+'</span> '+msg;
+l.appendChild(d);if(l.children.length>50)l.removeChild(l.firstChild);l.scrollTop=l.scrollHeight;
+}
+function moveTo(x,y,speed){
+target.x=x;target.y=y;mode='MOVING';
+document.getElementById('mode').textContent='MOVING';
+document.getElementById('pos').textContent='x:'+Math.round(x)+' y:'+Math.round(y);
+setTimeout(function(){mode='IDLE';document.getElementById('mode').textContent='IDLE'},speed||800);
+}
+function runMCP(cmd){
+var wp=waypoints[Math.floor(Math.random()*waypoints.length)];
+moveTo(wp.x,wp.y,600);
+setTimeout(function(){
+switch(cmd){
+case'compile':log('flux_compile','ok','Built fluxc in 0.38s (cache hit)');path='~/flux/crates/fluxc/src/main.rs';break;
+case'test':log('flux_test','ok','19/19 tests pass');break;
+case'deploy':log('flux_deploy','ok','Deployed to quillon.xyz in 0.5s');break;
+case'search':log('flux_search','ok','Query: agentic money — 42 results in 1ms');break;
+case'wallet':log('wallet_balance','ok','Balance: 1,015.42 QUG');break;
+case'git':log('git_commit','ok','flux: agentic cursor module');break;
+default:log('mcp','ok','MCP command: '+cmd);
+}
+document.getElementById('path').textContent=path;
+},400);
+}
+// Auto-demo
+var demoIdx=0;
+function autoDemo(){
+var cmds=['compile','test','search','wallet','compile','deploy','git'];
+runMCP(cmds[demoIdx%cmds.length]);demoIdx++;
+setTimeout(autoDemo,3000+Math.random()*2000);
+}
+// Animate
+function animate(){
+pos.x+=(target.x-pos.x)*0.08;pos.y+=(target.y-pos.y)*0.08;
+cursor.style.left=(pos.x-12)+'px';cursor.style.top=(pos.y-12)+'px';
+trail.push({x:pos.x,y:pos.y});if(trail.length>maxTrail)trail.shift();
+var pts=trail.map(function(p){return p.x+','+p.y}).join(' ');
+var poly=document.createElementNS('http://www.w3.org/2000/svg','polyline');
+poly.setAttribute('points',pts);poly.setAttribute('stroke','rgba(6,182,212,0.3)');poly.setAttribute('fill','none');poly.setAttribute('stroke-width','2');
+trailSvg.innerHTML='';trailSvg.appendChild(poly);
+requestAnimationFrame(animate);
+}
+function resize(){trailSvg.setAttribute('width',window.innerWidth);trailSvg.setAttribute('height',window.innerHeight)}
+window.onresize=resize;resize();animate();autoDemo();
+log('mcp_init','ok','Agentic Money AI Cursor v0.1.0 — QuillonOS MCP Controller');
+log('flux_connect','ok','Connected to fluxc serve on :8084');
+log('wallet_connect','ok','Quillon wallet: 1,015.42 QUG');
+</script>
+</body></html>

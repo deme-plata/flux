@@ -1,0 +1,23 @@
+[package]
+name = "flux-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux-driven LaTeX project reports — wires version/swarm/SAP state into the Q-NarwhalKnight visual template + AI-assisted source digests."
+
+[lib]
+name = "flux_report"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flux-report"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+walkdir = "2"
+fluxc-core = { path = "../fluxc-core" }
+flux-graph = { path = "../flux-graph" }
+flux-ai = { path = "../flux-ai" }

@@ -1,0 +1,11 @@
+[package]
+name = "flux-sniff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Sniff — tshark-based network diagnostics for P2P mesh, latency, and bandwidth profiling"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"

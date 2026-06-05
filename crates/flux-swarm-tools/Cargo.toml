@@ -1,0 +1,11 @@
+[package]
+name = "flux-swarm-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Atomic-file swarm coordination layer: file-level claims, cross-process locking, append-only activity log."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"

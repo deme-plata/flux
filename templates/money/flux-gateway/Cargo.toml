@@ -1,0 +1,8 @@
+[package]
+name = "flux-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flux-money-kit = { workspace = true }

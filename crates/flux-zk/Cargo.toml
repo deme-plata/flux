@@ -1,0 +1,33 @@
+[package]
+name = "flux-zk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux ZK — umbrella for the post-quantum verifier stack. Classic Dilithium+Merkle stays default; opt into vendored STARK/SNARK/Lattice/Recursive verifiers via the `pq` feature."
+
+[features]
+default = []
+# Pulls in the heavy vendored verifier closure (wgpu, ark-ec, ark-poly, etc).
+# When off, flux-zk stays the lightweight Dilithium + simplified-Merkle path it has always been.
+pq = [
+    "dep:flux-zk-stark",
+    "dep:flux-lattice-guard",
+    "dep:flux-recursive-proofs",
+    "dep:flux-tip-proof-stir",
+    "dep:flux-zk-types",
+]
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+rayon = "1"
+
+# Vendored Quillon Graph ZK stack — opt-in via the `pq` feature.
+flux-zk-stark = { path = "../flux-zk-stark", optional = true }
+flux-lattice-guard = { path = "../flux-lattice-guard", optional = true }
+flux-recursive-proofs = { path = "../flux-recursive-proofs", optional = true, default-features = false }
+flux-tip-proof-stir = { path = "../flux-tip-proof-stir", optional = true }
+flux-zk-types = { path = "../flux-zk-types", optional = true }

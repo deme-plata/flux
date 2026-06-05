@@ -1,0 +1,35 @@
+[Unit]
+Description=Flux Benchdog — Periodic Benchmark Runner
+Documentation=https://quillon.xyz/dashboard.html
+After=fluxc-serve.service
+Wants=fluxc-serve.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/storage/deepseek-codewhale/flux/target/debug/fluxc self
+WorkingDirectory=/home/storage/deepseek-codewhale/flux
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fluxc-benchdog
+
+# Post-benchmark: push results to SSE bridge
+ExecStartPost=/bin/bash -c 'curl -s -X POST http://localhost:8084/api/build_event -H "Content-Type: application/json" -d "{\"builds\":$(journalctl -u fluxc-benchdog --no-pager -n 5 -o cat | grep -c "complete"),\"cache_hits\":0,\"cache_misses\":0}" || true'
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=75%
+TasksMax=64
+
+# Environment
+Environment=RUST_LOG=info
+Environment=FLUXC_WRAPPING=0
+
+# Security
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/storage/deepseek-codewhale/flux/target
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

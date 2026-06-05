@@ -1,0 +1,64 @@
+// crush.fcx — Flux Crush (homage v1). Charm's Crush TUI ported into flux .fcx → native Slint app.
+// Monochrome for now: flux .fcx has no color styling yet — the Charm palette (pink/violet, rounded
+// borders, the splash glow) lands in v2 once the .fcx→Slint compiler gains styling. This v1 captures
+// the LAYOUT: splash wordmark, chat transcript, session sidebar, message box, status bar.
+// Authored like Vite/TS; `fcx pack` + `fluxc build` cross-build it to a native ~3.6MB .exe. No Electron.
+
+export function Splash() {
+  return (
+    <vbox>
+      <text> </text>
+      <text>   ╔═╗ ╦═╗ ╦ ╦ ╔═╗ ╦ ╦</text>
+      <text>   ║   ╠╦╝ ║ ║ ╚═╗ ╠═╣      C R U S H   ·   on Flux</text>
+      <text>   ╚═╝ ╩╚═ ╚═╝ ╚═╝ ╩ ╩      glamorous AI coding — native, no Electron</text>
+      <text> </text>
+    </vbox>
+  );
+}
+
+export function Sidebar() {
+  return (
+    <vbox>
+      <text>┌─ SESSION ────────────┐</text>
+      <text>│ model    gemma4:latest │</text>
+      <text>│ cwd      ~/flux         │</text>
+      <text>│ mcp      2 servers   ● │</text>
+      <text>│ skills   flux-dev    ● │</text>
+      <text>│ tokens   0 / 8192      │</text>
+      <text>└────────────────────────┘</text>
+    </vbox>
+  );
+}
+
+export function App() {
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState([
+    "◆ crush   Ready. Tell me what to build.",
+    "›  you    port crush to flux",
+    "◆ crush   Scaffolded a native Slint app — looks just like home.",
+  ]);
+  return (
+    <vbox>
+      <Splash/>
+      <text>────────────────────────────────────────────────────────────────</text>
+      <hbox>
+        <vbox>
+          {lines.map(m => <text>{m}</text>)}
+          {busy && <text>◆ crush   thinking on gemma4 … ⠋⠙⠹⠸</text>}
+        </vbox>
+        <Sidebar/>
+      </hbox>
+      <text> </text>
+      <text>┌─ message ──────────────────────────────────────────────────────┐</text>
+      <hbox>
+        <text>│ › </text>
+        <input placeholder="ask crush anything…"/>
+      </hbox>
+      <text>└─────────────────────────────────────────────────────────────────┘</text>
+      <hbox>
+        <button onClick={() => setBusy(!busy)}>⏎ send</button>
+        <text>    gemma4:latest · local · $0     ⌘K commands     ⊞ MCP     esc quit</text>
+      </hbox>
+    </vbox>
+  );
+}

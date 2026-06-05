@@ -1,0 +1,35 @@
+[Unit]
+Description=Flux Serve — HTTP + SSE Dashboard (port 8084)
+Documentation=https://quillon.xyz/dashboard.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/storage/deepseek-codewhale/flux/target/debug/fluxc serve
+WorkingDirectory=/home/storage/deepseek-codewhale/flux
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fluxc-serve
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=32
+
+# Environment
+Environment=RUST_LOG=info
+
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/storage/deepseek-codewhale/flux/target
+ReadWritePaths=/home/orobit/q-narwhalknight/dist-final
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

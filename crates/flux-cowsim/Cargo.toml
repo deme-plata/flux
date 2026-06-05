@@ -1,0 +1,12 @@
+[package]
+name = "flux-cowsim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "flux-cowsim"
+path = "src/bin/flux-cowsim.rs"

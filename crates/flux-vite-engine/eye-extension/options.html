@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Flux Eye — settings</title>
+  <style>
+    body { max-width: 480px; margin: 40px auto; padding: 24px; font-family: -apple-system, system-ui, sans-serif;
+           background: linear-gradient(180deg, #1a1428, #0a0a0f); color: #e2e8f0; }
+    h1 { font-size: 16px; letter-spacing: 0.14em; text-transform: uppercase; color: #c084fc; font-weight: 700; }
+    h1 .em { color: #fbbf24; }
+    label { display: block; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+            color: #94a3b8; font-weight: 700; margin: 18px 0 6px; }
+    input { width: 100%; padding: 10px 12px; background: rgba(2,6,23,0.55); border: 1px solid rgba(139,92,246,0.30);
+            border-radius: 8px; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: 0; }
+    input:focus { border-color: #c084fc; box-shadow: 0 0 0 3px rgba(192,132,252,0.18); }
+    .btn { padding: 11px 18px; background: linear-gradient(135deg, #fbbf24, #d97706); color: #0a0a0f;
+           border: 0; border-radius: 8px; font-weight: 700; font-size: 11px; letter-spacing: 0.12em;
+           text-transform: uppercase; cursor: pointer; margin-top: 18px; }
+    .hint { font-size: 11px; color: #64748b; margin-top: 14px; line-height: 1.6; }
+    .status { margin-top: 18px; padding: 10px 14px; border-radius: 8px; font-size: 11px; display: none; }
+    .status.show { display: block; }
+    .status.ok { background: rgba(74,222,128,0.10); border: 1px solid rgba(74,222,128,0.30); color: #4ade80; }
+    .status.no { background: rgba(244,63,94,0.10); border: 1px solid rgba(244,63,94,0.30); color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>👁 Flux <span class="em">Eye</span> · Settings</h1>
+  <label>Dev host (no trailing slash)</label>
+  <input id="host" placeholder="http://89.149.241.126:9789" />
+  <label>Token (required — server binds 0.0.0.0 with auth)</label>
+  <input id="token" placeholder="paste SIGIL_EYE_TOKEN" />
+  <button class="btn" id="save">save + test</button>
+  <div class="status" id="status"></div>
+  <div class="hint">
+    Default: <code>http://89.149.241.126:9789</code> (Epsilon).<br>
+    Override if running the eye-server elsewhere. Use <code>http://127.0.0.1:9789</code> if you tunnel via SSH.
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

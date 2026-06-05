@@ -1,0 +1,23 @@
+[package]
+name = "quillonos-coreutils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal POSIX-shaped utilities for QuillonOS browser userspace. Compiled with fluxc to wasm32-wasip1 and loaded into quillon.xyz/os.html via a small WASI shim."
+
+# Each bin is a single-file WASI binary. The browser loads exactly one
+# .wasm per command. Keep deps minimal — every kilobyte ships across the
+# wire on first boot.
+[dependencies]
+
+[[bin]]
+name = "echo"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+
+[[bin]]
+name = "pwd"
+path = "src/bin/pwd.rs"

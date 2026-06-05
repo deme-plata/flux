@@ -1,0 +1,11 @@
+[package]
+name = "flux-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux GPU — Native GPU compute. Vera/Nvidia/AMD/CPU. AI-callable via MCP."
+
+[dependencies]
+blake3 = "1"
+num_cpus = "1"
+rayon = "1"

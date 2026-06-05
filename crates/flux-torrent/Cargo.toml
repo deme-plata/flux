@@ -1,0 +1,14 @@
+[package]
+name = "flux-torrent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-torrent — distribute flux-aether files as BitTorrent. A FileBlock's content-addressed shards ARE torrent pieces; the FileBlock is the magnet/info. Music in aether is available ONLY through torrent download: fetch K encrypted shards from the swarm (DHT/peers), then decrypt+reassemble (you need the FileBlock + key). Wraps the ZenTorrent Rust engine (DHT/peer/piece/streaming) on Beta as the transport."
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+flux-aether = { path = "../flux-aether" }
+
+[[bin]]
+name = "flux-aether-magnet"
+path = "src/bin/flux-aether-magnet.rs"

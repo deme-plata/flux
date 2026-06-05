@@ -1,0 +1,23 @@
+[package]
+name = "flux-moe"
+version.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "flux-moe — the Flux-native 'hybrid LLM'. You can't weight-merge Qwen and Gemma (different architectures/tokenizers), so the Flux way is a MIXTURE-OF-MODELS ROUTER: treat each model as an expert, classify the prompt, route to the best expert (or ENSEMBLE two for high-stakes), all over the distributed swarm (Ollama). The combo pattern applied to models: one call = classify → route → generate. Dogfooded, composable, runs on what you already have."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+[[bin]]
+name = "flux-moe"
+path = "src/bin/flux-moe.rs"
+
+[[bin]]
+name = "flux-hundred"
+path = "src/bin/flux-hundred.rs"
+
+[[bin]]
+name = "flux-twomind"
+path = "src/bin/flux-twomind.rs"

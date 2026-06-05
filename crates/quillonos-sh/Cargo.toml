@@ -1,0 +1,12 @@
+[package]
+name = "quillonos-sh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuillonOS shell: minimal interactive REPL that parses a single argv-line command and prints its dispatch plan. The host JS shim actually invokes the resolved wasm module (echo/cat/pwd/…)."
+
+[dependencies]
+
+[[bin]]
+name = "sh"
+path = "src/main.rs"

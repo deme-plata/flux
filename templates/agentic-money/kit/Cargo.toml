@@ -1,0 +1,11 @@
+[package]
+name = "agentic-money-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable primitives for building agentic-money agents on Flux/SIGIL: Verified Execution Gate, std-only RPC, local-seed wallet bootstrap, LLM tool-call decide."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }

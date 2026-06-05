@@ -1,0 +1,23 @@
+⚡ Flux Phase 2 build — cargo-less (flux-graph + direct rustc)
+  Workspace: 23 crates in /home/storage/deepseek-codewhale/flux root
+  Build order: 6 batch(es)
+    Batch 1: 13 crate(s) — flux-gui, flux-zk, flux-science, flux-search, flux-hotswap, flux-qug, flux-gpu, flux-macros, flux-p2p, flux-cache, fluxc-gemma, flux-sniff, flux-db
+    Batch 2: 6 crate(s) — fluxmux, flux-bench, flux-driver, flux-graph, flux-mempool, flux-self-heal
+    Batch 3: 1 crate(s) — fluxc-core
+    Batch 4: 1 crate(s) — flux-refactor
+    Batch 5: 1 crate(s) — fluxc-mcp
+    Batch 6: 1 crate(s) — fluxc
+  ✗ rustc flux-gui failed with exit Some(1)
+  ✗ rustc flux-zk failed with exit Some(1)
+  ✗ rustc flux-science failed with exit Some(1)
+  ✗ rustc flux-search failed with exit Some(1)
+  ✗ rustc flux-hotswap failed with exit Some(1)
+  ✗ rustc flux-qug failed with exit Some(1)
+  ✗ rustc flux-gpu failed with exit Some(1)
+  ✗ rustc flux-macros failed with exit Some(1)
+  ✗ rustc flux-p2p failed with exit Some(1)
+  ✗ rustc flux-cache failed with exit Some(1)
+  ✗ rustc fluxc-gemma failed with exit Some(1)
+  ✗ rustc flux-sniff failed with exit Some(1)
+  ✗ rustc flux-db failed with exit Some(1)
+  Build failed. Stopping.

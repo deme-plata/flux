@@ -1,0 +1,30 @@
+[package]
+name = "flux-email"
+version.workspace = true
+edition.workspace = true
+description = "Substrate email subsystem for Flux chains. Outbound transactional (EmailSender trait + lettre-backed relay) ships in the EMAIL-A scaffold; inbound MX (SMTP server + outbound MTA + wallet-keyed AUTH + DKIM signing) lifted from Quillon's email_smtp.rs/email_mta.rs lands in EMAIL-F/G/H. Privacy-safe default: all opt-in."
+
+# Phase 0 (EMAIL-A) shipped: trait + RelaySender + InMemorySender + EmailEvent
+# enum + render templates. Compiles green, 11 tests pass.
+#
+# Phase 1 (EMAIL-F + EMAIL-G + EMAIL-H, deferred): inbound SMTP server on
+# :25/:587 with STARTTLS, outbound MTA delivery loop with MX resolution +
+# relay fallback, wallet-keyed AUTH PLAIN/LOGIN via SQIsign challenge,
+# DKIM/SPF/DMARC discipline. Spec: ../docs/flux-email-spec.md.
+
+[dependencies]
+serde     = { version = "1", features = ["derive"] }
+thiserror = { workspace = true }
+
+# lettre 0.11 is pure-Rust SMTP client + STARTTLS via native-tls. Used by
+# RelaySender for outbound. Default features off + selected back on so the
+# binary stays slim — no async runtime forced on consumers that don't need it.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "rustls-tls",
+    "builder",
+    "hostname",
+] }
+
+[dev-dependencies]
+serde_json = "1"

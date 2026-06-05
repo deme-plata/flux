@@ -1,0 +1,14 @@
+[package]
+name = "flux-agent-trade"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flux-trade = { path = "../flux-trade" }
+flux-0x = { path = "../flux-0x" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "flux-agent-trade"
+path = "src/bin/flux-agent-trade.rs"

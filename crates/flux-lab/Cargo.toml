@@ -1,0 +1,7 @@
+[package]
+name = "flux-lab"
+version.workspace = true
+edition.workspace = true
+description = "deepseek-r1:70b's iterative Flux dev sandbox — FLUXFOOD fast-compile loop"
+
+[dependencies]

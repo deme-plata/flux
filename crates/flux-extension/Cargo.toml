@@ -1,0 +1,8 @@
+[package]
+name = "flux-extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-extension — the scaffold-chain engine: generate a complete Flux-native sibling-chain workspace (net/header/chronos/node) from a name + params. The code behind `fluxc scaffold-chain` / the flux_chain_template MCP tool. Pure std (string substitution over templates modeled on the live sigil-* crates)."
+
+[dependencies]

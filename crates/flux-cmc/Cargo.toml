@@ -1,0 +1,14 @@
+[package]
+name = "flux-cmc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flux-api = { path = "../flux-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[[bin]]
+name = "flux-cmc"
+path = "src/bin/flux-cmc.rs"

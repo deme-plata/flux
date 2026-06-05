@@ -1,0 +1,32 @@
+[package]
+name = "fluxc-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fluxc-core = { path = "../fluxc-core" }
+flux-context = { path = "../flux-context" }
+flux-legacy = { path = "../flux-legacy" }
+flux-extension = { path = "../flux-extension" }
+flux-archive = { path = "../flux-archive" }
+flux-swarm-tools = { path = "../flux-swarm-tools" }
+flux-search = { path = "../flux-search" }
+flux-gpu = { path = "../flux-gpu" }
+flux-gpu-market = { path = "../flux-gpu-market" }
+flux-0x = { path = "../flux-0x" }
+flux-zk = { path = "../flux-zk", features = ["pq"] }
+flux-sniff = { path = "../flux-sniff" }
+flux-refactor = { path = "../flux-refactor" }
+flux-bench = { path = "../flux-bench" }
+flux-sqisign = { path = "../flux-sqisign" }
+flux-api = { path = "../flux-api" }
+flux-optimize = { path = "../flux-optimize" }
+flux-graph = { path = "../flux-graph" }
+flux-ai = { path = "../flux-ai" }
+flux-chronos = { path = "../flux-chronos" }
+serde_json = "1"
+# Used by handlers/wallet_xray.rs (HEX_RE/INLINE_STYLE_RE/TW_RE) + stats/ops/frontend
+# but were never declared → fresh `fluxc` builds failed (cached binary hid it).
+regex = "1"
+lazy_static = "1.4"

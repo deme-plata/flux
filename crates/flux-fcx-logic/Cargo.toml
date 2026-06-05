@@ -1,0 +1,10 @@
+[package]
+name = "flux-fcx-logic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FCX-LOGIC — embed QuickJS (rquickjs) so FCX onClick/handlers run ARBITRARY JavaScript against component state, not just setX(expr). `eval_handler(js, &mut state)` loads FCX state as JS globals, runs the handler in a real QuickJS context (loops, conditionals, Math, string ops — full JS), and reads the mutations back. Headlessly testable; wiring it into Slint's `clicked => {}` callback is the integration step."
+
+[dependencies]
+anyhow = { workspace = true }
+rquickjs = "0.6"

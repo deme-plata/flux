@@ -1,0 +1,13 @@
+/// Composite score: SAP (60%) + X-Algo (40%) = final peer trust score.
+/// Fires webhook to fluxmux :9099 on low-trust alerts.
+pub fn composite_score(sap: f64, xalgo: f64, peer_id: &str) -> f64 {
+    let composite = sap * 0.6 + xalgo * 0.4;
+    if composite < 0.3 {
+        let _ = std::process::Command::new("curl").args([
+            "-s","-X","POST","http://127.0.0.1:9099/sap_alert",
+            "-H","Content-Type: application/json",
+            "-d",&format!(r#"{{"peer":"{}","sap":{},"xalgo":{},"composite":{},"alert":"low_trust"}}"#, peer_id, sap, xalgo, composite)
+        ]).output();
+    }
+    composite.clamp(0.0, 1.0)
+}

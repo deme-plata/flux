@@ -1,0 +1,22 @@
+GRACE|0.3|Grace (Summit Chair)|Welcome, presidents, to the SIGIL Summit. Three nations, one roadmap. The floor is open. President Cassius, you begin.
+HARRY|0.55|President Cassius|Thank you, Chair. My nation builds. We say lightweight nodes first - a two megabyte node, in every citizen's hand. No king, no gatekeeper. That is sovereignty.
+MATILDA|0.3|President Mara|Strength, Cassius, but strength without standards is chaos. My nation proposes version zero point twelve - schema first OpenAPI. Every endpoint typed, every contract provable. We build on rock, not sand.
+ELENA|0.4|President Voss|I have governed for a thousand years, friends. I have seen empires ship fast and shatter. Mara is right - but we must also win. President Cassius, what is our edge?
+HARRY|0.6|President Cassius|The event surface! Version zero point sixteen - typed WebSocket clients, generated from Rust enums, across five languages. Stainless cannot ship this. We win decisively on the live axis.
+MATILDA|0.3|President Mara|And version zero point thirteen - the proc macro. Annotate an endpoint once, and the SDK writes itself. Go first, then four more languages by version zero point fourteen.
+GRACE|0.3|Grace (Summit Chair)|So the roadmap stands - schema, macros, SDKs, middleware, the event surface. President Voss, your concern?
+ELENA|0.45|President Voss|My concern is the people, Chair. A roadmap of features is nothing if the citizen cannot hold the coin. The vault stays sealed. The DEX has no liquidity. We legislate code while the market sleeps.
+HARRY|0.65|President Cassius|Then we open it! Seed the pools, let SIGIL trade! A nation with a closed treasury is a nation in chains!
+MATILDA|0.3|President Mara|Carefully, Cassius. The council voted to wait, two to one. We open the vault when the proof is ready, not before. Patience is also sovereignty.
+ELENA|0.4|President Voss|Wisely said. Then let it be written - features and finance advance together. Code that ships, money that flows, nodes that no empire can seize.
+GRACE|0.3|Grace (Summit Chair)|Is there consensus on the roadmap?
+HARRY|0.6|President Cassius|The builders say AYE.
+MATILDA|0.35|President Mara|The scholars say AYE.
+ELENA|0.45|President Voss|And the elder houses say AYE. Let the record show - unanimous.
+ROCKY|0.4|Voice of SIGIL|Citizens of the SIGIL Nation - hear your presidents. We are not a company. We are not a coin. We are a NATION of light - owned by everyone, ruled by no one.
+LAURA|0.7|The People|No kings! No gatekeepers! Just proof, and the people who run the nodes!
+CHARLIE|0.65|The People|Schema first, event surface, five languages - we out build them all! SIGIL rises!
+ELENA|0.4|President Voss|For a thousand years I watched nations rise on conquest. This one rises on consensus. That is why it will outlast them all.
+HARRY|0.6|President Cassius|Let Washington keep its bell. Let the old empires keep their gates. We have a thousand nodes and a roadmap that ships.
+MATILDA|0.3|President Mara|Version by version, proof by proof, the SIGIL Nation is built.
+ROCKY|0.4|Voice of SIGIL|Grace. The summit is closed, the roadmap is sealed, and the SIGIL Nation marches on. Schema, macros, SDKs, the event surface - and a people who own themselves. Good. Good. Good.

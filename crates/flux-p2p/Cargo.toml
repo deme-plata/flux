@@ -1,0 +1,48 @@
+[package]
+name = "flux-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux P2P — libp2p-rust with DAGKnight native support, SAP/X-algo scoring, QUIC transport"
+
+[features]
+default = []
+quic = ["libp2p/quic"]
+
+[dependencies]
+# libp2p core
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "gossipsub",
+    "kad",
+    "identify",
+    "ping",
+    "noise",
+    "yamux",
+    "tcp",
+    "dns",
+    "macros",
+    "request-response",
+    "cbor",
+] }
+tokio = { version = "1", features = ["full"] }
+
+# Crypto
+blake3 = "1"
+sha3 = "0.10"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utils
+parking_lot = "0.12"
+tracing = "0.1"
+hex = "0.4"
+
+[[bin]]
+name = "flux-p2p-test"
+path = "src/bin/test_mesh.rs"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

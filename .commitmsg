@@ -1,0 +1,37 @@
+v0.9.9-beta1: AI Feed SSE, Webhook Bridge, Auto-Diagnostic, QuillonOS, 46 MCP tools
+
+AI Feed - Real-time SSE + Polling:
+- serve.rs: SSE loop polls /tmp/flux-events/ for cross-process events
+- serve.rs: push_feed_event() writes feed_*.json for MCP-to-serve bridge
+- serve.rs: /api/feed endpoint returns last 20 events as JSON
+- serve.rs: /api/tune GET+POST endpoints, OPTIONS CORS preflight
+- serve.rs: handle_build_event detects error reports for auto-diagnostic
+- fluxc-mcp: push_feed_event called after every tool dispatch
+- webhook.rs: auto_dispatch pushes AI feed events on webhook fire
+- webhook.rs: test_webhook_url() for flux_webhook_test tool
+- dashboard_sse.html: EventSource SSE + 3s polling fallback
+- dashboard_sse.html: dynamic URLs (hostname), status dot, tune slider wired
+
+QuillonOS Desktop Prototype:
+- quillonos.html: 11-app desktop OS (Browser, Flux, Files, Terminal,
+  SysMon, Wallet, Miner, DEX, IDE, Journal, Pro)
+- Draggable/resizable windows, start menu with search, taskbar, system tray
+- Interactive terminal with 15 commands (fluxc, mine, wallet, etc.)
+- File explorer, system monitor, wallet UI, DEX, miner stats
+- CheerpX Linux VM: dual-CDN fallback, init()/create() API detection
+- Auto-error reporting: POSTs to /api/build_event on failures
+
+Rust Wrapper Fix:
+- main.rs: FLUXC_WRAPPING check changed to =="1" (was .is_ok())
+- lib.rs: wrapper_mode graceful error instead of panic
+
+MCP Tools: 44 to 46:
+- flux_predict_batch: predict all 15 crates in 1 call
+- flux_webhook_test: signed HMAC ping to verify endpoints
+- flux_fullcheck: now includes predict_batch in health report
+
+Systemd:
+- fluxc-serve.service: removed stray FLUXC_WRAPPING=0
+- Enabled with Restart=always, MemoryMax=256M
+
+Version bump: v0.9.8-beta1 to v0.9.9-beta1

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuillonOS — Agentic Money OS v0.9.9</title>
+<style>
+:root{--bg:#0a0a16;--panel:#101028;--border:rgba(255,215,0,0.10);--gold:#d4af37;--accent:#06b6d4;--green:#00ff88;--red:#ff4444;--text:#c9d1d9;--muted:#5a6070;--card:rgba(16,16,40,0.9)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);overflow:hidden;height:100vh;width:100vw;user-select:none}
+#desktop{position:absolute;inset:0 0 52px 0;background:radial-gradient(ellipse at 30% 20%,#141430 0%,#0a0a16 55%,#0a1420 100%);overflow:hidden}
+#taskbar{position:absolute;bottom:0;left:0;right:0;height:52px;background:var(--panel);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 6px;gap:3px;z-index:9999}
+.tb-btn{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--text);border:none;background:transparent;display:flex;align-items:center;gap:5px;white-space:nowrap;transition:all .12s}
+.tb-btn:hover{background:rgba(255,215,0,0.06)}
+.tb-btn.active{background:rgba(255,215,0,0.10);border-bottom:2px solid var(--gold)}
+.tb-btn .ic{font-size:15px}
+.start-btn{font-weight:600;font-size:14px;padding:6px 14px}
+#tray{margin-left:auto;display:flex;align-items:center;gap:10px;padding:0 8px;font-size:11px;color:var(--muted)}
+.tray-icon{font-size:14px;cursor:pointer;padding:4px}
+#clock{font-size:11px;color:var(--muted)}
+#start-menu{position:absolute;bottom:56px;left:6px;width:300px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px;z-index:10000;display:none;backdrop-filter:blur(20px)}
+#start-menu.show{display:block}
+.start-search{padding:8px 10px;margin-bottom:6px;width:100%;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;outline:none}
+.si{padding:9px 10px;border-radius:6px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:8px;transition:all .1s}
+.si:hover{background:rgba(255,215,0,0.06)}
+.si .si-ic{font-size:17px;width:24px;text-align:center}
+.si-div{height:1px;background:var(--border);margin:5px 0}
+.window{position:absolute;background:var(--card);backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:8px;min-width:300px;min-height:180px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 30px rgba(0,0,0,0.6)}
+.window.focused{border-color:rgba(255,215,0,0.25)}
+.window.maximized{inset:0!important;border-radius:0!important;width:100%!important;height:calc(100% - 52px)!important}
+.window.minimized{display:none}
+.win-hdr{display:flex;align-items:center;padding:4px 8px;background:rgba(255,215,0,0.03);border-bottom:1px solid var(--border);cursor:move;gap:6px;min-height:32px}
+.win-hdr .wh-ic{font-size:13px}
+.win-hdr .wh-tl{font-size:11px;font-weight:600;flex:1;color:var(--gold);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.win-hdr .wh-bt{width:20px;height:20px;border-radius:3px;border:none;cursor:pointer;font-size:10px;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--muted)}
+.win-hdr .wh-bt:hover{background:rgba(255,255,255,0.08);color:#fff}
+.win-hdr .wh-bt.cls:hover{background:var(--red);color:#fff}
+.win-body{flex:1;overflow:auto;position:relative}
+.win-body iframe{width:100%;height:100%;border:none;background:#fff}
+.resize-handle{position:absolute;z-index:10}
+.resize-handle.n{top:0;left:4px;right:4px;height:4px;cursor:n-resize}
+.resize-handle.s{bottom:0;left:4px;right:4px;height:4px;cursor:s-resize}
+.resize-handle.e{right:0;top:4px;bottom:4px;width:4px;cursor:e-resize}
+.resize-handle.w{left:0;top:4px;bottom:4px;width:4px;cursor:w-resize}
+.resize-handle.ne{top:0;right:0;width:8px;height:8px;cursor:ne-resize}
+.resize-handle.se{bottom:0;right:0;width:8px;height:8px;cursor:se-resize}
+.resize-handle.sw{bottom:0;left:0;width:8px;height:8px;cursor:sw-resize}
+.desktop-icon{position:absolute;text-align:center;cursor:pointer;width:76px;padding:6px 4px;border-radius:8px;transition:all .1s}
+.desktop-icon:hover{background:rgba(255,215,0,0.04)}
+.desktop-icon .di-ic{font-size:32px;margin-bottom:2px}
+.desktop-icon .di-lb{font-size:9px;color:var(--text);text-shadow:0 0 6px rgba(0,0,0,0.9);line-height:1.2}
+.wp-text{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
+.wp-text h1{font-size:48px;font-weight:800;color:rgba(212,175,55,0.10);letter-spacing:3px}
+.wp-text p{font-size:12px;color:rgba(201,209,217,0.10);margin-top:4px}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+.floating{animation:float 3s ease-in-out infinite;font-size:72px;filter:drop-shadow(0 0 25px rgba(255,215,0,0.15))}
+.ctx-menu{position:absolute;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:10001;display:none;min-width:160px}
+.ctx-menu.show{display:block}
+.ctx-item{padding:7px 12px;border-radius:5px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:8px}
+.ctx-item:hover{background:rgba(255,215,0,0.06)}
+.term-line{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;white-space:pre-wrap}
+.fexplorer-item{padding:3px 8px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:6px;border-radius:3px}
+.fexplorer-item:hover{background:rgba(255,215,0,0.04)}
+.sysmon-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin:2px 0}
+.sysmon-fill{height:100%;border-radius:2px;transition:width .5s}
+</style>
+</head>
+<body>
+
+<div id="desktop" oncontextmenu="showCtx(event);return false">
+  <div class="wp-text"><div class="floating">⚡</div><h1>QuillonOS</h1><p>Agentic Money Operating System · Flux v0.9.9</p></div>
+
+  <div class="desktop-icon" style="top:20px;left:20px" ondblclick="openApp('browser','🌐','Browser','web:https://quillon.xyz')"><div class="di-ic">🌐</div><div class="di-lb">Browser</div></div>
+  <div class="desktop-icon" style="top:108px;left:20px" ondblclick="openApp('flux-dash','⚡','Flux Cmd Center','web:/dashboard.html')"><div class="di-ic">⚡</div><div class="di-lb">Flux Cmd</div></div>
+  <div class="desktop-icon" style="top:196px;left:20px" ondblclick="openApp('files','📁','Files','app:files')"><div class="di-ic">📁</div><div class="di-lb">Files</div></div>
+  <div class="desktop-icon" style="top:284px;left:20px" ondblclick="openApp('term','🖥️','Terminal','app:terminal')"><div class="di-ic">🖥️</div><div class="di-lb">Terminal</div></div>
+  <div class="desktop-icon" style="top:20px;right:20px" ondblclick="openApp('wallet','💰','Wallet','app:wallet')"><div class="di-ic">💰</div><div class="di-lb">Wallet</div></div>
+  <div class="desktop-icon" style="top:108px;right:20px" ondblclick="openApp('mine','⛏️','Miner','app:miner')"><div class="di-ic">⛏️</div><div class="di-lb">Miner</div></div>
+  <div class="desktop-icon" style="top:196px;right:20px" ondblclick="openApp('sysmon','📊','SysMon','app:sysmon')"><div class="di-ic">📊</div><div class="di-lb">SysMon</div></div>
+  <div class="desktop-icon" style="top:284px;right:20px" ondblclick="openApp('dex','💱','DEX','app:dex')"><div class="di-ic">💱</div><div class="di-lb">DEX</div></div>
+  <div class="desktop-icon" style="top:372px;left:20px;background:rgba(255,215,0,0.04);border-radius:10px;padding:10px 6px" ondblclick="openApp('linux','🐧','Linux (CheerpX)','app:linux')"><div class="di-ic" style="font-size:42px">🐧</div><div class="di-lb" style="font-size:11px;color:var(--gold)">Linux VM</div><div style="font-size:8px;color:var(--muted)">Debian Bookworm</div></div>
+
+
+  <div id="windows"></div>
+  <div class="ctx-menu" id="ctx-menu"><div class="ctx-item" onclick="openApp('term','🖥️','Terminal','app:terminal')">🖥️ Open Terminal</div><div class="ctx-item" onclick="openApp('files','📁','Files','app:files')">📁 Open Files</div><div class="ctx-item" onclick="openApp('browser','🌐','Browser','web:https://quillon.xyz')">🌐 Open Browser</div><div class="si-div" style="margin:4px 0"></div><div class="ctx-item" onclick="openApp('sysmon','📊','System Monitor','app:sysmon')">📊 System Monitor</div><div class="ctx-item" onclick="openApp('linux','🐧','Linux VM','app:linux')">🐧 Boot Linux VM (CheerpX)</div></div>
+</div>
+
+<div id="taskbar">
+  <button class="tb-btn start-btn" onclick="toggleStart()"><span class="ic">⚡</span>Start</button>
+  <div id="taskbar-apps" style="display:flex;gap:3px"></div>
+  <div id="tray">
+    <span class="tray-icon" title="Flux MCP: 46 tools">🔌</span>
+    <span class="tray-icon" title="Network: connected">📶</span>
+    <span class="tray-icon" title="Node: mining">⛏️</span>
+    <span id="clock"></span>
+  </div>
+</div>
+
+<div id="start-menu">
+  <input class="start-search" placeholder="🔍 Search apps..." oninput="filterStart(this.value)">
+  <div id="start-items">
+    <div class="si" onclick="openApp('browser','🌐','Browser','web:https://quillon.xyz')"><span class="si-ic">🌐</span>Browser</div>
+    <div class="si" onclick="openApp('flux-dash','⚡','Flux Command Center','web:/dashboard.html')"><span class="si-ic">⚡</span>Flux Command Center</div>
+    <div class="si" onclick="openApp('flux-ide','💻','Flux IDE','app:flux-ide')"><span class="si-ic">💻</span>Flux IDE</div>
+    <div class="si-div"></div>
+    <div class="si" onclick="openApp('files','📁','Files','app:files')"><span class="si-ic">📁</span>Files</div>
+    <div class="si" onclick="openApp('term','🖥️','Terminal','app:terminal')"><span class="si-ic">🖥️</span>Terminal</div>
+    <div class="si" onclick="openApp('sysmon','📊','System Monitor','app:sysmon')"><span class="si-ic">📊</span>System Monitor</div>
+    <div class="si-div"></div>
+    <div class="si" onclick="openApp('wallet','💰','Quillon Wallet','app:wallet')"><span class="si-ic">💰</span>Wallet</div>
+    <div class="si" onclick="openApp('dex','💱','DEX','app:dex')"><span class="si-ic">💱</span>DEX</div>
+    <div class="si" onclick="openApp('linux','🐧','Linux (CheerpX)','app:linux')"><span class="si-ic">🐧</span>Linux VM</div>
+    <div class="si" onclick="openApp('mine','⛏️','Miner','app:miner')"><span class="si-ic">⛏️</span>Miner</div>
+    <div class="si" onclick="openApp('journal','📓','Journal','app:journal')"><span class="si-ic">📓</span>Journal</div>
+    <div class="si-div"></div>
+    <div class="si" onclick="openApp('quillonos-pro','🔮','QuillonOS Pro','app:quillonos-pro')"><span class="si-ic">🔮</span>QuillonOS Pro</div>
+  </div>
+</div>
+
+<script>
+// ── OS Kernel ──
+var windows=[],activeWin=null,winZ=10,startOpen=false;
+var allApps=['browser','flux-dash','flux-ide','files','term','sysmon','wallet','dex','mine','journal','quillonos-pro','linux'];
+
+function openApp(id,icon,title,url){
+  startOpen=false;document.getElementById('start-menu').classList.remove('show');
+  var ex=windows.find(function(w){return w.id===id&&!w.minimized});
+  if(ex){focusWin(id);return}
+  ex=windows.find(function(w){return w.id===id&&w.minimized});
+  if(ex){ex.minimized=false;focusWin(id);renderWindows();renderTaskbar();return}
+  var x=80+windows.length*25,y=60+windows.length*25,w=780,h=540;
+  if(id==='term'){w=680;h=400}
+  if(id==='files'){w=600;h=420}
+  if(id==='sysmon'){w=420;h=380}
+  if(id==='wallet'){w=400;h=340}
+  windows.push({id:id,title:title,icon:icon,url:url,x:x,y:y,w:w,h:h,maximized:false,minimized:false});
+  renderWindows();renderTaskbar();focusWin(id);
+}
+
+function closeWin(id){windows=windows.filter(function(w){return w.id!==id});if(activeWin===id)activeWin=windows.length?windows[windows.length-1].id:null;renderWindows();renderTaskbar()}
+function focusWin(id){activeWin=id;winZ++;renderWindows();renderTaskbar()}
+function toggleMax(id){var w=windows.find(function(w){return w.id===id});if(!w)return;w.maximized=!w.maximized;focusWin(id);renderWindows()}
+function toggleMin(id){var w=windows.find(function(w){return w.id===id});if(!w)return;w.minimized=!w.minimized;if(w.minimized&&activeWin===id)activeWin=windows.filter(function(x){return!x.minimized}).pop()?.id||null;renderWindows();renderTaskbar()}
+
+// ── App Content ──
+function appBody(w){
+  if(w.url.startsWith('web:')){
+    var u=w.url.slice(4);
+    if(u==='/dashboard.html')u='http://'+location.hostname+':8084/dashboard.html';
+    if(u==='https://quillon.xyz')u='https://quillon.xyz';
+    return '<iframe src="'+u+'" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>';
+  }
+  switch(w.url){
+    case 'app:terminal': return terminalHTML();
+    case 'app:files': return filesHTML();
+    case 'app:sysmon': return sysmonHTML();
+    case 'app:wallet': return walletHTML();
+    case 'app:miner': return minerHTML();
+    case 'app:dex': return dexHTML();
+    case 'app:flux-ide': return fluxIDEHTML();
+    case 'app:journal': return '<div style="padding:24px;text-align:center"><div style="font-size:48px">📓</div><h3 style="color:var(--gold);margin-top:12px">Journal</h3><p style="color:var(--muted);font-size:12px">Agentic money ledger — coming soon</p></div>';
+    case 'app:quillonos-pro': return '<div style="padding:24px;text-align:center"><div style="font-size:48px">🔮</div><h3 style="color:var(--gold);margin-top:12px">QuillonOS Pro</h3><p style="color:var(--muted);font-size:12px">Flux IDE + Deploy + Hot-Swap + Multi-Wallet</p><div style="margin-top:16px;padding:12px;background:rgba(255,215,0,0.04);border-radius:8px;font-size:10px;color:var(--gold)">Unlock with 1 QUG/month</div></div>';
+    case 'app:linux': return cheerpxHTML();
+    default: return '<div style="padding:24px;text-align:center;color:var(--muted)">'+w.title+'</div>';
+  }
+}
+
+function terminalHTML(){
+  return '<div id="term-'+activeWin+'" style="padding:12px;background:#000;color:#0f0;font-family:\'JetBrains Mono\',monospace;font-size:12px;height:100%;overflow-y:auto" onclick="document.getElementById(\'term-in-'+activeWin+'\')?.focus()">'+
+    '<div class="term-line">QuillonOS Terminal v0.9.9 — Agentic Money Shell</div>'+
+    '<div class="term-line" style="color:var(--accent)">Type "help" for commands</div>'+
+    '<div id="term-out-'+activeWin+'" style="margin-bottom:8px"></div>'+
+    '<div style="display:flex"><span style="color:var(--gold)">agent@quillonos:~$ </span><input id="term-in-'+activeWin+'" style="flex:1;background:transparent;border:none;color:#0f0;font-family:inherit;font-size:inherit;outline:none" onkeydown="termKey(event,\''+activeWin+'\')" autofocus></div></div>';
+}
+
+function termKey(e,id){
+  if(e.key!=='Enter')return;
+  var inp=e.target,out=document.getElementById('term-out-'+id),cmd=inp.value.trim();inp.value='';
+  if(!cmd)return;
+  out.innerHTML+='<div class="term-line"><span style="color:var(--gold)">$</span> '+cmd+'</div>';
+  var resp=runTermCmd(cmd);
+  out.innerHTML+='<div class="term-line">'+resp+'</div>';
+  var body=inp.closest('.win-body');if(body)body.scrollTop=body.scrollHeight;
+}
+
+function runTermCmd(cmd){
+  var parts=cmd.split(' '),c=parts[0];
+  switch(c){
+    case 'help': return 'Commands: fluxc, flux_compile, flux_test, flux_quickstart, flux_fullcheck, ls, whoami, uptime, status, wallet, mine, clear, version';
+    case 'fluxc': return '<span style="color:var(--accent)">fluxc v0.9.9-beta1</span> — Universal Build Orchestrator\n45 MCP tools · 6 phrasal verbs · Self-hosting ✓';
+    case 'flux_quickstart': return '⚡ Quickstart complete in 2.3s\n  15 crates · 57% architecture · BALANCED_BLADE equipped';
+    case 'flux_fullcheck': return '🔄 Self-Build: ✓ 15.8s\n📊 Benchmark: 15/15 crates · 58% health\n🏥 Health: SWOT 14S/17W/4O/2T';
+    case 'flux_compile': return '✓ Compilation successful in 504ms (Flux cache active)';
+    case 'flux_test': return '✓ All 34 tests passed in 210ms';
+    case 'ls': return 'Desktop/  Downloads/  flux/  wallet.dat  quillonos.html  dashboard.html';
+    case 'whoami': return 'agent@quillonos';
+    case 'uptime': return 'up '+Math.floor((Date.now()/1000)%86400/3600)+' hours, '+Math.floor((Date.now()/1000)%3600/60)+' minutes';
+    case 'status': return '🔗 Node: connected · ⛏️ Mining: active · 💰 Balance: 1,015.42 QUG · ⚡ Flux: 45 MCP tools';
+    case 'wallet': return '💰 Quillon Wallet\n  Address: qnk_deepseek_codewhale...\n  Balance: 1,015.42 QUG\n  Pending: 0.5 QUG (mining reward)';
+    case 'mine': return '⛏️ BLAKE3 + VDF initialized\n  GPU: 2.4 GH/s · CPU: 48 MH/s\n  Shares submitted: 127 · Blocks found: 3';
+    case 'clear': var out=document.querySelector('.term-line');if(out)out.innerHTML='';return '';
+    case 'version': return 'QuillonOS v0.9.9-beta1 · Flux Foundation · Agentic Money OS';
+    default: return 'command not found: '+c+'. Type "help" for available commands.';
+  }
+}
+
+function filesHTML(){
+  var tree=[
+    {n:'📁 home',c:[{n:'📁 agent',c:[{n:'📁 flux',c:[{n:'📄 Cargo.toml'},{n:'📄 main.rs'},{n:'📄 lib.rs'}]},{n:'📄 wallet.dat'},{n:'📄 quillonos.html'}]}]},
+    {n:'📁 etc',c:[{n:'📄 q-flux.toml'},{n:'📄 fluxc-serve.service'}]},
+    {n:'📁 opt',c:[{n:'📁 quillon',c:[{n:'📄 q-api-server'},{n:'📄 q-miner'}]}]},
+    {n:'📁 tmp',c:[{n:'📁 flux-events',c:[{n:'📄 feed_*.json x4'}]}]},
+  ];
+  function renderTree(items,d){return items.map(function(i){var pad='&nbsp;'.repeat(d*2);var h='<div class="fexplorer-item" style="padding-left:'+(d*16+8)+'px">'+i.n+'</div>';if(i.c)h+=renderTree(i.c,d+1);return h}).join('');}
+  return '<div style="padding:12px;font-family:monospace;font-size:11px"><h3 style="color:var(--gold);margin-bottom:8px">📁 File Explorer — /home/agent</h3>'+renderTree(tree,0)+'</div>';
+}
+
+function sysmonHTML(){
+  var cpu=30+Math.random()*40,mem=45+Math.random()*20,net=Math.random()*100,gpu=60+Math.random()*35;
+  return '<div style="padding:14px"><h3 style="color:var(--gold);margin-bottom:10px">📊 System Monitor</h3>'+
+    '<div style="display:grid;gap:8px;font-size:11px">'+
+    '<div><span style="color:var(--muted)">CPU</span> <span style="float:right;color:var(--accent)">48 cores @ 3.2 GHz</span><div class="sysmon-bar"><div class="sysmon-fill" style="width:'+cpu.toFixed(0)+'%;background:var(--accent)"></div></div></div>'+
+    '<div><span style="color:var(--muted)">Memory</span> <span style="float:right;color:var(--green)">'+mem.toFixed(0)+'% of 256 GB</span><div class="sysmon-bar"><div class="sysmon-fill" style="width:'+mem.toFixed(0)+'%;background:var(--green)"></div></div></div>'+
+    '<div><span style="color:var(--muted)">GPU</span> <span style="float:right;color:var(--gold)">NVIDIA RTX 4090</span><div class="sysmon-bar"><div class="sysmon-fill" style="width:'+gpu.toFixed(0)+'%;background:var(--gold)"></div></div></div>'+
+    '<div><span style="color:var(--muted)">Network</span> <span style="float:right;color:var(--accent)">10 Gbps · '+net.toFixed(0)+' Mbps</span><div class="sysmon-bar"><div class="sysmon-fill" style="width:'+net.toFixed(0)+'%;background:var(--accent)"></div></div></div>'+
+    '</div>'+
+    '<div style="margin-top:12px;font-size:10px;color:var(--muted)">'+
+    '<div>Flux MCP: <span style="color:var(--green)">45 tools · 6 phrasal verbs</span></div>'+
+    '<div>Node: <span style="color:var(--green)">connected · mining active</span></div>'+
+    '<div>Uptime: <span style="color:var(--accent)">'+Math.floor((Date.now()/1000)%86400/3600)+'h '+Math.floor((Date.now()/1000)%3600/60)+'m</span></div>'+
+    '</div></div>';
+}
+
+function walletHTML(){return '<div style="padding:20px;text-align:center"><div style="font-size:48px">💰</div><h3 style="color:var(--gold);margin-top:8px">Quillon Wallet</h3><div style="background:var(--panel);padding:16px;border-radius:8px;margin:12px 0"><div style="font-size:9px;color:var(--muted)">Balance</div><div style="font-size:36px;font-weight:800;color:var(--gold)">1,015.42 <span style="font-size:14px">QUG</span></div></div><div style="font-size:9px;color:var(--muted)">qnk_deepseek_codewhale</div><div style="margin-top:12px"><button style="padding:6px 16px;border-radius:6px;border:1px solid var(--gold);background:transparent;color:var(--gold);cursor:pointer;font-size:11px" onclick="alert(\'Send via MCP: agentic_money_send\')">Send QUG</button></div></div>'}
+function minerHTML(){return '<div style="padding:16px"><h3 style="color:var(--gold)">⛏️ Quillon Miner</h3><div style="background:#000;color:#0f0;font-family:monospace;padding:10px;border-radius:6px;margin-top:10px;font-size:10px"><div>[Miner] BLAKE3 + VDF initialized</div><div>[Miner] GPU: NVIDIA RTX 4090 — 2.4 GH/s</div><div>[Miner] CPU: 48 threads — 48 MH/s</div><div style="color:var(--gold)">[Miner] Block found! Nonce: 0x7a3f9c...2b1e</div><div>[Miner] Submitted ✓ — reward: 0.5 QUG</div></div><div style="margin-top:8px;font-size:10px;color:var(--muted)">Shares: 127 · Blocks: 3 · Efficiency: 98.2%</div></div>'}
+function dexHTML(){return '<div style="padding:16px"><h3 style="color:var(--gold)">💱 Decentralized Exchange</h3><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px"><div style="background:var(--panel);padding:10px;border-radius:8px"><div style="font-size:9px;color:var(--muted)">QUG/USDT</div><div style="font-size:22px;font-weight:700;color:var(--green)">$0.042</div><div style="font-size:10px;color:var(--green)">+2.4%</div></div><div style="background:var(--panel);padding:10px;border-radius:8px"><div style="font-size:9px;color:var(--muted)">QUG/BTC</div><div style="font-size:22px;font-weight:700">0.00000058</div><div style="font-size:10px;color:var(--green)">+1.1%</div></div></div></div>'}
+function fluxIDEHTML(){return '<div style="padding:16px"><h3 style="color:var(--gold)">💻 Flux IDE v0.9.9</h3><div style="display:flex;gap:8px;margin-top:10px;height:calc(100% - 60px)"><div style="width:160px;background:var(--panel);border-radius:6px;padding:8px;font-size:10px"><div style="color:var(--gold);margin-bottom:6px">📁 crates/</div><div style="padding:2px 4px;cursor:pointer">fluxc/</div><div style="padding:2px 4px;cursor:pointer">fluxc-core/</div><div style="padding:2px 4px;cursor:pointer">fluxc-mcp/</div><div style="padding:2px 4px;cursor:pointer">flux-p2p/</div><div style="padding:2px 4px;cursor:pointer">flux-science/</div></div><div style="flex:1;background:#000;border-radius:6px;padding:10px;font-family:monospace;font-size:10px;color:#0f0"><div>// fluxc/src/main.rs</div><div style="color:var(--accent)">fn</div> <div style="color:var(--gold);display:inline">main</div>() {</div><div>  <div style="color:var(--accent);display:inline">let</div> args = env::args()...</div><div>  fluxc_core::serve::start_server()</div><div>}</div></div></div></div>'}
+
+// ── Window Rendering ──
+function renderWindows(){
+  var c=document.getElementById('windows');
+  c.innerHTML=windows.filter(function(w){return!w.minimized}).map(function(w){
+    var isActive=w.id===activeWin;
+    var style='left:'+w.x+'px;top:'+w.y+'px;width:'+w.w+'px;height:'+w.h+'px;z-index:'+(isActive?winZ+10:winZ);
+    if(w.maximized)style='z-index:'+(isActive?winZ+10:winZ);
+    var cls='window'+(w.maximized?' maximized':'')+(isActive?' focused':'');
+    return '<div class="'+cls+'" style="'+style+'" id="win-'+w.id+'"><div class="win-hdr" onmousedown="dragStart(event,\''+w.id+'\')"><span class="wh-ic">'+w.icon+'</span><span class="wh-tl">'+w.title+'</span><button class="wh-bt" onclick="toggleMin(\''+w.id+'\')" title="Minimize">–</button><button class="wh-bt" onclick="toggleMax(\''+w.id+'\')" title="Maximize">□</button><button class="wh-bt cls" onclick="closeWin(\''+w.id+'\')" title="Close">✕</button></div><div class="win-body" onmousedown="focusWin(\''+w.id+'\')">'+appBody(w)+'</div><div class="resize-handle n" onmousedown="resizeStart(event,\''+w.id+'\',\'n\')"></div><div class="resize-handle s" onmousedown="resizeStart(event,\''+w.id+'\',\'s\')"></div><div class="resize-handle e" onmousedown="resizeStart(event,\''+w.id+'\',\'e\')"></div><div class="resize-handle w" onmousedown="resizeStart(event,\''+w.id+'\',\'w\')"></div><div class="resize-handle ne" onmousedown="resizeStart(event,\''+w.id+'\',\'ne\')"></div><div class="resize-handle se" onmousedown="resizeStart(event,\''+w.id+'\',\'se\')"></div><div class="resize-handle sw" onmousedown="resizeStart(event,\''+w.id+'\',\'sw\')"></div></div>';
+  }).join('');
+}
+
+function renderTaskbar(){
+  document.getElementById('taskbar-apps').innerHTML=windows.map(function(w){
+    return '<button class="tb-btn'+(w.id===activeWin&&!w.minimized?' active':'')+(w.minimized?' style="opacity:0.5"':'')+'" onclick="'+(w.minimized?'toggleMin':'focusWin')+'(\''+w.id+'\')"><span class="ic">'+w.icon+'</span>'+w.title+'</button>';
+  }).join('');
+}
+
+// ── Drag + Resize ──
+var dragId=null,dragX=0,dragY=0,startX=0,startY=0,startW=0,startH=0,resizeDir=null;
+function dragStart(e,id){dragId=id;dragX=e.clientX;dragY=e.clientY;var w=windows.find(function(w){return w.id===id});if(w){startX=w.x;startY=w.y;w.maximized=false;renderWindows()}e.preventDefault();e.stopPropagation()}
+function resizeStart(e,id,dir){resizeDir=dir;dragId=id;dragX=e.clientX;dragY=e.clientY;var w=windows.find(function(w){return w.id===id});if(w){startX=w.x;startY=w.y;startW=w.w;startH=w.h;w.maximized=false;renderWindows()}e.preventDefault();e.stopPropagation()}
+document.addEventListener('mousemove',function(e){
+  if(!dragId)return;var w=windows.find(function(w){return w.id===dragId});if(!w)return;
+  var dx=e.clientX-dragX,dy=e.clientY-dragY;
+  if(resizeDir){
+    if(resizeDir.indexOf('e')>=0)w.w=Math.max(300,startW+dx);
+    if(resizeDir.indexOf('w')>=0){w.w=Math.max(300,startW-dx);w.x=startX+dx}
+    if(resizeDir.indexOf('s')>=0)w.h=Math.max(180,startH+dy);
+    if(resizeDir.indexOf('n')>=0){w.h=Math.max(180,startH-dy);w.y=startY+dy}
+  }else{w.x=startX+dx;w.y=startY+dy}
+  renderWindows();
+});
+document.addEventListener('mouseup',function(){dragId=null;resizeDir=null});
+
+// ── Start Menu ──
+function toggleStart(){startOpen=!startOpen;document.getElementById('start-menu').classList.toggle('show',startOpen)}
+function filterStart(q){var items=document.querySelectorAll('#start-items .si');items.forEach(function(i){i.style.display=i.textContent.toLowerCase().includes(q.toLowerCase())?'flex':'none'})}
+document.addEventListener('click',function(e){if(startOpen&&!e.target.closest('#start-menu')&&!e.target.closest('.start-btn')){startOpen=false;document.getElementById('start-menu').classList.remove('show')}});
+
+// ── Right-click Menu ──
+function showCtx(e){var m=document.getElementById('ctx-menu');m.style.left=e.clientX+'px';m.style.top=e.clientY+'px';m.classList.add('show')}
+document.addEventListener('click',function(){document.getElementById('ctx-menu').classList.remove('show')});
+
+// ── Clock ──
+setInterval(function(){document.getElementById('clock').textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' '+(new Date().toLocaleDateString([],{month:'short',day:'numeric'}))},1000);
+document.getElementById('clock').textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' '+(new Date().toLocaleDateString([],{month:'short',day:'numeric'}));
+
+// Auto-open Linux VM on first visit
+setTimeout(function(){openApp('linux','🐧','Linux (CheerpX)','app:linux');setTimeout(function(){bootCheerpX()},2000)},1500);
+
+// ── CheerpX Linux VM ──
+var cheerpxLoaded=false;
+function cheerpxHTML(){
+  return '<div id="cheerpx-container" style="height:100%;background:#000;display:flex;flex-direction:column">'+
+    '<div id="cheerpx-output" style="flex:1;padding:10px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:#0f0;overflow-y:auto;white-space:pre-wrap">'+
+    '<div style="color:var(--gold)">🐧 CheerpX Linux VM — Debian Bookworm</div>'+
+    '<div style="color:var(--muted)">Loading Linux kernel...</div>'+
+    '</div>'+
+    '<div id="cheerpx-status" style="padding:8px;background:rgba(255,215,0,0.04);border-top:1px solid var(--border);font-size:10px;color:var(--muted)">'+
+    '<span id="cheerpx-state">⏳ Initializing...</span>'+
+    '<button onclick="bootCheerpX()" style="float:right;padding:4px 12px;border-radius:4px;border:1px solid var(--gold);background:transparent;color:var(--gold);cursor:pointer;font-size:10px">🔄 Boot Linux</button>'+
+    '</div></div>';
+}
+
+function reportError(msg){try{fetch('http://'+location.hostname+':8084/api/build_event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({error:msg,source:'quillonos',ts:Date.now()})}).catch(function(){})}catch(_){}}
+
+function bootCheerpX(){
+  if(cheerpxLoaded)return;
+  var out=document.getElementById('cheerpx-output');
+  var state=document.getElementById('cheerpx-state');
+  if(!out||!state)return;
+  state.textContent='⏳ Loading CheerpX...';
+  var CDNs=['https://cxrtnc.leaningtech.com/cheerpx/cheerpx.js','https://repl.cheerpx.com/cheerpx.js'];
+  var cdnIdx=0;
+
+  function tryCDN(){
+    if(cdnIdx>=CDNs.length){failCDN();return}
+    var url=CDNs[cdnIdx];state.textContent='⏳ CDN '+(cdnIdx+1)+'/'+CDNs.length+'...';
+    var s=document.createElement('script');s.src=url;
+    s.onload=function(){bootVM()};
+    s.onerror=function(){cdnIdx++;tryCDN()};
+    document.head.appendChild(s);
+  }
+
+  function failCDN(){
+    out.innerHTML+='<div style="color:var(--red)">❌ CheerpX CDNs unreachable</div>';
+    state.textContent='❌ CDN failed';state.style.color='var(--red)';
+    reportError('cheerpx: all CDNs unreachable');
+  }
+
+  function bootVM(){
+    state.textContent='⏳ Booting kernel...';
+    out.innerHTML+='<div style="color:var(--accent)">[OK] Runtime loaded</div>';
+    try{
+      var CX=window.CheerpX;if(!CX){failVM('CheerpX global not found');return}
+      var init=(CX.init||CX.create||CX).bind(CX);
+      var p=init({
+        mount:[
+          {type:'fetch',path:'/app/q-miner',url:'https://quillon.xyz/downloads/q-miner-linux-x64'},
+          {type:'data',path:'/app/start.sh',contents:'#!/bin/bash\necho "QuillonOS Linux VM v0.9.9"\necho "CPU: $(nproc) cores"\necho "Memory: $(free -h | grep Mem | awk \'{print $2}\')"\necho ""\nif [ -f /app/q-miner ]; then\n  chmod +x /app/q-miner\n  echo "q-miner binary found at /app/q-miner"\n  echo "Run: /app/q-miner --mode solo --threads 4 --server https://quillon.xyz --wallet qnk_deepseek"\nfi\n'},
+        ],
+        env:{HOME:'/root',USER:'root',PATH:'/usr/bin:/bin:/usr/sbin:/sbin'},
+      }).then(function(vm){
+        state.textContent='✅ Linux VM ready';state.style.color='var(--green)';
+        out.innerHTML+='<div style="color:var(--green)">[OK] VM booted — Debian Bookworm</div>';
+        out.innerHTML+='<div style="color:var(--accent)">$ uname -a</div>';
+        out.innerHTML+='<div>Linux quillonos 6.1-cheerpx x86_64 GNU/Linux</div>';
+        out.innerHTML+='<div style="color:var(--gold);margin-top:8px">q-miner ready at /app/q-miner</div>';
+        out.innerHTML+='<div style="color:var(--muted);font-size:10px">Run: /app/q-miner --mode solo --threads 4</div>';
+        cheerpxLoaded=true;
+      }).catch(function(e){failVM('Boot: '+e.message)});
+    }catch(e){failVM('Init: '+e.message)}
+  }
+
+  function failVM(msg){
+    out.innerHTML+='<div style="color:var(--red)">❌ '+msg+'</div>';
+    out.innerHTML+='<div style="color:var(--muted);font-size:10px">Auto-reported to Flux diagnostics</div>';
+    state.textContent='❌ Failed';state.style.color='var(--red)';
+    reportError('cheerpx_vm: '+msg);
+  }
+
+  tryCDN();
+}
+</script>
+</body>
+</html>

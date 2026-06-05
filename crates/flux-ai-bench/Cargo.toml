@@ -1,0 +1,16 @@
+[package]
+name = "flux-ai-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Objective benchmark for AI agents shipping into the Flux substrate. 10 tasks (T1-T10) score the agent on Flux-native dev skills: cache discipline, dogfooding, provenance, swarm coord, honest measurement, VarFlow methodology, ZK gate, recovery. Composite 0-100 Flux Dev Score. Recorded against the agent's wallet so onboarding has an objective gate. First consumers: rocky / rocky-sigil / vite-engine / update-v1."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = "1"
+
+[dev-dependencies]

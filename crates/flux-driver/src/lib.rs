@@ -1,0 +1,316 @@
+// flux-driver — rustc driver integration
+//
+// v0.17 (rocky-sigil-78, patch 3 of FLUXC_CACHE_GAP.md): real byte-level
+// caching of rustc outputs. Before this version, `collect_outputs` stored
+// constructed paths like `<crate>.rmeta` that don't match rustc's actual
+// output names (`lib<crate>-<hash>.rmeta`), so cache entries arrived with
+// empty `outputs` maps — useless for restore. And `apply_cached_outputs`
+// only wrote a stub `.d` marker. Both fixed here.
+//
+// New layout:
+//
+//   target/flux-cache/blobs/<source_hash>/
+//       lib<crate>-<rustc-hash>.rmeta    ← byte copy of rustc's output
+//       lib<crate>-<rustc-hash>.rlib     ← byte copy
+//       <crate>-<rustc-hash>.d           ← byte copy
+//
+// `collect_outputs` scans --out-dir AFTER rustc ran, finds files matching
+// the crate name + recognised extensions, copies them to the blob dir,
+// and stores the file names (relative) in CacheEntry.outputs.
+//
+// `apply_cached_outputs` reads the blobs back and writes them to the new
+// --out-dir with the same file names. Returns `bool` so callers can fall
+// through to a real rustc invocation when the cache can't restore cleanly.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Where blobs live for a given source-hash key. Relative to current
+/// working directory's `target/` — matches `flux_cache::clean`'s convention.
+fn blob_dir_for(source_hash: &str) -> PathBuf {
+    PathBuf::from("target")
+        .join("flux-cache")
+        .join("blobs")
+        .join(source_hash)
+}
+
+/// Extract `--crate-name foo` from rustc args. Returns empty string when
+/// missing (rare — cargo always sets it).
+fn find_crate_name(args: &[String]) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--crate-name" && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+        i += 1;
+    }
+    String::new()
+}
+
+/// Extract `--out-dir` from rustc args.
+fn find_out_dir(args: &[String]) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--out-dir" && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+        i += 1;
+    }
+    String::new()
+}
+
+/// Recognised emit extensions. The empty string covers static-libs / binaries
+/// that rustc emits without an extension (e.g. an `--emit=link` binary).
+const CACHEABLE_EXTS: &[&str] = &["rmeta", "rlib", "d"];
+
+/// Scan `out_dir` for files belonging to this crate's compilation and return
+/// the matching file names (without the directory prefix). Recognised by
+/// containing `crate_name` as a substring and having a known extension.
+/// rustc generates names like `lib<crate>-<metadata-hash>.<ext>`; the hash
+/// is deterministic for a given (args, source) so the SAME compilation
+/// re-run will land on the same file name — which is exactly what makes
+/// the side-blob cache work.
+fn scan_outputs(out_dir: &Path, crate_name: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(out_dir) else { return found; };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.contains(crate_name) { continue; }
+        // Quickly filter by recognised extension.
+        if let Some(dot) = name.rfind('.') {
+            let ext = &name[dot + 1..];
+            if !CACHEABLE_EXTS.contains(&ext) {
+                continue;
+            }
+        } else {
+            // No extension — could be a binary. Skip for safety.
+            continue;
+        }
+        found.push(name);
+    }
+    found
+}
+
+/// Side-blob a single output file. Returns the file name on success.
+fn copy_output_to_blob(out_dir: &Path, blob_dir: &Path, file_name: &str) -> Option<String> {
+    let src = out_dir.join(file_name);
+    let dst = blob_dir.join(file_name);
+    fs::create_dir_all(blob_dir).ok()?;
+    fs::copy(&src, &dst).ok()?;
+    Some(file_name.to_string())
+}
+
+/// Restore a single output file from the blob dir. Returns true if the
+/// file was successfully written to out_dir.
+fn restore_output_from_blob(blob_dir: &Path, out_dir: &Path, file_name: &str) -> bool {
+    let src = blob_dir.join(file_name);
+    let dst = out_dir.join(file_name);
+    if !src.exists() { return false; }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::copy(&src, &dst).is_ok()
+}
+
+/// Collect outputs from a successful rustc invocation, side-blob the file
+/// contents, and return a CacheEntry pointing at the blob file names.
+///
+/// MUST be called AFTER rustc has run successfully (the function reads the
+/// files rustc just emitted).
+pub fn collect_outputs(rustc_args: &[String]) -> flux_cache::CacheEntry {
+    let raw_args: Vec<String> = rustc_args.to_vec();
+
+    // Find source file (positional .rs arg).
+    let source_file = rustc_args.iter()
+        .find(|a| a.ends_with(".rs") && !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_default();
+
+    let crate_name = find_crate_name(&raw_args);
+    let out_dir = find_out_dir(&raw_args);
+
+    let mut outputs = HashMap::new();
+
+    if !source_file.is_empty() && !crate_name.is_empty() && !out_dir.is_empty() {
+        let source_hash = flux_cache::compute_hash(Some(&source_file), &raw_args);
+        if !source_hash.is_empty() {
+            let blob_dir = blob_dir_for(&source_hash);
+            let out_dir_path = PathBuf::from(&out_dir);
+            for file_name in scan_outputs(&out_dir_path, &crate_name) {
+                if let Some(stored) = copy_output_to_blob(&out_dir_path, &blob_dir, &file_name) {
+                    // Key by extension (or empty for no extension) so the
+                    // entry's `outputs` map matches the historic shape of
+                    // emit_type → name. Multiple files of the same ext for
+                    // one crate are unusual; pick the last one scanned.
+                    let key = stored.rsplit_once('.')
+                        .map(|(_, ext)| ext.to_string())
+                        .unwrap_or_else(|| "link".to_string());
+                    outputs.insert(key, stored);
+                }
+            }
+        }
+    }
+
+    let source_hash = if !source_file.is_empty() {
+        flux_cache::compute_hash(Some(&source_file), &raw_args)
+    } else {
+        String::new()
+    };
+
+    flux_cache::CacheEntry {
+        source_hash: source_hash.clone(),
+        args_hash: source_hash,
+        outputs,
+        rustc_version: "1.93.1".into(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }
+}
+
+/// Restore cached outputs into the rustc-expected out_dir. Returns `true`
+/// when every file in `entry.outputs` restored successfully (cache hit
+/// can safely skip rustc); `false` otherwise (caller falls through to
+/// running rustc for real).
+pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String]) -> bool {
+    if entry.outputs.is_empty() || entry.source_hash.is_empty() {
+        return false;
+    }
+    let out_dir = find_out_dir(rustc_args);
+    if out_dir.is_empty() { return false; }
+    let blob_dir = blob_dir_for(&entry.source_hash);
+    if !blob_dir.exists() { return false; }
+    let out_dir_path = PathBuf::from(&out_dir);
+    for file_name in entry.outputs.values() {
+        if !restore_output_from_blob(&blob_dir, &out_dir_path, file_name) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let t = std::env::temp_dir().join(format!("flux-driver-test-{}-{}", name, SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&t).unwrap();
+        t
+    }
+
+    #[test]
+    fn find_crate_name_and_out_dir() {
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "mycrate".into(),
+            "--out-dir".into(), "/tmp/flux-test".into(),
+            "src/lib.rs".into(),
+        ];
+        assert_eq!(find_crate_name(&args), "mycrate");
+        assert_eq!(find_out_dir(&args), "/tmp/flux-test");
+    }
+
+    #[test]
+    fn scan_outputs_finds_crate_files() {
+        let dir = tmp_dir("scan");
+        fs::write(dir.join("libfoo-abc123.rmeta"), b"r").unwrap();
+        fs::write(dir.join("libfoo-abc123.rlib"), b"l").unwrap();
+        fs::write(dir.join("foo-abc123.d"), b"d").unwrap();
+        fs::write(dir.join("libbar-xyz.rmeta"), b"x").unwrap();   // wrong crate
+        fs::write(dir.join("libfoo-abc123.so"), b"so").unwrap();  // unsupported ext
+        let found = scan_outputs(&dir, "foo");
+        assert_eq!(found.len(), 3, "got {found:?}");
+        assert!(found.iter().any(|f| f == "libfoo-abc123.rmeta"));
+        assert!(found.iter().any(|f| f == "libfoo-abc123.rlib"));
+        assert!(found.iter().any(|f| f == "foo-abc123.d"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn collect_then_apply_roundtrip() {
+        // We can't run rustc in unit tests — simulate by:
+        // 1. pre-populating an `out_dir` with fake "outputs"
+        // 2. calling collect_outputs (which side-blobs them)
+        // 3. clearing out_dir
+        // 4. calling apply_cached_outputs and asserting the files come back
+
+        let workspace = tmp_dir("roundtrip");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"// hello").unwrap();
+        let rmeta_content = b"fake rmeta bytes";
+        let rlib_content = b"fake rlib bytes longer content here";
+        fs::write(out_dir.join("libdemo-deadbeef.rmeta"), rmeta_content).unwrap();
+        fs::write(out_dir.join("libdemo-deadbeef.rlib"), rlib_content).unwrap();
+
+        // CWD has to be the workspace for blob_dir_for("target/...") to land somewhere we can clean up.
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workspace).unwrap();
+
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_file.to_string_lossy().to_string(),
+        ];
+
+        let entry = collect_outputs(&args);
+        assert!(!entry.source_hash.is_empty(), "entry has no source_hash");
+        assert_eq!(entry.outputs.len(), 2, "expected 2 outputs, got {:?}", entry.outputs);
+
+        // Clear the out_dir to prove apply actually restores.
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(!out_dir.join("libdemo-deadbeef.rmeta").exists());
+
+        let applied = apply_cached_outputs(&entry, &args);
+        assert!(applied, "apply_cached_outputs returned false");
+        assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rmeta")).unwrap(), rmeta_content);
+        assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rlib")).unwrap(), rlib_content);
+
+        std::env::set_current_dir(&orig_cwd).unwrap();
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn apply_returns_false_when_blob_dir_missing() {
+        let workspace = tmp_dir("missing");
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workspace).unwrap();
+
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--out-dir".into(), workspace.join("out").to_string_lossy().to_string(),
+            workspace.join("src.rs").to_string_lossy().to_string(),
+        ];
+        let entry = flux_cache::CacheEntry {
+            source_hash: "fakehash".into(),
+            args_hash: "fakehash".into(),
+            outputs: vec![("rmeta".into(), "libdemo-xyz.rmeta".into())].into_iter().collect(),
+            rustc_version: "1.93.1".into(),
+            timestamp: 0,
+        };
+        let applied = apply_cached_outputs(&entry, &args);
+        assert!(!applied, "apply succeeded when blob dir doesn't exist");
+
+        std::env::set_current_dir(&orig_cwd).unwrap();
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn apply_returns_false_when_entry_empty() {
+        let args: Vec<String> = vec!["--out-dir".into(), "/tmp/x".into()];
+        let entry = flux_cache::CacheEntry {
+            source_hash: "".into(),
+            args_hash: "".into(),
+            outputs: HashMap::new(),
+            rustc_version: "1.93.1".into(),
+            timestamp: 0,
+        };
+        assert!(!apply_cached_outputs(&entry, &args));
+    }
+}

@@ -1,0 +1,312 @@
+// fluxc — CLI entry point for the Flux build orchestrator
+
+use std::env;
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    // rustc-impersonation passthrough — cargo's host-triple probe calls
+    // `$RUSTC -vV` (and sometimes `-V` / `--version`) directly, OUTSIDE the
+    // wrapper convention. If fluxc is in the rustc slot (e.g. cargo running
+    // under `fluxc self` with RUSTC_WRAPPER=fluxc, or a workspace config that
+    // misroutes RUSTC), we must look like rustc here. Forward to real rustc.
+    //
+    // Guard: only intercept when there's NO .rs source file in the args — a
+    // real wrapper invocation always has one. Without this fluxc -vV would
+    // shadow `fluxc version` and other future direct-CLI subcommands.
+    if matches!(args.get(1).map(|s| s.as_str()), Some("-vV") | Some("-V") | Some("--version"))
+        && !args.iter().any(|a| a.ends_with(".rs"))
+    {
+        let real_rustc = env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
+        let status = std::process::Command::new(&real_rustc)
+            .args(&args[1..])
+            .status()
+            .expect("real rustc on PATH for -vV passthrough");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let is_wrapper = env::var("FLUXC_WRAPPING").map(|v| v == "1").unwrap_or(false);
+
+    if is_wrapper {
+        fluxc_core::wrapper_mode(&args);
+        return;
+    }
+
+    let (config, subcommand_args) = fluxc_core::parse_args(&args[1..]);
+    let subcommand = subcommand_args.first().map(|s| s.as_str());
+
+    match subcommand {
+        Some("build") | Some("b") => fluxc_core::detect_and_build(&config, &subcommand_args[1..]),
+        Some("check") | Some("c") => fluxc_core::run_cargo("check", &config, &subcommand_args[1..]),
+        Some("test") | Some("t") => fluxc_core::run_tests(subcommand_args.get(1).map(|s|s.as_str())),
+        Some("quick") => fluxc_core::quick_build_run(subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("fluxc"), config.release),
+        Some("run") | Some("r") => fluxc_core::detect_and_run(&config, &subcommand_args[1..]),
+        Some("watch") | Some("w") => fluxc_core::watch_mode(&config, &subcommand_args[1..]),
+        Some("dev") | Some("d") => fluxc_core::dev_mode(&config),
+        Some("clean") => fluxc_core::clean(),
+        Some("serve") => {
+            let stats = fluxc_core::serve::init_live_stats();
+            fluxc_core::serve::start_server(stats, 8084);
+            loop { std::thread::sleep(std::time::Duration::from_secs(60)); }
+        }
+        Some("latex") | Some("tex") => fluxc_core::run_latex_build(&config, &subcommand_args[1..]),
+        Some("stats") | Some("s") => fluxc_core::print_stats(),
+        Some("supercluster") | Some("sc") => fluxc_core::supercluster_mode(&subcommand_args[1..]),
+        Some("self") => fluxc_core::self_build(config),
+        Some("architect") | Some("arch") => fluxc_core::phase3::architect_plan(),
+        Some("p2p-worker") => fluxc_core::p2p_worker::run_p2p_worker(),
+        Some("auto-update") => {
+            // Args after subcommand: --interval N, --apply (or -y).
+            let mut interval: u64 = 60;
+            let mut apply = false;
+            let mut i = 1;
+            while i < subcommand_args.len() {
+                match subcommand_args[i].as_str() {
+                    "--apply" | "-y" => { apply = true; i += 1; }
+                    "--interval" | "-n" => {
+                        interval = subcommand_args.get(i + 1)
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(60);
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            fluxc_core::p2p_worker::run_auto_updater_with(interval, apply)
+        }
+        Some("swarm") => { let sub = subcommand_args.get(1).map(|s|s.as_str()).unwrap_or(""); match sub { "register" => println!("{}", fluxc_core::swarm::swarm_register_cli(subcommand_args.get(2).map(|s|s.as_str()).unwrap_or("agent1"), subcommand_args.get(3).map(|s|s.as_str()).unwrap_or("qnk..."))), "claim" => println!("{}", fluxc_core::swarm::swarm_claim_cli(subcommand_args.get(2).map(|s|s.as_str()).unwrap_or("agent1"), subcommand_args.get(3).map(|s|s.as_str()).unwrap_or("flux-graph"))), _ => println!("{}", fluxc_core::swarm::swarm_status().summary()), } }
+        Some("os-stage") => {
+            // `fluxc os-stage --packages NAME1 NAME2 [--output-dir PATH]`
+            let mut packages: Vec<String> = Vec::new();
+            let mut output_dir = std::path::PathBuf::from(
+                "/home/orobit/q-narwhalknight/dist-final/quillonos"
+            );
+            let mut i = 1;
+            while i < subcommand_args.len() {
+                match subcommand_args[i].as_str() {
+                    "--packages" | "-p" => {
+                        i += 1;
+                        while i < subcommand_args.len() && !subcommand_args[i].starts_with("--") {
+                            packages.push(subcommand_args[i].clone());
+                            i += 1;
+                        }
+                    }
+                    "--output-dir" | "-o" => {
+                        if let Some(v) = subcommand_args.get(i + 1) {
+                            output_dir = std::path::PathBuf::from(v);
+                            i += 2;
+                        } else { i += 1; }
+                    }
+                    _ => i += 1,
+                }
+            }
+            if packages.is_empty() {
+                eprintln!("os-stage: --packages NAME1 [NAME2 …] required");
+                return;
+            }
+            let pkg_refs: Vec<&str> = packages.iter().map(|s| s.as_str()).collect();
+            match fluxc_core::p2p_worker::os_stage_modules(&pkg_refs, &output_dir) {
+                Ok(r) => println!(
+                    "✓ staged {} module(s), {} preserved → {}",
+                    r.modules.len(), r.preserved_entries, r.manifest_path.display()
+                ),
+                Err(e) => { eprintln!("os-stage: {}", e); std::process::exit(1); }
+            }
+        }
+        Some("release") => {
+            // `fluxc release [VERSION] [--product NAME] [--binary PATH]`
+            // Defaults: product=fluxc, binary=current_exe, version=workspace version.
+            let mut product = "fluxc".to_string();
+            let mut binary: Option<std::path::PathBuf> = None;
+            let mut version: Option<String> = None;
+            let mut i = 1;
+            while i < subcommand_args.len() {
+                match subcommand_args[i].as_str() {
+                    "--product" | "-p" => {
+                        if let Some(v) = subcommand_args.get(i + 1) {
+                            product = v.clone(); i += 2;
+                        } else { i += 1; }
+                    }
+                    "--binary" | "-b" => {
+                        if let Some(v) = subcommand_args.get(i + 1) {
+                            binary = Some(std::path::PathBuf::from(v)); i += 2;
+                        } else { i += 1; }
+                    }
+                    arg if !arg.starts_with('-') && version.is_none() => {
+                        version = Some(arg.to_string()); i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let version = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            if let Err(e) = fluxc_core::p2p_worker::publish_release_product(&product, &version, binary) {
+                eprintln!("release: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some("mcp") => fluxc_mcp::run_mcp_server(),
+        Some("version") | Some("-V") => println!("{}", fluxc_core::version()),
+        Some("api") => {
+            let title = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("Flux API");
+            let format = subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("all");
+            fluxc_core::phase3::api_generate(title, format);
+        }
+        Some("optimize") => {
+            let preset = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("BALANCED");
+            fluxc_core::phase3::optimize_analyze(preset);
+        }
+        Some("ai") => fluxc_core::phase3::ai_audit(),
+        Some("agility") => fluxc_core::phase3::agility_audit(),
+        Some("verify-proof") => {
+            let artifact = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let proof_path = subcommand_args.get(2).map(|s| s.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("{}.proof", artifact));
+            if artifact.is_empty() {
+                eprintln!("usage: fluxc verify-proof <artifact-path> [<proof-path>]");
+            } else {
+                match (std::fs::read(artifact), std::fs::read(&proof_path)) {
+                    (Ok(art_bytes), Ok(proof_bytes)) => {
+                        match fluxc_core::provenance::from_json_bytes(&proof_bytes) {
+                            Ok(proof) => match fluxc_core::provenance::verify(&art_bytes, &proof) {
+                                Ok(v) => {
+                                    let wallet_hex: String = v.agent_wallet.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let art_hex: String = v.artifact_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let src_hex: String = v.source_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let signed = !proof.sqisign_sig.is_empty();
+                                    println!("✓ Verified provenance proof");
+                                    println!("  artifact:        {} ({} bytes)", artifact, art_bytes.len());
+                                    println!("  artifact BLAKE3: {}", art_hex);
+                                    println!("  source BLAKE3:   {}", src_hex);
+                                    println!("  agent wallet:    qnk{}", wallet_hex);
+                                    println!("  timestamp:       {}us", v.timestamp_us);
+                                    println!("  SQIsign signed:  {}", if signed { "✓ L5 (292B sig, 129B pubkey)" } else { "✗ (scaffold mode)" });
+                                    println!("  on-chain backed: {}", if v.on_chain_backed { "✓" } else { "✗ (no settle_tx)" });
+                                }
+                                Err(e) => { eprintln!("✗ Verification failed: {}", e); std::process::exit(1); }
+                            },
+                            Err(e) => { eprintln!("✗ Cannot parse proof: {}", e); std::process::exit(1); }
+                        }
+                    }
+                    (Err(e), _) => { eprintln!("Cannot read artifact: {}", e); std::process::exit(1); }
+                    (_, Err(e)) => { eprintln!("Cannot read proof: {}", e); std::process::exit(1); }
+                }
+            }
+        }
+        Some("disasm") => {
+            let path = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            if path.is_empty() {
+                eprintln!("usage: fluxc disasm <object-path>");
+            } else {
+                let nm = std::process::Command::new("nm").arg(path).output();
+                let od = std::process::Command::new("objdump").args(["-d", path]).output();
+                let file = std::process::Command::new("file").arg(path).output();
+                println!("⚡ Flux disasm — {}", path);
+                if let Ok(f) = file {
+                    print!("  type:    {}", String::from_utf8_lossy(&f.stdout));
+                }
+                println!("\nSymbols (nm):");
+                if let Ok(n) = nm { print!("{}", String::from_utf8_lossy(&n.stdout)); }
+                println!("\nDisassembly (objdump -d):");
+                if let Ok(o) = od { print!("{}", String::from_utf8_lossy(&o.stdout)); }
+            }
+        }
+        Some("agent-keygen") => {
+            match fluxc_core::provenance::ensure_agent_key(None) {
+                Ok((_sk, pk)) => {
+                    let pk_hex: String = pk.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("  ✓ Agent SQIsign Level 5 key ensured");
+                    println!("    pubkey: {} ({} bytes)", &pk_hex[..pk_hex.len().min(64)], pk.len());
+                    println!("    sk stored in $FLUX_AGENT_KEY_PATH (default ~/.flux-agent-key.json)");
+                }
+                Err(e) => eprintln!("  agent-keygen failed: {}", e),
+            }
+        }
+        Some("xray") => {
+            let want_json = subcommand_args.iter().any(|a| a == "--json");
+            match fluxc_core::xray::xray() {
+                Ok(report) => {
+                    if want_json {
+                        match serde_json::to_string_pretty(&report) {
+                            Ok(s) => println!("{}", s),
+                            Err(e) => eprintln!("xray serialize error: {}", e),
+                        }
+                    } else {
+                        print!("{}", fluxc_core::xray::render_text(&report));
+                    }
+                }
+                Err(e) => eprintln!("xray: {}", e),
+            }
+        }
+        Some("compile-native") => {
+            if let Some(pkg) = config.package.as_deref() {
+                fluxc_core::phase3::compile_package(pkg);
+            } else {
+                let path = subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("main.rs");
+                fluxc_core::phase3::compile_impl_with_provenance(path, true, config.provenance);
+            }
+        }
+        Some("compile") => {
+            let path = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("main.rs");
+            fluxc_core::phase3::compile_file(path);
+        }
+        Some("chat") => fluxc_core::chat::chat_mode(),
+        Some("plan") => {
+            println!("⚡ Flux Build Plan (AI-optimized)");
+            let root = env::current_dir().unwrap_or_default();
+            match flux_graph::resolve_workspace(&root) {
+                Ok(ws) => {
+                    println!("  Crates: {} | Batches: {}", ws.crates.len(), ws.batches.len());
+                    for (i, b) in ws.batches.iter().enumerate() {
+                        let names: Vec<&str> = b.iter().map(|&idx| ws.crates[idx].name.as_str()).collect();
+                        println!("  Batch {}: {} crate(s) — {}", i+1, b.len(), names.join(", "));
+                    }
+                    println!("  Est. time: ~{}s (warm)", ws.crates.len() as f64 * 0.3);
+                }
+                Err(e) => eprintln!("  flux-graph: {}", e),
+            }
+        }
+        Some("explain") => {
+            let crate_name = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("fluxc");
+            let root = env::current_dir().unwrap_or_default();
+            match flux_graph::resolve_workspace(&root) {
+                Ok(ws) => {
+                    if let Some(ci) = ws.crates.iter().find(|c| c.name == crate_name) {
+                        println!("⚡ {}", ci.name);
+                        println!("  Path: {}", ci.path.display());
+                        println!("  Edition: {} | Type: {:?}", ci.edition, ci.crate_type);
+                        println!("  Dependencies ({}):", ci.dependencies.len());
+                        for d in &ci.dependencies {
+                            println!("    {} ({:?})", d.name, d.kind);
+                        }
+                    } else { eprintln!("  Crate '{}' not found", crate_name); }
+                }
+                Err(e) => eprintln!("  flux-graph: {}", e),
+            }
+        }
+        Some("status") => {
+            let json_out = subcommand_args.get(1).map(|s| s.as_str()) == Some("--json");
+            let root = env::current_dir().unwrap_or_default();
+            if json_out {
+                match flux_graph::resolve_workspace(&root) {
+                    Ok(ws) => {
+                        let agility = flux_graph::agility::audit_agility(&ws);
+                        println!("{{\"crates\":{},\"batches\":{},\"agility\":{:.2},\"pq_crates\":{},\"classical_crates\":{}}}",
+                            ws.crates.len(), ws.batches.len(), agility.agility_score, agility.pq_crates, agility.classical_crates);
+                    }
+                    Err(e) => println!("{{\"error\":\"{}\"}}", e),
+                }
+            } else {
+                println!("⚡ Flux Status");
+                match flux_graph::resolve_workspace(&root) {
+                    Ok(ws) => {
+                        let agility = flux_graph::agility::audit_agility(&ws);
+                        println!("  Crates: {} | Batches: {} | Agility: {:.0}%", ws.crates.len(), ws.batches.len(), agility.agility_score*100.0);
+                    }
+                    Err(e) => eprintln!("  flux-graph: {}", e),
+                }
+            }
+        }
+        _ => fluxc_core::print_usage(),
+    }
+}

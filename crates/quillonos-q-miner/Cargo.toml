@@ -1,0 +1,14 @@
+[package]
+name = "quillonos-q-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BLAKE3 CPU-mining core for QuillonOS browser tab. Compiled to wasm32-unknown-unknown as a cdylib; the os.html shell handles HTTP + UI + the mining loop, calling mine_batch in tight ~100K-nonce chunks. v0.1 covers PoW hashing only; VDF integration is v0.2."
+
+[lib]
+name = "quillonos_q_miner"
+# cdylib so wasm-bindgen-free; we declare the C ABI ourselves.
+crate-type = ["cdylib"]
+
+[dependencies]
+blake3 = { version = "1", default-features = false }

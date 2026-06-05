@@ -1,0 +1,36 @@
+[package]
+name = "flux-ue-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux UE/Web bridge — receives fluxc-mcp webhooks, broadcasts typed JSON events over WebSocket to UE5 and React clients."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# v0.13-C: the bridge's three handlers self-register via #[flux_api::api(...)]
+# so the OpenAPI/SDK pipeline doesn't depend on a hand-maintained switch in
+# flux-api::discover::known_patterns. Heuristic entry retained as fallback.
+flux-api = { path = "../flux-api" }
+# The flux_api::api proc-macro emits `::inventory::submit!`, so the host
+# crate (this one) needs `inventory` in its dep graph for the expansion to
+# resolve. Confirmed 2026-05-29 when the bridge stopped compiling after the
+# v0.13-C handlers landed without this dep.
+inventory = "0.3"
+# 2026-05-29 (rocky): use the canonical workspace_root() resolver instead of
+# bare current_dir() — the bridge was reporting `crates: 0` to UE clients
+# when launched from a launcher that inherited a parent cwd outside the
+# workspace. See feedback-flux-version-use-workspace-root memory.
+fluxc-core = { path = "../fluxc-core" }
+
+[[bin]]
+name = "flux-ue-bridge"
+path = "src/main.rs"

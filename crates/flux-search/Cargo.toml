@@ -1,0 +1,23 @@
+[package]
+name = "flux-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Search — BLAKE3-native TF-IDF search engine with PageRank, SAP scoring, snippet generation"
+
+[dependencies]
+# Crypto
+blake3 = "1"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrency
+parking_lot = "0.12"
+
+# Utils
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,21 @@
+[package]
+name = "flux-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stainless-style API Builder — #[flux::api] macro, OpenAPI 3.1, multi-lang SDK gen"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flux-graph = { path = "../flux-graph" }
+# v0.13-B: collect compile-time #[api(...)] submissions from any crate in the
+# binary. The submitter side lives in flux-api-macros.
+inventory = "0.3"
+flux-api-macros = { path = "../flux-api-macros" }
+
+[dev-dependencies]
+# Independent OpenAPI 3.1 parser. v0.12-D uses it to validate every doc
+# generate_openapi emits — proves the output is a syntactically real spec,
+# not just JSON that looks API-shaped.
+oas3 = "0.16"

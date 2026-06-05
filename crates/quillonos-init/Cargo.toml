@@ -1,0 +1,12 @@
+[package]
+name = "quillonos-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuillonOS pid-1: boot banner, mounts/proof check report, hands control to /bin/sh. Single-file WASI binary."
+
+[dependencies]
+
+[[bin]]
+name = "init"
+path = "src/main.rs"

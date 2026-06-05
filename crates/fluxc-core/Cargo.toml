@@ -1,0 +1,42 @@
+[package]
+name = "fluxc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flux-cache = { path = "../flux-cache" }
+flux-driver = { path = "../flux-driver" }
+flux-graph = { path = "../flux-graph" }
+flux-swarm-tools = { path = "../flux-swarm-tools" }
+flux-api = { path = "../flux-api" }
+flux-optimize = { path = "../flux-optimize" }
+flux-ai = { path = "../flux-ai" }
+flux-frontend = { path = "../flux-frontend" }
+flux-architect = { path = "../flux-architect" }
+flux-backend = { path = "../flux-backend" }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+notify = "7"
+blake3 = "1"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["full"] }
+flux-p2p = { path = "../flux-p2p" }
+flux-sqisign = { path = "../flux-sqisign" }
+lazy_static = "1.4"
+rand = "0.8"
+# fluxc serve TLS (FLUX_TLS_CERT/KEY) — rustls 0.23 + ring (already in the workspace lock via libp2p).
+# Lets fluxc serve terminate HTTPS itself so it can be the standalone public server for fluxapp.xyz.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+
+# tokio-uring (io_uring) is glibc-oriented and FAILS to cross-compile to musl
+# (E0308 type mismatches against musl libc). It is currently unused in fluxc-core
+# source, so gating it to glibc-only is behavior-neutral on native builds while
+# unblocking the portable musl-static fluxc (flux-fleet install target / FLUXC-MUSL).
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tokio-uring = "0.5"

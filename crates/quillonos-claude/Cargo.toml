@@ -1,0 +1,10 @@
+[package]
+name = "quillonos-claude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuillonOS `claude` — installable stub for Anthropic API integration. v0.1 prints the planned surface; Slice γ wires the actual HTTPS fetch shim."
+
+[[bin]]
+name = "claude"
+path = "src/main.rs"

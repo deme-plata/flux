@@ -1,0 +1,18 @@
+[package]
+name = "flux-kv"
+version.workspace = true
+edition = "2021"
+
+# Tiny flux-db-backed key/value store + CLI. The durable server-side persistence
+# layer for browser apps (e.g. flux-vision) that can't link the Rust flux-db
+# directly: the app's /api/save bridge SSHes to epsilon and runs `flux-kv put`.
+# Dogfoods flux-db as a real application store.
+[dependencies]
+flux-db = { path = "../flux-db" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "flux-kv"
+path = "src/bin/flux-kv.rs"

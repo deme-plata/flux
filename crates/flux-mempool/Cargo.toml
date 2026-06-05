@@ -1,0 +1,31 @@
+[package]
+name = "flux-mempool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Mempool — Narwhal-inspired, instant-confirm transaction pool for DAGKnight"
+
+[dependencies]
+# Crypto
+blake3 = "1"
+ed25519-dalek = "2"
+sha2 = "0.10"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrency
+parking_lot = "0.12"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+# Shared
+flux-cache = { path = "../flux-cache" }
+flux-p2p = { path = "../flux-p2p" }
+
+# Utils
+hex = "0.4"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

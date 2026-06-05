@@ -1,0 +1,24 @@
+[package]
+name = "sigil-ashwalker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ASHWALKER — a SIGIL terminal ARPG (prototype 1).
+# A Sigil-wielder moves in 3D (isometric, Diablo-style) through the Ashlands, casts MCP-combo
+# spells to break enemies, and on victory ASCENDS into a House of Crown & Ash.
+# FLUXFOOD: std-only, zero deps — fast compile, fully unit-testable, runnable demo bin.
+
+[[bin]]
+name = "ashwalker"
+path = "src/bin/ashwalker.rs"
+
+# ASHWALKER · LIVE — real-time Witcher-3-feel combat (dodge/light/heavy/parry + 5 signs + telegraphs).
+[[bin]]
+name = "ashwalker-live"
+path = "src/bin/ashwalker-live.rs"
+
+# ASHWALKER · BOSS — fight the prototype-3 bosses (Prism Czar / Sediment / Nullglyph) live.
+[[bin]]
+name = "ashwalker-boss"
+path = "src/bin/ashwalker-boss.rs"

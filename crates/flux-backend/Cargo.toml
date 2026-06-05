@@ -1,0 +1,15 @@
+[package]
+name = "flux-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux compiler backend — Cranelift CLIF generation from Flux IR (Phase 3d MVP)"
+
+[dependencies]
+cranelift-codegen = "0.114"
+cranelift-frontend = "0.114"
+cranelift-module = "0.114"
+cranelift-object = "0.114"
+cranelift-native = "0.114"
+target-lexicon = "0.12"
+flux-frontend = { path = "../flux-frontend" }

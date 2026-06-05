@@ -1,0 +1,9 @@
+[package]
+name = "flux-uint"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[features]
+default = []

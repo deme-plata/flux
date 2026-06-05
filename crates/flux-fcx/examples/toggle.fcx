@@ -1,0 +1,10 @@
+// FCX v0.3 — conditional rendering: {cond && <el/>} → Slint `if`.
+export function Toggle() {
+  const [on, setOn] = useState(false);
+  return (
+    <vbox>
+      <button onClick={() => setOn(!on)}>Toggle</button>
+      {on && <text>Now visible</text>}
+    </vbox>
+  );
+}

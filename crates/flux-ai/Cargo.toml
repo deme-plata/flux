@@ -1,0 +1,11 @@
+[package]
+name = "flux-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux AI-mode rules — lifetime inference, Send/Sync, happens-before, unsafe verify, deadlock freedom"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flux-graph = { path = "../flux-graph" }

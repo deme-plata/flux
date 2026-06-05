@@ -1,0 +1,20 @@
+[package]
+name = "flux-promote-gate"
+version.workspace = true
+edition = "2021"
+
+# The battle-test promote gate: decides whether a candidate build may be
+# promoted testnet -> mainnet. Pure logic (no I/O), plus a CLI the SSH
+# auto-updater gates on (exit 0 = promote, 1 = hold). Three conditions, all
+# required: version moves forward · all testnet gates green · governance quorum
+# (2-of-2 money/consensus, 1-of-2 low-risk). std + serde only.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "flux-promote-gate"
+path = "src/bin/flux-promote-gate.rs"

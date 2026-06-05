@@ -1,0 +1,20 @@
+[package]
+name = "flux-chronos"
+version.workspace = true
+edition.workspace = true
+description = "Deterministic multiverse simulation framework for Flux chains. Virtual time (72h soak in 72s), in-memory gossipsub mesh, parallel branching, time-travel debug, MCP-driveable. Spec: ../docs/flux-chronos-spec.md."
+
+# CHRONOS-A scaffold: Universe + VirtualClock + SimNode trait + in-memory net
+# + one demo proving two simulated SIGIL-shaped nodes exchange a block under
+# virtual time. Multiverse fork/diff (CHRONOS-B), property fuzzer
+# (CHRONOS-C), MCP tools (CHRONOS-D), browser viz (CHRONOS-G) follow.
+
+[dependencies]
+serde     = { version = "1", features = ["derive"] }
+thiserror = { workspace = true }
+# Deterministic RNG — every scenario is seeded so reruns are identical.
+rand        = { version = "0.8", default-features = false, features = ["std_rng"] }
+rand_chacha = "0.3"
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,18 @@
+[package]
+name = "flux-quorum"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-quorum (S6) — general M-of-N signature quorum. ONE quorum abstraction for the whole stack: FLUXBURST VBC finalization, the SIGIL DNS-anchor checkpoint (_sigil-tip), and v0.0.5 R8 release announcements all consume it instead of each rolling their own. Scheme-agnostic by design (crypto agility — the quorum LOGIC never hardcodes SQIsign; the scheme is supplied via QuorumVerifier)."
+
+# FLUXFOOD-light core: blake3 + serde. The real SQIsign-L5 verifier wires in
+# behind the `sqisign` feature (flux-sqisign) — kept out of the default build so
+# the quorum logic stays trivially testable + fast.
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+serde_json = { workspace = true }
+flux-sqisign = { path = "../flux-sqisign", optional = true }
+
+[features]
+sqisign = ["dep:flux-sqisign"]

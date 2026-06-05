@@ -1,0 +1,17 @@
+[package]
+name = "flux-sap-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-sap-feed — the semantic link between the AI-dev benchmark and the network's trust scoring. Maps a flux-ai-bench result into SAP (Score-Adjusted Priority) observations and records them into the DAGKnight peer ScoreTable: dev_score→contribution, build p50→latency (exp(-p50/100), matching the engine), QUG→stake, T6 fabrications→accuracy hit, pass-rate→uptime. Pure mapping + ScoreTable.update; binds no port. The live transport (NetworkManager::start + Delta/Epsilon mesh) is a separate, outward-facing step."
+
+[dependencies]
+flux-p2p = { path = "../flux-p2p" }
+
+[dev-dependencies]
+# run the actual benchmark (naive grader) through the SAP feed end-to-end
+flux-ai-bench = { path = "../flux-ai-bench" }
+serde_json = "1"
+blake3 = "1" # real BLAKE3 for the T3 provenance proof (no b3sum on the box)
+flux-sqisign = { path = "../flux-sqisign" } # real SQIsign-L5 sign+verify (MCP tool truncates keys)
+hex = "0.4"

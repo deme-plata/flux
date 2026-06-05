@@ -1,0 +1,13 @@
+[package]
+name = "flux-legacy2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-legacy PROTOTYPE 2 — the architecture/build lens for a legacy Rust workspace: dependency-graph build parallelism, blast-radius keystones, safe-first leaves, and crypto-agility PQ migration order. Built for the 100-crate Quillon Graph node."
+
+[dependencies]
+flux-graph = { path = "../flux-graph" }
+
+[[bin]]
+name = "flux-legacy2"
+path = "src/bin/flux-legacy2.rs"

@@ -1,0 +1,86 @@
+{
+  "manifest_version": 3,
+  "name": "Flux Eye",
+  "version": "0.2.8",
+  "description": "Live in-browser introspection for the Flux dev loop. Polls a command queue on the dev host, executes DOM queries / clicks / snapshots in the active tab, posts results back. First consumer: the SIGIL wallet.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://sigileye.quillon.xyz/*",
+    "https://sigilgraph.quillon.xyz/*",
+    "https://quillon.xyz/*",
+    "http://flux/*",
+    "http://flux:*/*",
+    "http://localhost/*",
+    "http://localhost:*/*",
+    "http://127.0.0.1/*",
+    "http://127.0.0.1:*/*",
+    "https://89.149.241.126:9789/*",
+    "http://89.149.241.126:9789/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://sigileye.quillon.xyz/*",
+        "https://sigilgraph.quillon.xyz/*",
+        "https://quillon.xyz/*",
+        "http://flux/*",
+        "http://flux:*/*",
+        "http://localhost/*",
+        "http://localhost:*/*",
+        "http://127.0.0.1/*",
+        "http://127.0.0.1:*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://sigileye.quillon.xyz/*",
+        "https://sigilgraph.quillon.xyz/*",
+        "https://quillon.xyz/*",
+        "http://flux/*",
+        "http://flux:*/*",
+        "http://localhost/*",
+        "http://localhost:*/*",
+        "http://127.0.0.1/*",
+        "http://127.0.0.1:*/*"
+      ],
+      "js": [
+        "content-iso.js"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
+  "action": {
+    "default_title": "Flux Eye",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

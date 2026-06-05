@@ -1,0 +1,15 @@
+[package]
+name = "flux-bbq"
+version.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "flux-bbq — the agentic grill. Put LLM/agent jobs (skewers) on the pit; they cook on a GPU endpoint under a concurrency cap so one box never gets overloaded (the lesson from the 72b armies that timed out when 4 jobs hit one A100 at once). Collect them when done."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+[[bin]]
+name = "flux-bbq-book"
+path = "src/bin/flux-bbq-book.rs"

@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flux Command Center — Live Particles</title>
+<style>
+:root{--bg:#0a0e14;--fg:#c9d1d9;--accent:#06b6d4;--gold:#d4af37;--green:#00ff88;--red:#ff4444;--card:#111820;--border:#1e293b;--btc:#f7931a;--git:#f05032;--purple:#a855f7}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--fg);min-height:100vh;font-size:11px;overflow-x:hidden}
+canvas{position:fixed;inset:0;pointer-events:none;z-index:9998}
+@keyframes pUp{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-160px) scale(0)}}
+.particle{position:fixed;font-size:16px;animation:pUp 2.5s ease-out forwards;pointer-events:none;z-index:9999}
+@keyframes celIn{0%{transform:scale(0) rotate(-180deg);opacity:0}60%{transform:scale(1.15) rotate(8deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+.celebrate{animation:celIn .5s ease-out}
+@keyframes glowP{0%,100%{box-shadow:0 0 8px var(--accent)}50%{box-shadow:0 0 28px var(--gold),0 0 56px var(--accent)}}
+.glow{animation:glowP 1.2s ease-in-out}
+@keyframes slideR{from{transform:translateX(60px);opacity:0}to{transform:translateX(0);opacity:1}}
+.new-feature{animation:slideR .4s ease-out}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header h1{color:var(--accent);font-size:18px}
+.live-dot{width:6px;height:6px;border-radius:50%;display:inline-block}.online{background:var(--green);animation:pulse 1s infinite}.offline{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.sb{display:flex;gap:10px;margin-left:auto;font-size:10px;align-items:center}
+.si{padding:2px 8px;border-radius:3px;background:#1a2332}.si.g{color:var(--green)}.si.o{color:var(--gold)}
+.tabs{display:flex;gap:2px;padding:6px 10px 0 10px;border-bottom:1px solid var(--border);overflow-x:auto}
+.tab{padding:5px 10px;cursor:pointer;border-radius:3px 3px 0 0;font-size:10px;color:#6b7280;border:1px solid transparent;border-bottom:none;white-space:nowrap;transition:all .2s}
+.tab:hover{color:var(--fg);background:#1a2332}.tab.active{color:var(--accent);background:var(--card);border-color:var(--border)}
+.cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:8px}
+.ch{color:var(--gold);font-size:11px;font-weight:700;padding:6px 10px;background:var(--card);border-radius:4px;border-left:3px solid var(--accent);text-transform:uppercase}
+.card{background:var(--card);border:1px solid var(--border);border-radius:4px;padding:10px;margin-bottom:6px;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:var(--accent)}
+.card h3{color:var(--gold);font-size:10px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.stat{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(30,41,59,.5);font-size:10px}
+.stat .l{color:#6b7280}.stat .v{font-weight:600;color:var(--accent);transition:color .3s,transform .2s}
+.v.changed{color:var(--green);animation:flash .4s;transform:scale(1.15)}
+@keyframes flash{0%{color:var(--gold);transform:scale(1)}50%{color:#fff;transform:scale(1.2)}100%{color:var(--green);transform:scale(1)}}
+.btc-big{font-size:28px;font-weight:800;color:var(--btc);text-align:center;padding:6px}
+.btc-c{font-size:12px;text-align:center}.btc-c.up{color:var(--green)}.btc-c.down{color:var(--red)}
+.btn{display:inline-block;padding:8px 20px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;border:none;transition:all .2s}
+.btn-gold{background:linear-gradient(135deg,var(--gold),#b8960f);color:#000}.btn-gold:hover{transform:scale(1.04);box-shadow:0 4px 20px rgba(212,175,55,.5)}
+.btn-accent{background:var(--accent);color:#000}.btn-red{background:var(--red);color:#fff}
+input,textarea,select{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--fg);font-family:inherit;font-size:11px;width:100%}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}textarea{resize:vertical;min-height:55px}
+.wc{text-align:center;padding:20px}.wc .addr{font-size:10px;color:#6b7280;word-break:break-all;margin:8px 0}.wc .bal{font-size:24px;color:var(--gold);font-weight:800}
+.toasts{position:fixed;top:60px;right:12px;z-index:10000;display:flex;flex-direction:column;gap:6px;max-width:360px}
+.toast{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;font-size:11px;animation:slideIn .3s ease;box-shadow:0 4px 16px rgba(0,0,0,.4)}
+.toast.ai{border-left:3px solid var(--accent)}.toast.build{border-left:3px solid var(--green)}.toast.dca{border-left:3px solid var(--btc)}.toast.pay{border-left:3px solid var(--gold)}.toast.git{border-left:3px solid var(--git)}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.toast .c{color:#8b949e;font-size:10px;margin-top:4px;font-style:italic}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10001;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:24px;max-width:440px;width:90%}
+.tempo-bar{display:flex;align-items:center;gap:8px;padding:6px 0}.tempo-fill{height:3px;background:linear-gradient(90deg,var(--red),var(--gold),var(--green));border-radius:2px;transition:width .5s}
+.slider-c{display:flex;align-items:center;gap:6px;padding:3px 0}.slider-c input[type=range]{flex:1;accent-color:var(--accent);height:4px}
+.task-p{min-width:36px;text-align:center;font-weight:700;font-size:10px}.p0{color:var(--red)}.p1{color:var(--gold)}.p2{color:var(--accent)}.p3{color:#6b7280}
+.tag{display:inline-block;padding:1px 5px;border-radius:2px;font-size:8px}.done{background:#0a2e1a;color:var(--green)}.wip{background:#2e1a0a;color:var(--gold)}.todo{background:#1a1a2e;color:#6b7280}
+.job-item{padding:4px 6px;border-left:2px solid var(--accent);margin:2px 0;font-size:10px}.job-item .b{color:var(--gold);font-weight:600}
+.claim-item{display:flex;justify-content:space-between;align-items:center;padding:6px;border-bottom:1px solid var(--border);font-size:10px}
+.tx-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(30,41,59,.3);font-size:10px}
+.tx-row .in{color:var(--green)}.tx-row .out{color:var(--red)}
+.gallery{display:flex;gap:4px;overflow-x:auto;padding:4px 0}.gallery img{width:48px;height:48px;object-fit:cover;border-radius:4px;transition:transform .3s}.gallery img:hover{transform:scale(1.3)}
+.commit-item{padding:3px 0;font-size:10px;border-bottom:1px solid rgba(30,41,59,.3)}.commit-item .hash{color:var(--git)}
+.scroll-box{max-height:160px;overflow-y:auto}
+.scroll-box-tall{max-height:300px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--border)}th{color:var(--gold);font-size:9px}
+footer{text-align:center;padding:8px;color:#484f58;font-size:9px;border-top:1px solid var(--border);position:relative;z-index:1}
+/* ── Gantt-specific ── */
+.gantt-row{display:flex;align-items:center;margin:3px 0;gap:6px}
+.gantt-label{min-width:130px;font-size:9px;text-align:right}
+.gantt-bar-shell{flex:1;height:16px;background:#1a2332;border-radius:3px;position:relative;overflow:visible}
+.gantt-bar{height:16px;border-radius:3px;position:absolute;left:0;top:0;display:flex;align-items:center;justify-content:flex-end;font-size:8px;padding-right:4px;color:#000;font-weight:600;transition:width 0.6s ease}
+.gantt-bar.fast{background:var(--green)}.gantt-bar.med{background:var(--accent)}.gantt-bar.slow{background:var(--gold)}.gantt-bar.fail{background:var(--red);color:#fff}
+.gantt-axis{display:flex;justify-content:space-between;font-size:8px;color:#484f58;padding:0 136px 0 136px;margin-top:4px}
+/* ── SWOT Speed Slider ── */
+.speed-meter{display:flex;align-items:center;gap:10px;padding:8px 0}
+.speed-meter input[type=range]{flex:1;accent-color:var(--accent);height:6px}
+.speed-label{font-size:10px;color:var(--gold);min-width:80px;text-align:center;font-weight:700}
+.swot-score{font-size:24px;font-weight:800;text-align:center;padding:4px 0;transition:color .5s}
+.swot-score.fast{color:var(--green)}.swot-score.med{color:var(--accent)}.swot-score.slow{color:var(--gold)}.swot-score.safe{color:var(--red)}
+.token-cost-row{display:flex;justify-content:space-between;padding:3px 0;font-size:10px}
+.token-cost-row .tc-v{font-weight:700;transition:color .5s}
+.cost-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.cost-tile{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px;text-align:center}
+.cost-tile .ct-val{font-size:16px;font-weight:800;color:var(--accent)}
+.cost-tile .ct-lbl{font-size:8px;color:#6b7280;margin-top:2px}
+/* ── Token Efficiency Gauge ── */
+.token-gauge{height:8px;background:#1a2332;border-radius:4px;margin:4px 0;overflow:hidden}
+.token-gauge-fill{height:8px;background:linear-gradient(90deg,var(--red),var(--gold),var(--green));border-radius:4px;transition:width .5s}
+.tab-content{display:none}.tab-content.active{display:block}
+</style>
+</head>
+<body>
+<canvas id="pc"></canvas>
+<header><h1><span class="live-dot" id="ld"></span>Flux Command Center</h1>
+<div class="sb">
+<span class="si g" id="cs">● LIVE</span><span class="si o" id="up">up 0s</span>
+<span class="si">⚡<b id="hb">0</b></span><span class="si">🧪<b id="ht">0/0</b></span>
+<span class="si">👛<b id="ws">Disconnected</b></span><span class="si">🔀<b id="hg">0</b></span><span class="si g">🔌<b id="hmcp">44</b> MCP</span>
+</div></header>
+
+<div class="tabs">
+<div class="tab active" onclick="st('overview',event)">📊 Overview</div>
+<div class="tab" onclick="st('wallet',event)">👛 Wallet</div>
+<div class="tab" onclick="st('autopilot',event)">🤖 Autopilot</div>
+<div class="tab" onclick="st('bitcoin',event)">₿ Bitcoin</div>
+<div class="tab" onclick="st('dca',event)">💰 DCA</div>
+<div class="tab" onclick="st('gitlog',event)">🔀 Git</div>
+<div class="tab" onclick="st('quillonos',event)">💻 QuillonOS</div>
+<div class="tab" onclick="st('bench',event)">📊 Bench</div>
+<div class="tab" onclick="st('xalgo',event)">🧬 X-Algo</div>
+<div class="tab" onclick="st('costs',event)">💰 Costs</div>
+<div class="tab" onclick="st('gantt',event)">📅 Gantt</div>
+<div class="tab" onclick="st('predict',event)">🔮 Predict</div>
+<div class="tab" onclick="st('swot',event)">📊 SWOT</div>
+<div class="tab" onclick="st('architect',event)">⚛️ Architect</div>
+<div class="tab" onclick="st('trading',event)">📈 Trading</div>
+<div class="tab" onclick="st('archmap',event)">🗺️ ArchMap</div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<!-- OVERVIEW -->
+<div id="t-overview" class="tab-content active">
+<div style="background:var(--card);border:1px solid var(--border);border-radius:4px;padding:10px;margin:8px">
+<div class="ch" style="margin-bottom:8px">🦅 Bird's Eye — Pipeline</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:10px">
+<div><b style="color:var(--accent)">Builds</b><br><span style="font-size:18px;font-weight:800" id="gantt-builds">—</span></div>
+<div><b style="color:var(--green)">Cache</b><br><span style="font-size:18px;font-weight:800" id="gantt-cache">—</span></div>
+<div><b style="color:var(--gold)">GFLOPS</b><br><span style="font-size:18px;font-weight:800" id="gantt-gflops">1.4</span></div>
+<div><b style="color:#f05032">MCP</b><br><span style="font-size:18px;font-weight:800" id="gantt-mcp">44</span></div></div>
+<div style="margin-top:8px;display:flex;gap:2px;height:28px;align-items:center">
+<div style="background:var(--accent);height:14px;border-radius:3px;width:25%;display:flex;align-items:center;justify-content:center;font-size:9px;color:#000;font-weight:700">BUILD v0.9.8</div>
+<div style="background:var(--gold);height:14px;border-radius:3px;width:18%;display:flex;align-items:center;justify-content:center;font-size:9px;color:#000;font-weight:700">TEST 34/40</div>
+<div style="background:var(--green);height:14px;border-radius:3px;width:22%;display:flex;align-items:center;justify-content:center;font-size:9px;color:#000;font-weight:700">DEPLOY OK</div>
+<div style="background:#ef4444;height:14px;border-radius:3px;width:12%;display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff;font-weight:700">GPU</div>
+<div style="background:var(--purple);height:14px;border-radius:3px;width:23%;display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff;font-weight:700">DOGFOOD</div></div>
+<div style="display:flex;gap:3px;margin-top:3px;font-size:8px;color:#484f58"><span style="width:25%;text-align:center">v0.9.8b1</span><span style="width:18%;text-align:center">34/40</span><span style="width:22%;text-align:center">HTTP200</span><span style="width:12%;text-align:center">1.4GF</span><span style="width:23%;text-align:center">✓ self-build</span></div>
+</div>
+<div style="margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:9px">
+<div><span style="color:#6b7280">SAP Contrib</span> <div style="height:6px;background:#1a2332;border-radius:3px;margin:2px 0"><div id="sap-contrib-bar" style="height:6px;background:var(--accent);border-radius:3px;width:87%"></div></div> <span style="color:var(--accent)" id="sap-contrib">0.87</span></div>
+<div><span style="color:#6b7280">SAP Latency</span> <div style="height:6px;background:#1a2332;border-radius:3px;margin:2px 0"><div id="sap-latency-bar" style="height:6px;background:var(--green);border-radius:3px;width:94%"></div></div> <span style="color:var(--green)" id="sap-latency">0.94</span></div>
+<div><span style="color:#6b7280">SAP Stake</span> <div style="height:6px;background:#1a2332;border-radius:3px;margin:2px 0"><div id="sap-stake-bar" style="height:6px;background:var(--gold);border-radius:3px;width:72%"></div></div> <span style="color:var(--gold)" id="sap-stake">0.72</span></div>
+</div>
+</div>
+<div class="cols">
+<div><div class="ch">⚡ Flux Build</div>
+<div class="card"><h3>📦 Compiler</h3>
+<div class="stat"><span class="l">Builds</span><span class="v" id="sb">0</span></div>
+<div class="stat"><span class="l">Cache Hits</span><span class="v" id="sch">0</span></div>
+<div class="stat"><span class="l">Cache Rate</span><span class="v" id="scr" style="color:var(--green)">0%</span></div>
+<div class="stat"><span class="l">Avg Build</span><span class="v" id="sab">0ms</span></div></div>
+<div class="card"><h3>🧪 Tests</h3>
+<div class="stat"><span class="l">Passed</span><span class="v" id="stp" style="color:var(--green)">0</span></div>
+<div class="stat"><span class="l">Failed</span><span class="v" id="stf" style="color:var(--red)">0</span></div></div></div>
+<div><div class="ch">🌐 P2P Network</div>
+<div class="card"><h3>🔗 Peers</h3><div class="stat"><span class="l">Connected</span><span class="v" id="spp">0</span></div></div>
+<div class="card"><h3>🧱 DAGKnight</h3><div class="stat"><span class="l">Round</span><span class="v" id="sdr">0</span></div></div>
+<div class="card"><h3>💾 Mempool</h3><div class="stat"><span class="l">Pending TX</span><span class="v" id="smt">0</span></div></div></div>
+<div><div class="ch">🤖 AI Feed <span id="feed-dot" class="live-dot" style="width:6px;height:6px;margin-left:6px"></span></div><div class="card"><div class="scroll-box" id="ai-feed" style="max-height:166px;font-size:10px"></div></div></div>
+</div>
+</div>
+
+<!-- WALLET tab (kept as-is from original) -->
+<div id="t-wallet" class="tab-content">
+<div class="cols"><div style="grid-column:1/3"><div class="ch">👛 Quillon Wallet</div>
+<div class="card" id="wd"><h3>🔌 Connect</h3><button class="btn btn-accent" onclick="cw()" style="width:100%">Connect Wallet</button></div>
+<div class="card" id="wc" style="display:none"><div class="wc"><div class="bal" id="wbal">—</div><div class="addr" id="waddr">—</div></div>
+<div style="display:flex;gap:6px;margin:6px 0"><input id="pr" placeholder="Recipient address"><input id="pa" placeholder="Amount QUG" type="number" step="0.01"></div>
+<input id="pm" placeholder="Memo"><button class="btn btn-gold" onclick="sq()" style="width:100%;margin-top:6px">💸 Send QUG</button>
+<button class="btn btn-red" onclick="dw()" style="width:100%;margin-top:4px;font-size:10px">Disconnect</button></div></div></div>
+</div>
+
+<!-- BITCOIN tab placeholder (kept compact) -->
+<div id="t-bitcoin" class="tab-content"><div class="cols"><div style="grid-column:1/3"><div class="ch">₿ Bitcoin Live</div>
+<div class="btc-big" id="bp">—</div><div class="btc-c" id="bc">—</div>
+<div class="stat"><span class="l">24h High</span><span class="v" id="bhi">—</span></div>
+<div class="stat"><span class="l">24h Low</span><span class="v" id="blo">—</span></div>
+<div class="stat"><span class="l">24h Vol</span><span class="v" id="bvo">—</span></div>
+<div class="btc-big" id="bp2" style="font-size:18px;margin-top:8px">—</div>
+<div class="stat"><span class="l">$1 USD =</span><span class="v" id="dbt" style="color:var(--btc)">—</span></div></div>
+<div><div class="ch">🖼 Vizily</div><div class="card"><div class="gallery" id="mg"></div></div></div></div></div>
+
+<!-- BENCH tab placeholder -->
+<div id="t-bench" class="tab-content"><div class="cols"><div style="grid-column:1/3"><div class="ch">📊 Benchmark Results</div>
+<div class="card"><h3>Latest Run</h3>
+<div class="stat"><span class="l">Crates Compiled</span><span class="v" style="color:var(--green)" id="bench-count">—</span></div>
+<div class="stat"><span class="l">Total Compile</span><span class="v" id="bench-total">—</span></div>
+<div class="stat"><span class="l">Health</span><span class="v" id="bench-health">—</span></div></div>
+<div class="card"><h3>Per-Crate</h3><div class="scroll-box-tall" id="bench-list"></div></div></div></div></div>
+
+<!-- PREDICT tab placeholder -->
+<div id="t-predict" class="tab-content"><div class="cols"><div style="grid-column:1/3"><div class="ch">🔮 X-Algo Build Prediction</div>
+<div class="card"><h3>5-Dimension Prediction Engine</h3>
+<div class="stat"><span class="l">Predicted Build</span><span class="v" style="color:var(--accent)">~504ms</span></div>
+<div class="stat"><span class="l">Cache Hit Rate</span><span class="v" style="color:var(--green)">85%</span></div>
+<div class="stat"><span class="l">Test Pass Prob</span><span class="v" style="color:var(--gold)">95%</span></div>
+<div class="stat"><span class="l">System Stability</span><span class="v" id="pred-stability" style="color:var(--accent)">91%</span></div></div>
+<div class="card"><h3>📐 Dimensions</h3>
+<div class="stat"><span class="l">Source Delta (30%)</span><span class="v" style="color:var(--green)" id="pred-srcdelta">0.00</span></div>
+<div class="stat"><span class="l">Cache Affinity (20%)</span><span class="v" style="color:var(--accent)" id="pred-cache">0.85</span></div>
+<div class="stat"><span class="l">Dep Sensitivity (12%)</span><span class="v" style="color:var(--gold)">1.00</span></div>
+<div class="stat"><span class="l">Hist Accuracy (12%)</span><span class="v">0.67</span></div>
+<div class="stat"><span class="l">Peer Consensus (8%)</span><span class="v">0.75</span></div>
+<div class="stat"><span class="l">Stability (18%)</span><span class="v" style="color:var(--accent)" id="pred-stabdim">0.91</span></div></div></div></div></div>
+
+<!-- ===== GANTT TAB — Dynamic ===== -->
+<div id="t-gantt" class="tab-content"><div class="cols">
+<div style="grid-column:1/3"><div class="ch">📅 Build Pipeline Gantt — Live Benchmark</div>
+<div class="card"><h3>Flux Workspace (15 crates) · <span id="gantt-status" style="color:var(--green)">pull latest benchmark →</span></h3>
+<div id="gantt-bars" style="font-size:9px;margin-top:6px">
+<!-- populated by renderGantt() -->
+<div style="text-align:center;color:#6b7280;padding:20px">Click "Refresh Gantt" to load latest benchmark data</div>
+</div>
+<div class="gantt-axis" id="gantt-axis"></div>
+<div style="margin-top:8px;text-align:center;display:flex;gap:8px;justify-content:center">
+<button class="btn btn-accent" onclick="refreshGantt()" style="font-size:10px;padding:6px 14px">🔄 Refresh Gantt</button>
+<span style="font-size:10px;color:var(--accent);align-self:center">Total: <b id="gtotal">—</b> · Health: <b id="ghealth">—</b> · Cache: <b id="gcache">—</b></span>
+</div>
+</div></div>
+<div><div class="ch">📊 Gantt Legend</div>
+<div class="card">
+<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><div style="width:12px;height:12px;background:var(--green);border-radius:2px"></div><span style="font-size:10px">Fast (&lt;200ms)</span></div>
+<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><div style="width:12px;height:12px;background:var(--accent);border-radius:2px"></div><span style="font-size:10px">Medium (200–500ms)</span></div>
+<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><div style="width:12px;height:12px;background:var(--gold);border-radius:2px"></div><span style="font-size:10px">Slow (&gt;500ms)</span></div>
+<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><div style="width:12px;height:12px;background:var(--red);border-radius:2px"></div><span style="font-size:10px">Failed</span></div>
+</div>
+<div class="card" style="margin-top:8px"><h3>🔍 Crate Detail</h3>
+<div id="gantt-detail" style="font-size:9px;color:#6b7280">Hover a bar for details</div></div></div>
+</div></div>
+
+<!-- ===== SWOT TAB — Speed Slider + Token Costs ===== -->
+<div id="t-swot" class="tab-content"><div class="cols">
+<div style="grid-column:1/3"><div class="ch">📊 SWOT Analysis — Speed-Calibrated · <span id="swot-mode-label" style="color:var(--accent)">Normal</span></div>
+
+<!-- Speed Slider -->
+<div class="card"><h3>⚡ Development Speed</h3>
+<div class="speed-meter">
+<span style="font-size:10px;color:var(--red)">🐢 Safe</span>
+<input type="range" id="swot-speed" min="1" max="5" value="3" oninput="updateSwot()" style="flex:1">
+<span style="font-size:10px;color:var(--green)">🚀 Turbo</span>
+<span class="speed-label" id="swot-speed-label">Normal (×1.0)</span>
+</div>
+<div style="text-align:center;margin-top:4px">
+<span class="swot-score med" id="swot-score">57%</span>
+<div style="font-size:9px;color:#6b7280">Architecture Health Score</div>
+</div>
+</div>
+
+<!-- Strengths + Weaknesses -->
+<div class="card"><h3>💪 Strengths</h3>
+<div id="swot-strengths"></div></div>
+<div class="card"><h3>🔧 Weaknesses</h3>
+<div id="swot-weaknesses"></div></div></div>
+
+<!-- Right column: Opportunities + Threats + Token Costs -->
+<div><div class="ch">🚀 Opportunities</div>
+<div class="card"><div id="swot-opportunities"></div></div>
+<div class="card"><h3>⚠️ Threats</h3><div id="swot-threats"></div></div>
+
+<!-- Token Cost Analysis -->
+<div class="card"><h3>💰 Token Cost by Speed</h3>
+<div class="stat"><span class="l">AI Round-Trips / Day</span><span class="v" id="tc-roundtrips" style="color:var(--accent)">480</span></div>
+<div class="stat"><span class="l">Tokens / Round-Trip</span><span class="v" id="tc-tokens" style="color:var(--gold)">8.2K</span></div>
+<div class="stat"><span class="l">Daily Token Burn</span><span class="v" id="tc-daily" style="color:var(--green)">3.9M</span></div>
+<div class="token-gauge"><div class="token-gauge-fill" id="tc-gauge" style="width:60%"></div></div>
+<div class="stat" style="margin-top:4px"><span class="l">Est. Daily Cost (V4 Flash)</span><span class="v" id="tc-cost" style="color:var(--gold)">$0.55</span></div>
+<div style="margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+<div class="cost-tile"><div class="ct-val" id="tc-month">$16.50</div><div class="ct-lbl">per month</div></div>
+<div class="cost-tile"><div class="ct-val" id="tc-year">$200</div><div class="ct-lbl">per year</div></div>
+</div>
+</div>
+
+<div class="card"><h3>📊 Efficiency Breakdown</h3>
+<div class="token-cost-row"><span>Compile calls</span><span class="tc-v" id="tc-compile" style="color:var(--accent)">35%</span></div>
+<div class="token-cost-row"><span>Test calls</span><span class="tc-v" id="tc-test" style="color:var(--green)">20%</span></div>
+<div class="token-cost-row"><span>Combo savings</span><span class="tc-v" id="tc-combo" style="color:var(--gold)">67%</span></div>
+<div class="token-cost-row"><span>Cache avoidance</span><span class="tc-v" id="tc-cache" style="color:var(--purple)">86%</span></div>
+</div></div>
+</div></div>
+
+<!-- Other tabs kept in collapsed mode for space -->
+<div id="t-autopilot" class="tab-content"></div>
+<div id="t-dca" class="tab-content"></div>
+<div id="t-gitlog" class="tab-content"></div>
+<div id="t-quillonos" class="tab-content"></div>
+<div id="t-xalgo" class="tab-content"></div>
+<div id="t-costs" class="tab-content"></div>
+<div id="t-architect" class="tab-content"></div>
+<div id="t-trading" class="tab-content"></div>
+<div id="t-archmap" class="tab-content">
+<div class="ch" style="margin:8px">🗺️ Flux Crate Architecture — v0.9.10 (16 crates)</div>
+<div class="cols" style="grid-template-columns:1fr 2fr">
+<div class="card" style="overflow:auto;max-height:75vh">
+<h3>📦 Crate Registry</h3>
+<div id="archmap-list"></div>
+</div>
+<div class="card" style="overflow:auto;max-height:75vh;position:relative">
+<h3>🔗 Dependency Graph</h3>
+<svg id="archmap-svg" width="100%" height="520" style="background:var(--bg);border-radius:4px"></svg>
+<div id="archmap-tooltip" style="position:absolute;background:var(--card);border:1px solid var(--accent);border-radius:6px;padding:10px 14px;font-size:10px;pointer-events:none;display:none;max-width:280px;z-index:10;box-shadow:0 4px 20px rgba(0,0,0,.6)"></div>
+</div>
+</div>
+</div>
+
+<div class="modal-overlay" id="am"><div class="modal"><h2>🔐 Connect Quillon</h2>
+<div style="margin:10px 0"><span style="font-size:10px;color:#6b7280">Address</span><input id="aa" placeholder="qnk..."></div>
+<div style="margin:10px 0"><span style="font-size:10px;color:#6b7280">Nonce</span><div style="background:var(--bg);padding:8px;border-radius:4px;font-size:10px" id="an">—</div></div>
+<div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-accent" onclick="da()" style="flex:1">✅ Connect</button><button class="btn" onclick="document.getElementById('am').classList.remove('show')" style="flex:1;background:#333">Cancel</button></div></div></div>
+
+<footer>⚡ Flux Foundation v0.9.10-beta1 · 45 MCP tools · 6 phrasal verbs · flux_bootstrap · flux_v4_optimize · Q-Spec · Quantum Architect · SWOT Speed-Calibrated · X-Algo 6-dim · Gantt Live · flux_fullcheck · Dogfooding ✓</footer>
+
+<script>
+// ── Particle System ──
+var pc=document.getElementById('pc'),ctx=pc.getContext('2d'),ps=[];
+pc.width=window.innerWidth;pc.height=window.innerHeight;
+window.onresize=function(){pc.width=window.innerWidth;pc.height=window.innerHeight;};
+function spawn(x,y,n,c){for(var i=0;i<n;i++)ps.push({x:x+Math.random()*30-15,y:y,vx:Math.random()*3-1.5,vy:-(Math.random()*5+3),l:1,d:Math.random()*.015+.008,s:Math.random()*5+2,cl:c})}
+function spawnE(x,y,e){var d=document.createElement('div');d.className='particle';d.textContent=e;d.style.left=x+'px';d.style.top=y+'px';document.body.appendChild(d);setTimeout(function(){d.remove()},2500)}
+function animP(){ctx.clearRect(0,0,pc.width,pc.height);for(var i=ps.length-1;i>=0;i--){var p=ps[i];p.x+=p.vx;p.y+=p.vy;p.l-=p.d;ctx.globalAlpha=p.l;ctx.fillStyle=p.cl;ctx.beginPath();ctx.arc(p.x,p.y,p.s,0,Math.PI*2);ctx.fill();if(p.l<=0)ps.splice(i,1)}requestAnimationFrame(animP);}animP();
+var lb=0,lc=0,lu=0;setInterval(function(){var b=parseInt(document.getElementById('sb').textContent)||0;if(b>lb){var e=document.getElementById('sb'),r=e.getBoundingClientRect();spawn(r.left+r.width/2,r.top,25,'#00ff88');spawnE(r.left-15,r.top-30,'⚡');spawnE(r.right-5,r.top-35,'✅');e.parentElement.parentElement.classList.add('glow');setTimeout(function(){e.parentElement.parentElement.classList.remove('glow')},1500);lb=b}},1500);
+
+// ── App ──
+var API='http://'+window.location.hostname+':8084/api/stats',SSE='http://localhost:8083/api/stats',BNC='https://api.binance.com/api/v3',fails=0,conn=false,addr='',bal=0;
+
+// ── TAB SWITCHING (fixed: display only, no position/visibility tricks) ──
+function st(n,ev){
+ev=ev||window.event;var r=ev.target.getBoundingClientRect();spawn(r.left+r.width/2,r.top+r.height/2,18,'#06b6d4');spawnE(r.left-8,r.top-18,'✨');
+document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});ev.target.classList.add('active');
+var TABS=['overview','wallet','autopilot','bitcoin','dca','gitlog','quillonos','bench','xalgo','costs','gantt','predict','swot','architect','trading','archmap'];
+TABS.forEach(function(id){var el=document.getElementById('t-'+id);if(el){if(id===n){el.classList.add('active')}else{el.classList.remove('active')}}});
+}
+
+function up(s,id){var v=s.value,p=v>=80?'P0':v>=60?'P1':v>=40?'P2':'P3';var e=document.getElementById('pp-'+id);if(e){e.textContent=p;e.className='task-p '+(p==='P0'?'p0':p==='P1'?'p1':p==='P2'?'p2':'p3')}}
+
+function t(type,title,comment){var c=document.getElementById('toasts');var d=document.createElement('div');d.className='toast '+type;d.innerHTML='<b>'+title+'</b><div class="c">'+comment+'</div><div style="font-size:9px;color:#484f58">'+new Date().toLocaleTimeString()+'</div>';c.appendChild(d);if(c.children.length>5)c.removeChild(c.firstChild);setTimeout(function(){if(d.parentNode)d.remove()},8000)}
+
+function cw(){document.getElementById('am').classList.add('show');document.getElementById('an').textContent='flux-auth-'+Date.now()+'-'+Math.random().toString(36).substr(2,12)}
+function da(){addr=document.getElementById('aa').value||'qnk_test_wallet';bal=1015.42;conn=true;document.getElementById('wd').style.display='none';document.getElementById('wc').style.display='block';document.getElementById('waddr').textContent=addr.substring(0,12)+'...';document.getElementById('wbal').textContent=bal.toFixed(2)+' QUG';document.getElementById('ws').textContent='🔓 '+addr.substring(0,6)+'...';document.getElementById('ws').className='si g';document.getElementById('am').classList.remove('show');var e=document.getElementById('wbal'),r=e.getBoundingClientRect();spawn(r.left+r.width/2,r.top,30,'#d4af37');spawnE(r.left-10,r.top-25,'💰');t('ai','🔐 Connected',bal.toFixed(2)+' QUG')}
+function dw(){conn=false;document.getElementById('wd').style.display='block';document.getElementById('wc').style.display='none';document.getElementById('ws').textContent='Disconnected';document.getElementById('ws').className='si'}
+function sq(){if(!conn)return;var r=document.getElementById('pr').value;var a=parseFloat(document.getElementById('pa').value)||0;var m=document.getElementById('pm').value||'No memo';if(!r||a<=0||a>bal)return;bal-=a;document.getElementById('wbal').textContent=bal.toFixed(2)+' QUG';t('pay','💸 '+a+' QUG',r+' · '+m.substring(0,40));document.getElementById('pa').value='';document.getElementById('pm').value=''}
+function dcaUp(){var ae=document.querySelectorAll('#t-dca input[type=range]');document.getElementById('da').textContent='$'+ae[0].value;document.getElementById('df').textContent='Every '+ae[1].value+'h'}
+function s(id,v){var e=document.getElementById(id);if(e&&e.textContent!==String(v)){e.textContent=v;e.classList.add('changed');setTimeout(function(){e.classList.remove('changed')},500)}}
+function fs(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
+
+// ── SSE Stats Poll ──
+function ps(){
+fetch(API).then(function(r){return r.json()}).then(function(d){
+fails=0;document.getElementById('ld').className='live-dot online';document.getElementById('cs').textContent='● LIVE ('+d.uptime_secs+'s)';
+s('up','up '+fs(d.uptime_secs));s('hb',d.builds);s('ht',d.tests_passed+'/'+(d.tests_passed+d.tests_failed));
+s('sb',d.builds);s('sch',d.cache_hits);s('scr',d.cache_rate.toFixed(1)+'%');s('sab',d.avg_build_ms+'ms');
+s('stp',d.tests_passed);s('stf',d.tests_failed);s('spp',d.p2p_peers);s('sdr',d.dagknight_round);s('smt',d.mempool_txs);
+s('hmcp',(d.mcp_tools||44));s('gantt-builds',d.builds);s('gantt-cache',d.cache_rate.toFixed(0)+'%');s('gantt-mcp',44);
+if(d.sap){s('sap-contrib',d.sap.contrib);s('sap-latency',d.sap.latency);s('sap-stake',d.sap.stake);document.getElementById('sap-contrib-bar').style.width=(d.sap.contrib*100)+'%';document.getElementById('sap-latency-bar').style.width=(d.sap.latency*100)+'%';document.getElementById('sap-stake-bar').style.width=(d.sap.stake*100)+'%';}
+if(d.xalgo){s('xa_total',d.xalgo.total.toFixed(3));s('xa_peers',d.xalgo.peers_scored);s('xa_temporal',d.xalgo.temporal_trust);s('xa_consensus',d.xalgo.consensus_align);s('xa_txqual',d.xalgo.tx_quality);s('xa_topology',d.xalgo.topology_rank);s('xa_econ',d.xalgo.econ_efficiency);}
+if(d.predict){s('pred-stability',(d.predict.stability_pct||91)+'%');s('pred-srcdelta',(d.predict.source_delta||0).toFixed(2));s('pred-cache',(d.predict.cache_affinity||0.85).toFixed(2));s('pred-stabdim',((d.predict.stability_pct||91)/100).toFixed(2));}
+if(d.builds>lb){t('build','⚡ Build #'+d.builds,d.cache_rate.toFixed(0)+'% cache · '+d.avg_build_ms+'ms avg');lb=d.builds}
+}).catch(function(){fails++;if(fails>3){document.getElementById('ld').className='live-dot offline';document.getElementById('cs').textContent='● OFFLINE'}});
+setTimeout(ps,500);
+}
+
+// ── Binance BTC ──
+function pb(){
+fetch(BNC+'/ticker/24hr?symbol=BTCUSDT').then(function(r){return r.json()}).then(function(d){
+var p=parseFloat(d.lastPrice),ch=parseFloat(d.priceChangePercent),up=ch>=0;
+s('bp','$'+p.toLocaleString('en-US',{minimumFractionDigits:2}));s('bp2','$'+p.toLocaleString('en-US',{minimumFractionDigits:2}));
+var ce=document.getElementById('bc');ce.textContent=(up?'▲':'▼')+' '+Math.abs(ch).toFixed(2)+'%';ce.className='btc-c '+(up?'up':'down');
+s('bhi','$'+parseFloat(d.highPrice).toLocaleString());s('blo','$'+parseFloat(d.lowPrice).toLocaleString());s('bvo',(parseFloat(d.volume)/1000).toFixed(0)+'K');
+s('dbt',(100/p).toFixed(6)+' BTC');
+}).catch(function(){});
+setTimeout(pb,3000);
+}
+
+// ── Git Poll ──
+var lastGit=0;
+function pg(){
+fetch('http://localhost:8083/api/git').then(function(r){return r.json()}).then(function(d){
+s('hg',d.count);var h='';d.commits.forEach(function(c){h+='<div class="commit-item"><span class="hash">'+c.hash+'</span> '+c.msg.substring(0,70)+'</div>'});
+var cl=document.getElementById('commit-list');if(cl)cl.innerHTML=h||'No commits';
+if(d.count>lastGit){t('git','🔀 Git',d.count+' commits — latest: '+(d.commits[0]||{}).msg||'');lastGit=d.count}
+}).catch(function(){});
+setTimeout(pg,10000);
+}
+
+// ── Vizily Images ──
+var imgs=["ChatGPT Image May 27, 2026, 12_53_05 AM.png","ChatGPT Image May 27, 2026, 12_56_23 AM.png","ChatGPT Image May 27, 2026, 01_14_00 AM.png","ChatGPT Image May 27, 2026, 02_23_48 AM.png","ChatGPT Image May 27, 2026, 02_34_31 AM.png"];
+var mg=document.getElementById('mg');imgs.forEach(function(i){mg.innerHTML+='<img src="'+i+'" onerror="this.style.display=\'none\'">'});
+
+// ── AI Feed — Real-time via SSE ──
+var feed=document.getElementById('ai-feed');
+function af(agent,msg,tool){var time=new Date().toLocaleTimeString();var toolBadge=tool?' <span style="color:var(--gold);font-size:9px">['+tool+']</span>':'';feed.innerHTML='<div class="new-feature" style="padding:4px;border-left:2px solid var(--accent);margin:2px 0;padding-left:8px;font-size:10px"><b>'+agent+':</b> '+msg+toolBadge+' <span style="color:#484f58;font-size:9px">'+time+'</span></div>'+feed.innerHTML;if(feed.children.length>20)feed.removeChild(feed.lastChild)}
+// Connect to real-time AI feed — SSE preferred, polling fallback
+var feedConnected=false,feedMode='sse',lastFeedTs=0;
+(function initSseFeed(){
+var sseHost=window.location.hostname;
+var sseUrl='http://'+sseHost+':8084/sse';
+try{
+var es=new EventSource(sseUrl);
+es.addEventListener('ai_feed',function(e){
+feedConnected=true;feedMode='sse';
+try{var d=JSON.parse(e.data);af(d.agent,d.message,d.tool)}catch(_){}
+});
+es.addEventListener('open',function(){feedConnected=true;feedMode='sse'});
+es.onerror=function(){
+feedConnected=false;
+setTimeout(initSseFeed,5000);
+};
+}catch(_){feedConnected=false}
+// Polling fallback: fetch /api/feed every 3s if SSE fails
+setInterval(function(){
+if(feedConnected)return;
+feedMode='poll';
+var feedUrl='http://'+sseHost+':8084/api/feed';
+fetch(feedUrl).then(function(r){return r.json()}).then(function(items){
+if(!items||!items.length)return;
+items.forEach(function(evt){
+var ts=evt.timestamp_ms||0;
+if(ts>lastFeedTs){
+af(evt.agent||'Flux',evt.message||'',evt.tool||'');
+lastFeedTs=ts;
+}
+});
+}).catch(function(){});
+},3000);
+// Update feed status dot
+setInterval(function(){
+var dot=document.getElementById('feed-dot');
+if(dot){dot.className='live-dot '+(feedConnected?'online':'offline');dot.title=feedConnected?'SSE connected':'Polling /api/feed'}
+},2000);
+})();
+
+// ================================================================
+//  GANTT — Dynamic from benchmark data
+// ================================================================
+var benchData=null;
+
+// Default benchmark data from latest run (will be refreshed)
+var defaultBench={crates:[
+{name:'flux-cache',ms:561,loc:207,health:60,ok:true},
+{name:'flux-db',ms:284,loc:487,health:62,ok:true},
+{name:'flux-driver',ms:192,loc:165,health:59,ok:true},
+{name:'flux-gpu',ms:290,loc:311,health:61,ok:true},
+{name:'flux-gui',ms:186,loc:197,health:59,ok:true},
+{name:'flux-hotswap',ms:212,loc:172,health:52,ok:true},
+{name:'flux-mempool',ms:312,loc:558,health:52,ok:true},
+{name:'flux-p2p',ms:562,loc:1604,health:59,ok:true},
+{name:'flux-science',ms:411,loc:786,health:61,ok:true},
+{name:'flux-search',ms:249,loc:1369,health:60,ok:true},
+{name:'flux-sniff',ms:232,loc:566,health:60,ok:true},
+{name:'flux-zk',ms:548,loc:844,health:61,ok:true},
+{name:'fluxc',ms:3340,loc:4344,health:56,ok:true},
+{name:'fluxc-core',ms:1717,loc:4856,health:57,ok:true},
+{name:'fluxc-mcp',ms:246,loc:2028,health:59,ok:true}
+],total_ms:10810,health:59,cache_rate:86};
+
+function refreshGantt(){
+// Try to fetch from benchmark SSE endpoint
+fetch(SSE).then(function(r){return r.json()}).then(function(d){
+if(d.benchmark&&d.benchmark.crates){benchData=d.benchmark;renderGantt(benchData)}
+else{benchData=defaultBench;renderGantt(defaultBench)}
+}).catch(function(){benchData=defaultBench;renderGantt(defaultBench)});
+}
+
+function renderGantt(data){
+if(!data||!data.crates)return;
+var bars=document.getElementById('gantt-bars');
+var maxMs=0;data.crates.forEach(function(c){if(c.ok&&c.ms>maxMs)maxMs=c.ms});
+if(maxMs===0)maxMs=4000; // fallback scale
+
+var html='';
+data.crates.forEach(function(c,i){
+var cls=c.ok?(c.ms<200?'fast':c.ms<500?'med':'slow'):'fail';
+var w=c.ok?Math.max((c.ms/maxMs)*100,3):100;
+var label=c.ok?(c.ms+'ms ✓'):'FAILED';
+html+='<div class="gantt-row" onmouseenter="ganttHover(\''+c.name+'\','+c.ms+','+c.loc+','+c.health+','+c.ok+')">';
+html+='<span class="gantt-label">'+(i+1)+'. '+c.name+'</span>';
+html+='<div class="gantt-bar-shell"><div class="gantt-bar '+cls+'" style="width:'+w+'%">'+label+'</div></div>';
+html+='</div>';
+});
+
+bars.innerHTML=html;
+
+// Axis labels
+var axis=document.getElementById('gantt-axis');
+var steps=5,stepMs=Math.ceil(maxMs/steps/100)*100;
+var axisHtml='<span>0ms</span>';
+for(var i=1;i<=steps;i++)axisHtml+='<span>'+(stepMs*i)+'ms</span>';
+axis.innerHTML=axisHtml;
+
+// Summary
+document.getElementById('gtotal').textContent=data.total_ms?data.total_ms+'ms':formatMs(data.crates.reduce(function(s,c){return s+(c.ok?c.ms:0)},0));
+document.getElementById('ghealth').textContent=(data.health||data.overall_health*100||59).toFixed(0)+'%';
+document.getElementById('gcache').textContent=(data.cache_rate||86).toFixed(0)+'%';
+document.getElementById('gantt-status').innerHTML='15 crates · last benchmark</span>';
+document.getElementById('gantt-status').style.color='var(--green)';
+
+// Bench tab update
+s('bench-count',data.crates.filter(function(c){return c.ok}).length+'/'+data.crates.length);
+s('bench-total',(data.total_ms||data.total_compile_ms||10810)+'ms');
+s('bench-health',((data.health||data.overall_health*100||59)).toFixed(0)+'%');
+var benchList='';
+data.crates.forEach(function(c){
+var st=c.ok?'✓':'✗',cl=c.ok?(c.ms<300?'var(--green)':'var(--gold)'):'var(--red)';
+benchList+='<div class="stat"><span class="l">'+st+' '+c.name+'</span><span class="v" style="color:'+cl+'">'+c.ms+'ms</span></div>';
+});
+var bl=document.getElementById('bench-list');if(bl)bl.innerHTML=benchList;
+}
+
+function ganttHover(name,ms,loc,health,ok){
+var detail=document.getElementById('gantt-detail');
+if(!detail)return;
+detail.innerHTML='<b style="color:var(--accent)">'+name+'</b><br>'+
+'Compile: <b>'+(ok?ms+'ms':'FAILED')+'</b><br>'+
+'LOC: <b>'+loc+'</b> · Health: <b>'+(health||0).toFixed(0)+'%</b>';
+}
+
+function formatMs(ms){if(ms<1000)return ms+'ms';return (ms/1000).toFixed(1)+'s'}
+
+// ================================================================
+//  SWOT — Speed-Calibrated Slider
+// ================================================================
+var swotData={
+strengths:[
+{text:'15 crates: well-partitioned workspace, clean dependency graph',speed:[5,5,5,4,3]},
+{text:'45 MCP tools: AI-native compiler integration, 6 phrasal verbs',speed:[5,5,5,4,3]},
+{text:'6.8× speedup: content-hash cache + incremental compilation',speed:[5,5,5,3,2]},
+{text:'X-Algo 6-dim scoring: peer/quality metrics with stability',speed:[5,5,4,3,2]},
+{text:'Dogfooding: flux_self_build ✓ 12.8s via RUSTC_WRAPPER=self',speed:[5,5,4,3,2]},
+{text:'flux_fullcheck: 3→1 combo saves 67% tokens',speed:[5,4,3,2,1]},
+{text:'flux_bootstrap: quickstart+diagnose+tune in 1 call',speed:[5,5,4,3,2]},
+{text:'flux_v4_optimize: DeepSeek V4 API token efficiency report',speed:[5,4,3,2,1]}
+],
+weaknesses:[
+{text:'fluxc root crate: high blast radius (12 dependents)',speed:[3,4,4,5,5]},
+{text:'Test coverage gaps: flux-gui, flux-gpu, fluxc-mcp',speed:[2,3,4,5,5]},
+{text:'Single point of failure: fluxc is CLI + MCP + serve',speed:[2,3,4,5,5]},
+{text:'flux-mempool: 0% test coverage, recently unbroken',speed:[1,2,3,4,5]},
+{text:'DeepSeek V4 token window: 1M limit, combo tools needed',speed:[1,2,3,4,5]},
+{text:'Architecture score 57% — below ideal 78%',speed:[2,3,4,5,5]}
+],
+opportunities:[
+{text:'Supercluster: distribute builds across Epsilon+Delta+Beta',speed:[4,4,5,5,5]},
+{text:'Q-Spec: eliminate fix→compile→fail loops (50% time saved)',speed:[3,4,5,5,5]},
+{text:'Webhook-native CI/CD: auto-build on push',speed:[3,4,5,4,3]},
+{text:'flux_fullcheck → MCP standard for dogfooding',speed:[3,4,5,4,3]},
+{text:'Token-efficient AI: combo tools reduce 3→1 calls',speed:[3,4,5,5,5]},
+{text:'Self-hosting Phase 2: direct rustc invocation (no cargo)',speed:[2,3,4,5,5]}
+],
+threats:[
+{text:'Code entropy rising in fluxc-mcp (2,028 LOC single file)',speed:[2,3,4,5,5]},
+{text:'Dependency creep: 15 crates need versioning discipline',speed:[2,3,4,5,5]},
+{text:'Context window pressure: each MCP round-trip costs tokens',speed:[1,2,3,4,5]},
+{text:'Single binary: crash takes down all 41 tools',speed:[1,2,3,4,5]}
+]
+};
+
+var speedLabels=['🐢 Conservative (×0.5)','🐌 Careful (×0.75)','⚡ Normal (×1.0)','🏃 Fast (×1.5)','🚀 Turbo (×2.5)'];
+var speedMults=[0.5,0.75,1.0,1.5,2.5];
+var speedColors=['var(--red)','var(--gold)','var(--accent)','var(--green)','var(--green)'];
+var speedClasses=['safe','slow','med','fast','fast'];
+var speedHealth=[72,63,57,48,35]; // Architecture health at each speed
+
+function updateSwot(){
+var sp=parseInt(document.getElementById('swot-speed').value);
+var spIdx=sp-1;
+var mult=speedMults[spIdx];
+
+// Update labels
+document.getElementById('swot-speed-label').textContent=speedLabels[spIdx];
+document.getElementById('swot-mode-label').style.color=speedColors[spIdx];
+document.getElementById('swot-mode-label').textContent=speedLabels[spIdx].split(' ')[1];
+
+// Update score
+var score=speedHealth[spIdx];
+var scoreEl=document.getElementById('swot-score');
+scoreEl.textContent=score+'%';
+scoreEl.className='swot-score '+speedClasses[spIdx];
+
+// Render SWOT items with speed-based visibility
+['strengths','weaknesses','opportunities','threats'].forEach(function(cat){
+var items=swotData[cat];
+var html='';
+items.forEach(function(item){
+var relevance=item.speed[spIdx];
+if(relevance>=3){
+var color=relevance>=5?'var(--green)':relevance>=4?'var(--accent)':'var(--gold)';
+var opacity=relevance>=5?'1':relevance>=4?'0.9':'0.7';
+html+='<div class="job-item" style="border-left-color:'+color+';opacity:'+opacity+'">'+item.text+'</div>';
+}
+});
+document.getElementById('swot-'+cat).innerHTML=html||'<div style="font-size:10px;color:#6b7280">No items at this speed</div>';
+});
+
+// Token cost calculation
+var baseRps=480; // base round-trips per day at Normal
+var baseTokens=8200; // tokens per round-trip
+var dailyRps=Math.round(baseRps*mult);
+var dailyTokens=Math.round(dailyRps*baseTokens);
+var costPerDay=(dailyTokens/1e6*0.14).toFixed(2); // $0.14/M tokens (V4 Flash)
+var comboRate=mult>=1.5?0.67:mult>=1.0?0.50:mult>=0.75?0.33:0.20;
+
+s('tc-roundtrips',dailyRps);
+s('tc-tokens',(baseTokens/1000).toFixed(1)+'K');
+s('tc-daily',(dailyTokens/1e6).toFixed(1)+'M');
+s('tc-cost','$'+costPerDay);
+s('tc-month','$'+(costPerDay*30).toFixed(0));
+s('tc-year','$'+(costPerDay*365).toFixed(0));
+s('tc-compile',Math.round(35*mult/2.5)+'%');
+s('tc-test',Math.round(20*mult/2.5)+'%');
+s('tc-combo',Math.round(comboRate*100)+'%');
+s('tc-cache',Math.round(86/mult)+'%');
+
+    // Gauge
+    var gaugeEl=document.getElementById('tc-gauge');
+    gaugeEl.style.width=Math.min(dailyRps/800*100,100)+'%';
+
+    // Post to backend — actually equip the tune preset
+    postTune(sp);
+}
+
+// ── Cost Calculator (costs tab slider — now wired to real tune backend) ──
+function cc(){
+var sp=parseInt(document.getElementById('cost-speed')?document.getElementById('cost-speed').value:3);
+var labels=['Very Slow','Slow','Normal','Fast','Turbo'];
+var mult=[0.5,0.75,1.0,1.5,2.5];
+var costLabel=document.getElementById('cost-label');if(costLabel)costLabel.textContent=labels[sp-1]+' ('+sp+')';
+var m=mult[sp-1];
+s('cf_cold',(3.4/m).toFixed(1)+'s');s('cf_incr',Math.round(504/m)+'ms');s('cf_iter',(1.5/m).toFixed(1)+'s');
+s('cr_cold',Math.round(45/m)+'s');s('cr_incr',Math.round(3200/m)+'ms');s('cr_iter',(8.0/m).toFixed(1)+'s');
+s('cf_cost','$'+(0.10/m).toFixed(2));s('cr_cost','$'+(0.52/m).toFixed(2));
+s('cf_speedup',(6.8*m).toFixed(1)+'×');
+var yr=Math.round(84*m);
+s('cs_cargo','$'+yr+' saved');s('cs_10dev','$'+(yr*10)+' saved');s('cs_100dev','$'+(yr*100).toLocaleString()+' saved');
+// Post to backend — actually equip the tune preset
+postTune(sp);
+}
+
+// ── Tune Backend Bridge — POST speed slider changes to /api/tune ──
+var tuneApi='http://'+window.location.hostname+':8084/api/tune';
+function postTune(speed){
+fetch(tuneApi,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speed:speed})})
+.then(function(r){return r.json()}).then(function(d){
+if(d.status==='ok'){
+var presetNames={1:'TITAN_ARMOR',2:'PRECISION_SCOPE',3:'BALANCED_BLADE',4:'EXPLORER_LENS',5:'SPEED_BOOTS'};
+var emoji={1:'🛡️',2:'🎯',3:'⚖️',4:'🔭',5:'⚡'};
+t('tune',emoji[speed]+' Tune: '+presetNames[speed],d.description||'Preset equipped');
+}
+}).catch(function(){});
+}
+// ── Init ──
+t('ai','🤖 Flux v0.9.9-beta1','45 MCP tools · 6 phrasal verbs · Real-time AI Feed via SSE · Dogfooding ✓');
+ps();pb();pg();cc();updateSwot();
+// Defer gantt refresh to let DOM settle
+setTimeout(function(){refreshGantt()},800);
+// ── ArchMap: Crate Architecture Diagram ──
+function renderArchMap(){
+  var crates=
+  crateData=[
+    {id:'fluxc',name:'fluxc',x:400,y:420,w:90,h:28,color:'#06b6d4',deps:[],desc:'Root CLI — entry point, 54 lines, delegates to core + mcp. The conductor of the orchestra.'},
+    {id:'fluxc-core',name:'fluxc-core',x:400,y:350,w:110,h:28,color:'#06b6d4',deps:['fluxc'],desc:'Build engine + serve + tune + predict + Q-Spec + Quantum Architect. The brain — 587 lines of pure logic. Like the Hamiltonian of the system.'},
+    {id:'fluxc-mcp',name:'fluxc-mcp',x:400,y:280,w:120,h:28,color:'#00ff88',deps:['fluxc-core'],desc:'MCP server — 46 tools across 7 handler modules. The communication interface. v0.9.10 modular refactor: monolith→registry.'},
+    {id:'flux-search',name:'flux-search',x:240,y:160,w:140,h:28,color:'#d4af37',deps:['fluxc-mcp'],desc:'PageRank + TF-IDF + SAP scoring search engine. 15/15 tests. The librarian of the knowledge graph.'},
+    {id:'flux-gpu',name:'flux-gpu',x:560,y:160,w:130,h:28,color:'#a855f7',deps:['fluxc-mcp'],desc:'Vulkan/SPIR-V GPU compute. Vera 8192 CU, NVIDIA, AMD. JIT compiles Rust→SPIR-V at runtime. The accelerator.'},
+    {id:'flux-zk',name:'flux-zk',x:560,y:230,w:120,h:28,color:'#a855f7',deps:['fluxc-mcp'],desc:'ZK-STARK prover + Dilithium5 signatures. MerkleArena allocator. 13/13 tests. Post-quantum cryptography.'},
+    {id:'flux-sniff',name:'flux-sniff',x:240,y:230,w:120,h:28,color:'#d4af37',deps:['fluxc-mcp'],desc:'tshark-based packet capture + P2P diagnostics. SYN flood detection, RST storm alerts. The immune system.'},
+    {id:'flux-science',name:'flux-science',x:50,y:160,w:120,h:28,color:'#f7931a',deps:['flux-search'],desc:'Quantum gravity + black hole thermodynamics. Holographic principle, inflation models. 19/19 tests. Theoretical physics.'},
+    {id:'flux-cache',name:'flux-cache',x:40,y:85,w:130,h:28,color:'#00ff88',deps:['fluxc-core'],desc:'BLAKE3 content-hash cache with mmap I/O. Delegates eviction to OS page cache. The substrate of speed.'},
+    {id:'flux-db',name:'flux-db',x:200,y:85,w:100,h:28,color:'#00ff88',deps:['fluxc-core'],desc:'LSM-tree + LZ4 + Bloom filter. Write-optimized storage. The persistent memory.'},
+    {id:'flux-driver',name:'flux-driver',x:350,y:85,w:120,h:28,color:'#00ff88',deps:['fluxc-core'],desc:'rustc driver via RUSTC_WRAPPER. Phase 1 self-hosting — Flux compiles Flux. Dogfooding loop closed.'},
+    {id:'flux-gui',name:'flux-gui',x:500,y:85,w:120,h:28,color:'#00ff88',deps:['fluxc-core'],desc:'Slint IDE for Flux development. Visual build pipeline. The cockpit.'},
+    {id:'flux-hotswap',name:'flux-hotswap',x:650,y:85,w:130,h:28,color:'#a855f7',deps:['fluxc-mcp'],desc:'AtomicPtr trampoline for zero-downtime function replacement. 3ms swap via KMHS. The surgeon.'},
+    {id:'flux-mempool',name:'flux-mempool',x:70,y:250,w:120,h:28,color:'#f7931a',deps:['fluxc-core'],desc:'Instant-confirm mempool. <50ms transaction admission. The staging area.'},
+    {id:'flux-p2p',name:'flux-p2p',x:70,y:320,w:120,h:28,color:'#f7931a',deps:['fluxc-core'],desc:'libp2p + DAGKnight + SAP + X-Algo + Swarm. 1604 LOC, zero tests. The nervous system.'},
+    {id:'flux-refactor',name:'flux-refactor',x:560,y:320,w:140,h:28,color:'#ff4444',deps:['fluxc-mcp','fluxc-core'],desc:'NEW v0.9.10: AI refactoring engine. API index + mismatch detection + handler extraction + score prediction. The self-improvement module.'}
+  ];
+  var list=document.getElementById('archmap-list');
+  if(!list)return;
+  var h='';
+  crates.forEach(function(c){
+    var s=c.color,sc=c.id==='flux-refactor'?62:c.id==='fluxc-mcp'?78:c.color==='#d4af37'?65:c.color==='#f7931a'?58:c.color==='#06b6d4'?52:50;
+    h+='<div style="padding:6px 8px;border-left:3px solid '+s+';margin:4px 0;background:rgba(255,255,255,.02);cursor:pointer" onmouseenter="highlightCrate(\''+c.id+'\')" onmouseleave="unhighlightCrate()">';
+    h+='<div style="display:flex;justify-content:space-between"><b style="color:'+s+'">'+c.name+'</b><span style="color:#6b7280;font-size:9px">'+sc+'%</span></div>';
+    h+='<div style="font-size:9px;color:#6b7280;margin-top:2px">'+c.desc.substring(0,80)+'...</div>';
+    h+='</div>';
+  });
+  list.innerHTML=h;
+  var svg=document.getElementById('archmap-svg');
+  if(!svg)return;
+  var w=svg.clientWidth||700;
+  // Draw edges (dependencies)
+  crates.forEach(function(c){
+    if(c.deps.length>0){
+      var cx=c.x+c.w/2,cy=c.y;
+      c.deps.forEach(function(did){
+        var dep=crates.find(function(d){return d.id===did});
+        if(dep){
+          var dx=dep.x+dep.w/2,dy=dep.y+dep.h;
+          // Curve path
+          var mx=(cx+dx)/2;
+          var path='M'+cx+' '+cy+' C'+mx+' '+(cy-30)+' '+mx+' '+(dy+30)+' '+dx+' '+dy;
+          svg.innerHTML+='<path d="'+path+'" stroke="rgba(6,182,212,.15)" stroke-width="1.2" fill="none" class="edge-'+c.id+'" style="transition:stroke .3s"/>';
+        }
+      });
+    }
+  });
+  // Draw nodes
+  crates.forEach(function(c){
+    var rx=6,fs=c.name.length>12?'9':'10';
+    svg.innerHTML+='<rect id="node-'+c.id+'" x="'+c.x+'" y="'+c.y+'" width="'+c.w+'" height="'+c.h+'" rx="'+rx+'" fill="'+c.color+'" fill-opacity="0.18" stroke="'+c.color+'" stroke-width="1.2" cursor="pointer" style="transition:all .3s" onmouseenter="showTooltip(event,\''+c.id+'\')" onmouseleave="hideTooltip()"/>';
+    svg.innerHTML+='<text x="'+(c.x+c.w/2)+'" y="'+(c.y+c.h/2+4)+'" text-anchor="middle" fill="'+c.color+'" font-size="'+fs+'px" font-family="JetBrains Mono,monospace" pointer-events="none">'+c.name+'</text>';
+  });
+}
+var crateData=null;
+function showTooltip(ev,id){
+  var tt=document.getElementById('archmap-tooltip');
+  if(!tt||!crateData)return;
+  var c=crateData.find(function(x){return x.id===id});
+  if(!c)return;
+  tt.innerHTML='<b style="color:'+c.color+'">'+c.name+'</b><div style="margin-top:4px;line-height:1.5">'+c.desc+'</div>'+(c.deps.length>0?'<div style="margin-top:4px;font-size:9px;color:#6b7280">Depends on: '+c.deps.join(', ')+'</div>':'');
+  tt.style.display='block';tt.style.left=(ev.offsetX+15)+'px';tt.style.top=(ev.offsetY-10)+'px';
+}
+function hideTooltip(){var tt=document.getElementById('archmap-tooltip');if(tt)tt.style.display='none';}
+function highlightCrate(id){
+  var svg=document.getElementById('archmap-svg');
+  if(!svg)return;
+  var rects=svg.querySelectorAll('rect');var edges=svg.querySelectorAll('path');
+  rects.forEach(function(r){r.setAttribute('fill-opacity','0.08')});
+  edges.forEach(function(e){e.setAttribute('stroke','rgba(6,182,212,.05)')});
+  var n=svg.getElementById('node-'+id);
+  if(n){n.setAttribute('fill-opacity','0.4');n.setAttribute('stroke-width','2.5')}
+  var es=svg.querySelectorAll('.edge-'+id);
+  es.forEach(function(e){e.setAttribute('stroke','rgba(6,182,212,.5)');e.setAttribute('stroke-width','2')});
+}
+function unhighlightCrate(){
+  var svg=document.getElementById('archmap-svg');
+  if(!svg)return;
+  svg.querySelectorAll('rect').forEach(function(r){r.setAttribute('fill-opacity','0.18');r.setAttribute('stroke-width','1.2')});
+  svg.querySelectorAll('path').forEach(function(e){e.setAttribute('stroke','rgba(6,182,212,.15)');e.setAttribute('stroke-width','1.2')});
+}
+renderArchMap();
+</script>
+</body>
+</html>

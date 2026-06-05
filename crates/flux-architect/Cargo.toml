@@ -1,0 +1,13 @@
+[package]
+name = "flux-architect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Architect — whole-workspace AI optimization planner across six dimensions"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flux-graph = { path = "../flux-graph" }
+flux-optimize = { path = "../flux-optimize" }
+flux-ai = { path = "../flux-ai" }

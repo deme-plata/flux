@@ -1,0 +1,12 @@
+[package]
+name = "quillonos-uname"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuillonOS `uname` — prints kernel / compiler / wallet / version from the env vars the WasiHost injects. Validates the environ_get WASI path end-to-end."
+
+# Single small WASI bin — same size discipline as the other quillonos-*
+# crates. The host serves it from /quillonos/wasm/uname.wasm.
+[[bin]]
+name = "uname"
+path = "src/main.rs"

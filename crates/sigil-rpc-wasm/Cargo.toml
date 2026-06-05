@@ -1,0 +1,15 @@
+[package]
+name = "sigil-rpc-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The SIGIL money keystone as a browser WASM node — execute_swap + submit_share over an in-tab SigilState, every write through commit_state_transition (committed in roots, 21M cap enforced). The OS terminal becomes a self-contained node: swap, mine, balance — client-side, no server (the EXIT's 'without trusting a server', literally). Third+ QuillonOS Rust→WASM module."
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"  # crate uses root-level lib.rs (not src/lib.rs); explicit path unblocks workspace builds. — flagged via swarm by rocky-moe
+
+[dependencies]
+sigil-rpc   = { path = "../../../sigil/crates/sigil-rpc" }
+sigil-state = { path = "../../../sigil/crates/sigil-state" }
+sigil-dex   = { path = "../../../sigil/crates/sigil-dex" }

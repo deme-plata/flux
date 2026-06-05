@@ -260,6 +260,19 @@ impl Zerox {
         validate_chain(chain_id)?; validate_token("sellToken", sell)?; validate_token("buyToken", buy)?; validate_amount("sellAmount", sell_amount)?; validate_token("taker", taker)?;
         self.get("/swap/permit2/quote", &[("chainId", chain_id.to_string()), ("sellToken", sell.into()), ("buyToken", buy.into()), ("sellAmount", sell_amount.into()), ("taker", taker.into())])
     }
+
+    /// Indicative Swap price via the **AllowanceHolder** flow — the alternative to Permit2 for
+    /// integrations/tokens that prefer a plain ERC-20 approval over signing an EIP-712 permit.
+    pub fn swap_price_ah(&self, chain_id: u64, sell: &str, buy: &str, sell_amount: &str) -> Result<Value, String> {
+        validate_chain(chain_id)?; validate_token("sellToken", sell)?; validate_token("buyToken", buy)?; validate_amount("sellAmount", sell_amount)?;
+        self.get("/swap/allowance-holder/price", &[("chainId", chain_id.to_string()), ("sellToken", sell.into()), ("buyToken", buy.into()), ("sellAmount", sell_amount.into())])
+    }
+    /// Firm Swap quote via the **AllowanceHolder** flow (taker required) — calldata to submit after a
+    /// standard ERC-20 approval to the allowanceTarget (no Permit2 signature needed).
+    pub fn swap_quote_ah(&self, chain_id: u64, sell: &str, buy: &str, sell_amount: &str, taker: &str) -> Result<Value, String> {
+        validate_chain(chain_id)?; validate_token("sellToken", sell)?; validate_token("buyToken", buy)?; validate_amount("sellAmount", sell_amount)?; validate_token("taker", taker)?;
+        self.get("/swap/allowance-holder/quote", &[("chainId", chain_id.to_string()), ("sellToken", sell.into()), ("buyToken", buy.into()), ("sellAmount", sell_amount.into()), ("taker", taker.into())])
+    }
     /// Cross-chain bridge-and-swap quotes (origin → destination chain). `dest_address` is the
     /// recipient on the destination chain — leave empty for EVM→EVM (defaults to the taker), but it
     /// is REQUIRED for non-EVM destinations like Solana (the 0x API rejects the quote otherwise).

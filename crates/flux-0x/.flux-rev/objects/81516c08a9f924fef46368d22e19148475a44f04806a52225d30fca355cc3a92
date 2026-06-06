@@ -47,15 +47,6 @@ pub fn parse_0x_error(body: &Value) -> String {
         .unwrap_or_else(|| "error".to_string())
 }
 
-/// Slippage floor: the minimum `buyAmount` to accept when executing a quote, given a tolerance in
-/// basis points (1 bp = 0.01%). A quote's `buyAmount` is indicative; you submit with a floor so the
-/// trade reverts rather than fills at a worse rate if the pool moves. `min = buy * (10000 - bps) / 10000`,
-/// computed in u128 to avoid f64 rounding on token base-units. `bps` is clamped to 0..=10000.
-pub fn min_buy_amount(buy_amount: u128, slippage_bps: u32) -> u128 {
-    let bps = slippage_bps.min(10_000) as u128;
-    buy_amount.saturating_mul(10_000 - bps) / 10_000
-}
-
 fn validate_chain(chain_id: u64) -> Result<(), String> {
     if chain_id == 0 { Err("chainId must be a non-zero EVM chain id (1=Ethereum, 137=Polygon, 8453=Base, …)".into()) } else { Ok(()) }
 }
@@ -345,16 +336,6 @@ mod tests {
         for s in [408, 425, 429, 500, 502, 503, 504] { assert!(is_retryable_status(s), "{s} should retry"); }
         // … never the ones that are our fault or a definitive "no" (retrying a 400 is just a slower 400)
         for s in [200, 400, 401, 403, 404, 422] { assert!(!is_retryable_status(s), "{s} must NOT retry"); }
-    }
-
-    #[test]
-    fn slippage_floor_is_monotone_and_safe() {
-        assert_eq!(min_buy_amount(1_000_000, 0), 1_000_000);      // no slippage ⇒ full amount
-        assert_eq!(min_buy_amount(1_000_000, 100), 990_000);     // 1% ⇒ 0.99×
-        assert_eq!(min_buy_amount(1_000_000, 50), 995_000);      // 0.5%
-        assert_eq!(min_buy_amount(1_000_000, 10_000), 0);        // 100% tolerance ⇒ floor 0
-        assert_eq!(min_buy_amount(1_000_000, 99_999), 0);        // clamped, no underflow
-        assert!(min_buy_amount(1_000_000, 50) > min_buy_amount(1_000_000, 100)); // tighter floor is higher
     }
 
     #[test]

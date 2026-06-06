@@ -1974,6 +1974,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-bank-api"
+version = "0.22.3"
+dependencies = [
+ "flux-bank-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flux-bank-bridge"
+version = "0.22.3"
+dependencies = [
+ "flux-bank-api",
+ "flux-bank-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flux-bank-core"
+version = "0.22.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "flux-bank-mcp"
+version = "0.22.3"
+dependencies = [
+ "flux-bank-api",
+ "flux-bank-bridge",
+ "flux-bank-core",
+ "serde_json",
+]
+
+[[package]]
+name = "flux-bank-sdk"
+version = "0.22.3"
+dependencies = [
+ "flux-bank-api",
+ "flux-bank-bridge",
+ "flux-bank-mcp",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-bbq"
 version = "0.22.3"
 dependencies = [
@@ -2389,6 +2440,7 @@ dependencies = [
 name = "flux-moe"
 version = "0.22.3"
 dependencies = [
+ "fluxc-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2967,6 +3019,7 @@ dependencies = [
  "flux-ai",
  "flux-api",
  "flux-archive",
+ "flux-bank-mcp",
  "flux-bench",
  "flux-chronos",
  "flux-context",
@@ -2975,6 +3028,7 @@ dependencies = [
  "flux-gpu-market",
  "flux-graph",
  "flux-legacy",
+ "flux-moe",
  "flux-optimize",
  "flux-refactor",
  "flux-search",
@@ -6783,7 +6837,7 @@ version = "0.22.3"
 
 [[package]]
 name = "sigil-bank"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -6791,7 +6845,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dex"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -6799,7 +6853,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-header"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "blake3",
  "hex",
@@ -6810,7 +6864,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-oauth"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6824,7 +6878,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-rpc"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "blake3",
  "serde",
@@ -6847,7 +6901,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-state"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "blake3",
  "serde",
@@ -6858,7 +6912,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tip-proof"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "blake3",
  "serde",

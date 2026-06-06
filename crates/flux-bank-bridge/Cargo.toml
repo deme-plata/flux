@@ -1,0 +1,13 @@
+[package]
+name = "flux-bank-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bridge Flux Bank to Quillon Graph + best-link routing hooks"
+
+[dependencies]
+flux-bank-api = { path = "../flux-bank-api" }
+flux-bank-core = { path = "../flux-bank-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }

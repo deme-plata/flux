@@ -1,0 +1,14 @@
+[package]
+name = "flux-bank-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Bank client SDK (Stainless/OpenAPI aligned)"
+
+[dependencies]
+flux-bank-api = { path = "../flux-bank-api" }
+flux-bank-bridge = { path = "../flux-bank-bridge" }
+flux-bank-mcp = { path = "../flux-bank-mcp" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }

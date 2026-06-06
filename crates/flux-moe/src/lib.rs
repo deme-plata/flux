@@ -31,6 +31,8 @@ pub mod pipeline;
 pub mod policy;
 pub mod serve;
 pub mod skillroute;
+pub mod goalroute;
+pub use goalroute::{route_from_consensus, route_from_goal_text, GoalRoutePlan};
 pub mod toolcorpus;
 pub mod trainer;
 

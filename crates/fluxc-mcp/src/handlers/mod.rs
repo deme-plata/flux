@@ -163,6 +163,7 @@ pub mod chronos;
 pub mod frontend;
 pub mod nodeswarm;
 pub mod gateway;
+pub mod bank;
 pub mod zerox;
 pub mod crosscompile;
 pub mod sigil_combos;

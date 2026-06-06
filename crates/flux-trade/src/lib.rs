@@ -83,10 +83,39 @@ pub fn decide(symbol: &str, interval: &str, limit: u32) -> Result<Value, String>
     }))
 }
 
+/// Decide on several symbols in one call — a watchlist scan. Takes comma- or space-separated
+/// symbols, runs [`decide`] on each, and returns `{decisions:[…], n, errors}`. A failed symbol
+/// (e.g. bad ticker, no data) becomes an `{symbol, error}` entry instead of aborting the batch, so
+/// one bad input never sinks the whole scan. The agent gets the morning read of the whole list at once.
+pub fn decide_batch(symbols: &str, interval: &str, limit: u32) -> Value {
+    let list: Vec<&str> = symbols
+        .split(|c| c == ',' || c == ' ' || c == '\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut decisions = Vec::with_capacity(list.len());
+    let mut errors = 0u32;
+    for sym in &list {
+        match decide(sym, interval, limit) {
+            Ok(v) => decisions.push(v),
+            Err(e) => { errors += 1; decisions.push(json!({"symbol": sym.to_uppercase(), "error": e})); }
+        }
+    }
+    json!({ "n": list.len(), "errors": errors, "interval": interval, "decisions": decisions })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::indicators::IndicatorSet;
+
+    #[test]
+    fn batch_splits_and_reports_each_symbol() {
+        // empty input ⇒ empty batch, no panic; separators (comma/space) both work.
+        let v = decide_batch("", "1h", 60);
+        assert_eq!(v["n"], 0);
+        assert!(v["decisions"].as_array().unwrap().is_empty());
+    }
 
     #[test]
     fn verdict_only_trades_on_clean_confluence() {

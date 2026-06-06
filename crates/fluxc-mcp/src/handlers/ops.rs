@@ -74,6 +74,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(ToolDef { name: "flux_goal_list", description: "List all active goals on the player's stack, sorted by priority then recency. Shows which agent posted each + the consensus action the game will currently take.", input_schema: json!({"type":"object","properties":{}}) }, flux_goal_list);
     registry.register(ToolDef { name: "flux_goal_consensus", description: "Compute the single highest-priority active goal — the one the player is acting on right now.", input_schema: json!({"type":"object","properties":{}}) }, flux_goal_consensus);
     registry.register(ToolDef { name: "flux_goal_clear", description: "Wipe the goal stack. Useful for resetting between rounds.", input_schema: json!({"type":"object","properties":{}}) }, flux_goal_clear);
+    registry.register(ToolDef { name: "flux_moe_goal_route", description: "Route flux-moe expert + skill from goal text or flux_goal consensus. Bifrost inference planner.", input_schema: serde_json::json!({"type":"object","properties":{"goal":{"type":"string"},"use_consensus":{"type":"boolean","default":true}}}) }, flux_moe_goal_route);
 }
 
 use fluxc_core::{webhook, predict, tune, heatmap};
@@ -1710,4 +1711,20 @@ mod swarm_handler_tests {
         let tid = parse_task_id(winning_out);
         cleanup(winner, &tid);
     }
+}
+
+
+// ── flux-moe goal routing (Bifrost lane) ──────────────────────────────────
+fn flux_moe_goal_route(args: &serde_json::Value) -> String {
+    use flux_moe::goalroute::{route_from_consensus, route_from_goal_text};
+    if let Some(text) = args.get("goal").and_then(|v| v.as_str()) {
+        return serde_json::to_string_pretty(&route_from_goal_text(text))
+            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+    }
+    if args.get("use_consensus").and_then(|v| v.as_bool()).unwrap_or(true) {
+        if let Some(p) = route_from_consensus() {
+            return serde_json::to_string_pretty(&p).unwrap_or_default();
+        }
+    }
+    "{\"error\":\"no goal text and no consensus on stack\"}".into()
 }

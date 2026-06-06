@@ -19,6 +19,91 @@ pub struct Perception {
     pub shooter_speed: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TacticalMood {
+    Dodge,
+    Reset,
+    Burst,
+    Control,
+    Combo,
+    Close,
+    Press,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TacticalSnapshot {
+    pub tick: u32,
+    pub dist: f32,
+    pub player_hp: i32,
+    pub player_max_hp: i32,
+    pub sigil: i32,
+    pub foe_count: usize,
+    pub boss_hp: i32,
+    pub boss_max_hp: i32,
+    pub incoming_telegraph_ms: Option<u32>,
+    pub combo_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TacticalTick {
+    pub tick: u32,
+    pub mood: TacticalMood,
+    pub urgency: u8,
+    pub line: String,
+}
+
+impl TacticalSnapshot {
+    fn player_hp_pct(&self) -> u8 {
+        pct(self.player_hp, self.player_max_hp)
+    }
+
+    fn boss_hp_pct(&self) -> u8 {
+        pct(self.boss_hp, self.boss_max_hp)
+    }
+}
+
+pub fn tactical_tick(s: &TacticalSnapshot) -> TacticalTick {
+    let player_hp = s.player_hp_pct();
+    let boss_hp = s.boss_hp_pct();
+    let incoming = s.incoming_telegraph_ms.unwrap_or(u32::MAX);
+
+    let (mood, label, urgency, hint) = if incoming <= 420 {
+        (TacticalMood::Dodge, "DODGE", 95, "telegraph is live")
+    } else if player_hp <= 25 && s.foe_count > 0 {
+        (TacticalMood::Reset, "RESET", 88, "low HP: kite and rebuild shield")
+    } else if boss_hp <= 20 && s.combo_ready && s.sigil >= 12 {
+        (TacticalMood::Burst, "BURST", 82, "boss is cracked: spend the combo")
+    } else if s.foe_count >= 3 {
+        (TacticalMood::Control, "CONTROL", 72, "thin the pack before committing")
+    } else if s.combo_ready && s.sigil >= 10 && s.dist <= 2.0 {
+        (TacticalMood::Combo, "COMBO", 66, "close range combo window")
+    } else if s.dist > 3.0 {
+        (TacticalMood::Close, "CLOSE", 48, "close distance without spending sigil")
+    } else {
+        (TacticalMood::Press, "PRESS", 40, "keep pressure and watch stamina")
+    };
+
+    TacticalTick {
+        tick: s.tick,
+        mood,
+        urgency,
+        line: format!(
+            "AI[{tick:04}] {label:<7} u={urgency:02} hp={player_hp:03}% boss={boss_hp:03}% foes={foes} sigil={sigil} dist={dist:.1} - {hint}",
+            tick = s.tick,
+            foes = s.foe_count,
+            sigil = s.sigil,
+            dist = s.dist,
+        ),
+    }
+}
+
+fn pct(value: i32, max: i32) -> u8 {
+    if max <= 0 {
+        return 0;
+    }
+    ((value.clamp(0, max) * 100) / max) as u8
+}
+
 pub struct AiBrain {
     body: Body,
     skills: Skills,
@@ -157,8 +242,6 @@ impl AiBrain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::{Body, Stimulus};
-    use crate::skill::{Aim, BattleReport};
 
     fn calibrated_brain() -> AiBrain {
         let mut brain = AiBrain::new();
@@ -263,5 +346,58 @@ mod tests {
         // check that later increments are smaller than the first (diminishing)
         assert!(increments.len() >= 3);
         assert!(increments[0] > increments[increments.len() - 1]);
+    }
+
+    fn snapshot() -> TacticalSnapshot {
+        TacticalSnapshot {
+            tick: 42,
+            dist: 1.5,
+            player_hp: 50,
+            player_max_hp: 100,
+            sigil: 18,
+            foe_count: 1,
+            boss_hp: 80,
+            boss_max_hp: 100,
+            incoming_telegraph_ms: None,
+            combo_ready: true,
+        }
+    }
+
+    #[test]
+    fn tactical_tick_is_deterministic_for_same_snapshot() {
+        let s = snapshot();
+        assert_eq!(tactical_tick(&s), tactical_tick(&s));
+    }
+
+    #[test]
+    fn tactical_tick_prioritizes_dodge_over_burst() {
+        let mut s = snapshot();
+        s.boss_hp = 8;
+        s.incoming_telegraph_ms = Some(300);
+
+        let tick = tactical_tick(&s);
+
+        assert_eq!(tick.mood, TacticalMood::Dodge);
+        assert!(tick.line.contains("DODGE"));
+    }
+
+    #[test]
+    fn tactical_tick_calls_burst_for_cracked_boss() {
+        let mut s = snapshot();
+        s.boss_hp = 15;
+
+        let tick = tactical_tick(&s);
+
+        assert_eq!(tick.mood, TacticalMood::Burst);
+        assert!(tick.line.contains("boss=015%"));
+    }
+
+    #[test]
+    fn tactical_tick_line_is_spectator_ready() {
+        let tick = tactical_tick(&snapshot());
+
+        assert!(tick.line.starts_with("AI[0042]"));
+        assert!(tick.line.contains("foes=1"));
+        assert!(tick.line.contains("sigil=18"));
     }
 }

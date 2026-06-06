@@ -1,0 +1,16 @@
+[package]
+name = "flux-swarm-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Swarm coordination state on flux-db (LSM, LZ4, TTL) — replaces the unbounded /tmp/flux-swarm*.json[l] files. Same domain types as the fluxc-mcp swarm handlers; non-destructive JSON→flux-db importer with a money-ledger-preserving verify."
+
+[dependencies]
+flux-db = { path = "../flux-db" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "flux-swarm-migrate"
+path = "src/bin/flux-swarm-migrate.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "flux-bank-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP-facing Flux Bank combos (read-only v0: flux_bank_status)"
+
+[dependencies]
+flux-bank-bridge = { path = "../flux-bank-bridge" }
+flux-bank-api = { path = "../flux-bank-api" }
+flux-bank-core = { path = "../flux-bank-core" }
+serde_json = { workspace = true }

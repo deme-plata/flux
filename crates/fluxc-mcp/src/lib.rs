@@ -29,6 +29,7 @@ fn build_registry() -> ToolRegistry {
     handlers::frontend::register(&mut registry);
     handlers::nodeswarm::register(&mut registry);
     handlers::gateway::register(&mut registry);
+    handlers::bank::register(&mut registry);
     handlers::zerox::register(&mut registry);
     handlers::crosscompile::register(&mut registry);
     handlers::sigil_combos::register(&mut registry);

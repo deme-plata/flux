@@ -1,0 +1,43 @@
+[package]
+name = "flux-bluetooth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Bluetooth — BLE mesh networking for Flux P2P. Bridges Bluetooth Low Energy mesh with libp2p gossipsub for off-grid, post-quantum encrypted mesh chat and data transfer. Beats BitChat with PQ crypto, libp2p routing, and Flux substrate."
+
+[features]
+default = []
+# Full BLE hardware support via btleplug (Linux/Windows/macOS)
+ble = ["btleplug"]
+# Simulation mode for testing without BLE hardware
+sim = []
+
+[dependencies]
+# Core
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+# P2P bridge
+flux-p2p = { path = "../flux-p2p" }
+libp2p = { version = "0.54", features = [
+    "tokio", "gossipsub", "kad", "identify", "noise", "yamux", "tcp"
+] }
+
+# PQ crypto
+flux-sqisign = { path = "../flux-sqisign" }
+
+# BLE hardware (optional, feature-gated)
+btleplug = { version = "0.11", optional = true }
+
+# Channels
+futures = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

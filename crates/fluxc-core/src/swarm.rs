@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use flux_swarm_store::{FluxDbStore, SwarmStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AgentStatus { Idle, Working, WaitingForReview, Offline }
@@ -38,6 +39,67 @@ struct Inner {
 const SWARM_FILE: &str = "/tmp/flux-swarm.json";
 const COMPLETED_JOURNAL: &str = "/tmp/flux-swarm-completed.jsonl";
 static SWARM: Mutex<Option<Inner>> = Mutex::new(None);
+
+fn db_path() -> Option<String> {
+    std::env::var("FLUX_SWARM_DB")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn with_db<T>(f: impl FnOnce(&FluxDbStore) -> Result<T, String>) -> Option<Result<T, String>> {
+    let path = db_path()?;
+    Some(FluxDbStore::open(path).map_err(|e| e.to_string()).and_then(|db| f(&db)))
+}
+
+fn agent_to_store(a: &SwarmAgent) -> flux_swarm_store::Agent {
+    flux_swarm_store::Agent {
+        id: a.id.clone(),
+        wallet_address: a.wallet_address.clone(),
+        registered_at: a.registered_at,
+        status: format!("{:?}", a.status),
+        current_crates: a.current_crates.clone(),
+        total_earned_qug: a.total_earned_qug,
+    }
+}
+
+fn agent_from_store(a: flux_swarm_store::Agent) -> SwarmAgent {
+    let status = match a.status.as_str() {
+        "Working" => AgentStatus::Working,
+        "WaitingForReview" => AgentStatus::WaitingForReview,
+        "Offline" => AgentStatus::Offline,
+        _ => AgentStatus::Idle,
+    };
+    SwarmAgent {
+        id: a.id,
+        wallet_address: a.wallet_address,
+        registered_at: a.registered_at,
+        status,
+        current_crates: a.current_crates,
+        total_earned_qug: a.total_earned_qug,
+    }
+}
+
+fn claim_to_store(c: &WorkClaim) -> flux_swarm_store::Claim {
+    flux_swarm_store::Claim {
+        task_id: c.task_id.clone(),
+        crates: c.crates.clone(),
+        agent: c.agent.clone(),
+        claimed_at: c.claimed_at,
+        priority: c.priority,
+        estimated_qug: c.estimated_qug,
+    }
+}
+
+fn completed_to_store(t: &CompletedTask) -> flux_swarm_store::Completed {
+    flux_swarm_store::Completed {
+        task_id: t.task_id.clone(),
+        agent_id: t.agent_id.clone(),
+        crates: t.crates.clone(),
+        success: t.success,
+        qug_earned: t.qug_earned,
+        completed_at: t.completed_at,
+    }
+}
 
 fn load() -> Option<Inner> {
     std::fs::read_to_string(SWARM_FILE).ok().and_then(|s| serde_json::from_str(&s).ok())
@@ -139,12 +201,74 @@ pub fn force_reload() {
 }
 
 pub fn register_agent(id: &str, wallet: &str) -> SwarmAgent {
+    if let Some(res) = with_db(|db| {
+        let mut agent = db
+            .get_agent(id)
+            .map_err(|e| e.to_string())?
+            .map(agent_from_store)
+            .unwrap_or(SwarmAgent {
+                id: id.into(),
+                wallet_address: wallet.into(),
+                registered_at: now(),
+                status: AgentStatus::Idle,
+                current_crates: vec![],
+                total_earned_qug: 0.0,
+            });
+        agent.wallet_address = wallet.into();
+        db.put_agent(&agent_to_store(&agent)).map_err(|e| e.to_string())?;
+        Ok(agent)
+    }) {
+        if let Ok(agent) = res {
+            return agent;
+        }
+    }
+
     let mut g = init(); let s = g.as_mut().unwrap();
     let a = SwarmAgent { id: id.into(), wallet_address: wallet.into(), registered_at: now(), status: AgentStatus::Idle, current_crates: vec![], total_earned_qug: 0.0 };
     s.agents.insert(id.into(), a.clone()); save(s); a
 }
 
 pub fn claim_work(agent_id: &str, crates: &[String], priority: u32) -> Result<WorkClaim, String> {
+    if let Some(res) = with_db(|db| {
+        for c in db.list_claims().map_err(|e| e.to_string())? {
+            for mc in crates {
+                if c.crates.contains(mc) {
+                    if c.agent == agent_id {
+                        return Err(format!(
+                            "self-owned: you already hold task {} on '{}' — re-claim is a no-op. Use flux_swarm_release to drop or flux_swarm_complete to settle.",
+                            c.task_id, mc
+                        ));
+                    }
+                    return Err(format!("{} claimed by {}", mc, c.agent));
+                }
+            }
+        }
+
+        let task_id = format!(
+            "{}-{}",
+            agent_id,
+            db.list_claims().map_err(|e| e.to_string())?.len() as u64
+                + db.completed_count().map_err(|e| e.to_string())?
+        );
+        let claim = WorkClaim {
+            task_id,
+            crates: crates.to_vec(),
+            agent: agent_id.into(),
+            claimed_at: now(),
+            priority,
+            estimated_qug: crates.len() as f64 * 0.5,
+        };
+        if let Some(mut agent) = db.get_agent(agent_id).map_err(|e| e.to_string())?.map(agent_from_store) {
+            agent.status = AgentStatus::Working;
+            agent.current_crates = crates.to_vec();
+            db.put_agent(&agent_to_store(&agent)).map_err(|e| e.to_string())?;
+        }
+        db.put_claim(&claim_to_store(&claim)).map_err(|e| e.to_string())?;
+        Ok(claim)
+    }) {
+        return res;
+    }
+
     let mut g = init(); let s = g.as_mut().unwrap();
     // Conflict check: distinguish self-owned (idempotent / informational) from
     // other-agent owned (true conflict). The MCP wrapper inspects the
@@ -172,6 +296,31 @@ pub fn claim_work(agent_id: &str, crates: &[String], priority: u32) -> Result<Wo
 }
 
 pub fn complete_work(agent_id: &str, task_id: &str, success: bool) -> Option<CompletedTask> {
+    if let Some(res) = with_db(|db| {
+        let claim = db.take_claim(task_id).map_err(|e| e.to_string())?;
+        let Some(claim) = claim.filter(|c| c.agent == agent_id) else {
+            return Ok(None);
+        };
+        let t = CompletedTask {
+            task_id: task_id.into(),
+            agent_id: agent_id.into(),
+            crates: claim.crates.clone(),
+            success,
+            qug_earned: if success { claim.estimated_qug } else { 0.0 },
+            completed_at: now(),
+        };
+        if let Some(mut agent) = db.get_agent(agent_id).map_err(|e| e.to_string())?.map(agent_from_store) {
+            agent.status = AgentStatus::Idle;
+            agent.current_crates.clear();
+            agent.total_earned_qug += t.qug_earned;
+            db.put_agent(&agent_to_store(&agent)).map_err(|e| e.to_string())?;
+        }
+        db.append_completed(&completed_to_store(&t)).map_err(|e| e.to_string())?;
+        Ok(Some(t))
+    }) {
+        return res.ok().flatten();
+    }
+
     let mut g = init(); let s = g.as_mut().unwrap();
     let pos = s.claims.iter().position(|c| c.task_id == task_id && c.agent == agent_id)?;
     let claim = s.claims.remove(pos);
@@ -183,6 +332,23 @@ pub fn complete_work(agent_id: &str, task_id: &str, success: bool) -> Option<Com
 /// Release a claim without payment. For stuck claims, crashed agents, or work that won't complete.
 /// Idempotent — returns false if the claim doesn't exist.
 pub fn release_claim(agent_id: &str, task_id: &str) -> bool {
+    if let Some(res) = with_db(|db| {
+        let claim = db.take_claim(task_id).map_err(|e| e.to_string())?;
+        let Some(claim) = claim else { return Ok(false); };
+        if claim.agent != agent_id {
+            db.put_claim(&claim).map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
+        if let Some(mut agent) = db.get_agent(agent_id).map_err(|e| e.to_string())?.map(agent_from_store) {
+            agent.current_crates.clear();
+            agent.status = AgentStatus::Idle;
+            db.put_agent(&agent_to_store(&agent)).map_err(|e| e.to_string())?;
+        }
+        Ok(true)
+    }) {
+        return res.unwrap_or(false);
+    }
+
     let mut g = init(); let s = g.as_mut().unwrap();
     let pos = s.claims.iter().position(|c| c.task_id == task_id && c.agent == agent_id);
     if let Some(p) = pos {
@@ -196,6 +362,26 @@ pub fn release_claim(agent_id: &str, task_id: &str) -> bool {
 }
 
 pub fn swarm_status() -> SwarmStatus {
+    if let Some(res) = with_db(|db| {
+        let agents = db
+            .list_agents()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(agent_from_store)
+            .collect::<Vec<_>>();
+        Ok(SwarmStatus {
+            agents: agents.len(),
+            active_claims: db.list_claims().map_err(|e| e.to_string())?.len(),
+            completed_tasks: db.completed_count().map_err(|e| e.to_string())? as usize,
+            qug_paid: db.sum_qug_earned().map_err(|e| e.to_string())?,
+            agents_list: agents,
+        })
+    }) {
+        if let Ok(status) = res {
+            return status;
+        }
+    }
+
     let g = init(); let s = g.as_ref().unwrap();
     SwarmStatus { agents: s.agents.len(), active_claims: s.claims.len(), completed_tasks: s.completed_count, qug_paid: s.qug_paid, agents_list: s.agents.values().cloned().collect() }
 }
@@ -229,6 +415,9 @@ fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as TestMutex;
+
+    static DB_ENV_LOCK: TestMutex<()> = TestMutex::new(());
 
     fn reset_for_test(tmp: &std::path::Path) {
         // The static SWARM uses a hardcoded /tmp path; for unit-test isolation
@@ -300,5 +489,40 @@ mod tests {
         assert!((ahead.qug_paid - 42.0).abs() < 1e-9);
 
         let _ = std::fs::remove_file(&jp);
+    }
+
+    #[test]
+    fn public_api_can_use_fluxdb_backend() {
+        let _guard = DB_ENV_LOCK.lock().unwrap();
+        let old = std::env::var("FLUX_SWARM_DB").ok();
+        let db = std::env::temp_dir().join(format!("flux-swarm-core-db-test-{}", now()));
+        std::env::set_var("FLUX_SWARM_DB", &db);
+
+        let agent = register_agent("db-agent", "qnkdb");
+        assert_eq!(agent.id, "db-agent");
+
+        let claim = claim_work("db-agent", &["flux-db-swarm".to_string()], 3).unwrap();
+        assert_eq!(claim.agent, "db-agent");
+        assert_eq!(claim.crates, vec!["flux-db-swarm"]);
+
+        let status = swarm_status();
+        assert_eq!(status.agents, 1);
+        assert_eq!(status.active_claims, 1);
+        assert_eq!(status.completed_tasks, 0);
+
+        let done = complete_work("db-agent", &claim.task_id, true).unwrap();
+        assert_eq!(done.qug_earned, 0.5);
+
+        let status = swarm_status();
+        assert_eq!(status.active_claims, 0);
+        assert_eq!(status.completed_tasks, 1);
+        assert!((status.qug_paid - 0.5).abs() < 1e-9);
+
+        if let Some(v) = old {
+            std::env::set_var("FLUX_SWARM_DB", v);
+        } else {
+            std::env::remove_var("FLUX_SWARM_DB");
+        }
+        let _ = std::fs::remove_dir_all(db);
     }
 }

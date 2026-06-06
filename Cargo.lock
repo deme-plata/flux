@@ -732,7 +732,7 @@ dependencies = [
  "miniz_oxide",
  "object 0.37.3",
  "rustc-demangle",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -859,12 +859,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "block2"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c132eebf10f5cad5289222520a4a058514204aed6d791f1cf4fe8088b82d15f"
+dependencies = [
+ "objc2",
+]
+
+[[package]]
+name = "bluez-async"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84ae4213cc2a8dc663acecac67bbdad05142be4d8ef372b6903abf878b0c690a"
+dependencies = [
+ "bitflags 2.11.1",
+ "bluez-generated",
+ "dbus",
+ "dbus-tokio",
+ "futures",
+ "itertools 0.14.0",
+ "log",
+ "serde",
+ "serde-xml-rs",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "bluez-generated"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9676783265eadd6f11829982792c6f303f3854d014edfba384685dcf237dd062"
+dependencies = [
+ "dbus",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "btleplug"
+version = "0.11.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9a11621cb2c8c024e444734292482b1ad86fb50ded066cf46252e46643c8748"
+dependencies = [
+ "async-trait",
+ "bitflags 2.11.1",
+ "bluez-async",
+ "dashmap 6.2.1",
+ "dbus",
+ "futures",
+ "jni",
+ "jni-utils",
+ "log",
+ "objc2",
+ "objc2-core-bluetooth",
+ "objc2-foundation",
+ "once_cell",
+ "static_assertions",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+ "windows 0.61.3",
+ "windows-future 0.2.1",
 ]
 
 [[package]]
@@ -948,6 +1014,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cesu8"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,7 +1066,7 @@ dependencies = [
  "num-traits",
  "serde",
  "wasm-bindgen",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -1102,6 +1174,16 @@ name = "com-rs"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf43edc576402991846b093a7ca18a3477e0ef9c588cde84964b5d3e43016642"
+
+[[package]]
+name = "combine"
+version = "4.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+dependencies = [
+ "bytes",
+ "memchr",
+]
 
 [[package]]
 name = "compact_str"
@@ -1568,6 +1650,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1591,6 +1700,30 @@ checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dbus"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b942602992bb7acfd1f51c49811c58a610ef9181b6e66f3e519d79b540a3bf73"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dbus-tokio"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007688d459bc677131c063a3a77fb899526e17b7980f390b69644bdbc41fad13"
+dependencies = [
+ "dbus",
+ "libc",
+ "tokio",
 ]
 
 [[package]]
@@ -1692,6 +1825,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1789,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "f1-pitlane"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1843,7 +1982,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flux-0x"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-api",
  "reqwest 0.12.28",
@@ -1853,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "flux-advisor"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1862,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "flux-aether"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -1871,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "flux-agent-trade"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-0x",
  "flux-trade",
@@ -1899,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -1908,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai-bench"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1920,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "flux-akeeba"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1930,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-api-macros",
  "flux-graph",
@@ -1942,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api-macros"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1951,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "flux-architect"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -1962,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "flux-archive"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "serde",
@@ -1971,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1980,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "flux-backend"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1993,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-api"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-bank-core",
  "serde",
@@ -2002,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-bridge"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-core",
@@ -2013,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-core"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2022,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-mcp"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-bridge",
@@ -2032,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-sdk"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-bridge",
@@ -2044,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bbq"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2053,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bench"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2070,19 +2209,39 @@ dependencies = [
 
 [[package]]
 name = "flux-biosim"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "flux-bluetooth"
+version = "0.25.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "btleplug",
+ "flux-p2p",
+ "flux-sqisign",
+ "futures",
+ "hex",
+ "libp2p 0.54.1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "flux-boilerplate"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-burst"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-chronos",
@@ -2092,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cache"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -2104,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chronos"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
@@ -2115,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cmc"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-api",
  "reqwest 0.12.28",
@@ -2125,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cockpit"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -2136,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "flux-consensus"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2154,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "flux-context"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2162,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cowsim"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2170,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2183,14 +2342,14 @@ dependencies = [
 
 [[package]]
 name = "flux-driver"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-cache",
 ]
 
 [[package]]
 name = "flux-email"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "lettre",
  "serde",
@@ -2200,11 +2359,11 @@ dependencies = [
 
 [[package]]
 name = "flux-extension"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-fcx"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2213,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fcx-logic"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "rquickjs",
@@ -2221,14 +2380,44 @@ dependencies = [
 
 [[package]]
 name = "flux-fcx-wasm"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-fcx",
 ]
 
 [[package]]
+name = "flux-filecoin"
+version = "0.25.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "clap",
+ "flux-aether",
+ "flux-bank-core",
+ "flux-db",
+ "flux-market",
+ "flux-p2p",
+ "flux-search",
+ "flux-sqisign",
+ "fluxc-mcp",
+ "futures",
+ "hex",
+ "libp2p 0.54.1",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "uuid",
+]
+
+[[package]]
 name = "flux-fleet"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2237,7 +2426,7 @@ dependencies = [
 
 [[package]]
 name = "flux-frontend"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2247,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "flux-game-log"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2262,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "flux-glossary"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2270,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "flux-gpu"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "num_cpus",
@@ -2279,11 +2468,11 @@ dependencies = [
 
 [[package]]
 name = "flux-gpu-market"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-graph"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -2292,14 +2481,14 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "flux-history"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -2311,11 +2500,11 @@ dependencies = [
 
 [[package]]
 name = "flux-hotswap"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-ivc"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "ark-bls12-381",
@@ -2344,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ivc-verifier-wasm"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "bincode",
  "flux-ivc",
@@ -2361,22 +2550,22 @@ dependencies = [
 
 [[package]]
 name = "flux-keel"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-kv"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-db",
 ]
 
 [[package]]
 name = "flux-lab"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2398,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "flux-legacy"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-context",
  "flux-refactor",
@@ -2410,14 +2599,14 @@ dependencies = [
 
 [[package]]
 name = "flux-legacy2"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-graph",
 ]
 
 [[package]]
 name = "flux-legacy3"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-graph",
  "flux-legacy",
@@ -2426,11 +2615,11 @@ dependencies = [
 
 [[package]]
 name = "flux-macros"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-market"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2439,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mempool"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2456,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "flux-moe"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "fluxc-core",
  "reqwest 0.12.28",
@@ -2466,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "flux-nations"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-email",
@@ -2476,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "flux-oauth2"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "base64 0.21.7",
  "hex",
@@ -2490,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2499,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "flux-orchestrator"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2507,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2523,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "flux-policy"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2532,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "flux-promote-gate"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2540,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qug"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2550,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "flux-quorum"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -2560,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qwen-batch"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2568,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "flux-record"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2579,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "flux-recursive-proofs"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "ark-ff 0.4.2",
@@ -2615,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "flux-refactor"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "fluxc-core",
  "serde",
@@ -2624,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "flux-render"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2632,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "flux-report"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "flux-ai",
@@ -2645,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2657,14 +2846,14 @@ dependencies = [
 
 [[package]]
 name = "flux-rsync"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "flux-sap-feed"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-ai-bench",
@@ -2676,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "flux-science"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "approx",
  "blake3",
@@ -2690,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "flux-scoreboard"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2699,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -2711,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search-aggregate"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2719,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "flux-self-heal"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-hotswap",
  "flux-p2p",
@@ -2733,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -2742,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil-dashboard"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2751,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil-releases"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2760,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sniff"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2769,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-cache",
  "flux-db",
@@ -2780,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-store"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-db",
  "serde",
@@ -2790,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-tools"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2799,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "flux-tip-proof-stir"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2813,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "flux-torrent"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-aether",
@@ -2822,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "flux-trade"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2832,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ue-bridge"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2851,11 +3040,11 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "flux-vite-engine"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2868,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-lattice-guard",
@@ -2885,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-p2p"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "ark-bn254",
@@ -2909,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-snark"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "ark-bls12-381",
@@ -2947,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2970,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-types"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2979,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "fluxc"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "flux-graph",
  "fluxc-core",
@@ -2989,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "fluxc-core"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-ai",
@@ -3003,6 +3192,7 @@ dependencies = [
  "flux-optimize",
  "flux-p2p",
  "flux-sqisign",
+ "flux-swarm-store",
  "flux-swarm-tools",
  "hex",
  "hmac",
@@ -3022,7 +3212,7 @@ dependencies = [
 
 [[package]]
 name = "fluxc-gemma"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3031,9 +3221,12 @@ dependencies = [
 
 [[package]]
 name = "fluxc-mcp"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
+ "base64 0.21.7",
+ "blake3",
  "flux-0x",
+ "flux-aether",
  "flux-agora-stargate-mcp",
  "flux-ai",
  "flux-api",
@@ -3058,6 +3251,7 @@ dependencies = [
  "fluxc-core",
  "lazy_static",
  "regex",
+ "serde",
  "serde_json",
  "sigil-cosmos-mcp",
  "sigil-dao-bridge-mcp",
@@ -3065,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "fluxmux"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "crossterm",
  "flux-macros",
@@ -3662,7 +3856,7 @@ checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -3869,7 +4063,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4071,6 +4265,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap-nostd"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
+
+[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4169,7 +4369,7 @@ dependencies = [
  "socket2 0.6.3",
  "widestring",
  "windows-registry",
- "windows-result",
+ "windows-result 0.4.1",
  "windows-sys 0.61.2",
 ]
 
@@ -4215,10 +4415,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "jni"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6df18c2e3db7e453d3c6ac5b3e9d5182664d28788126d39b91f2d1e22b017ec"
+dependencies = [
+ "cesu8",
+ "combine",
+ "jni-sys 0.3.1",
+ "log",
+ "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "jni-sys"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41a652e1f9b6e0275df1f15b32661cf0d4b78d4d87ddec5e0c3c20f097433258"
+dependencies = [
+ "jni-sys 0.4.1",
+]
+
+[[package]]
+name = "jni-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6377a88cb3910bee9b0fa88d4f42e1d2da8e79915598f65fb0c7ee14c878af2"
+dependencies = [
+ "jni-sys-macros",
+]
+
+[[package]]
+name = "jni-sys-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "jni-utils"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "259e9f2c3ead61de911f147000660511f07ab00adeed1d84f5ac4d0386e7a6c4"
+dependencies = [
+ "dashmap 5.5.3",
+ "futures",
+ "jni",
+ "log",
+ "once_cell",
+ "static_assertions",
+ "uuid",
+]
 
 [[package]]
 name = "jobserver"
@@ -4325,6 +4591,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "libloading"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4341,7 +4616,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5377,6 +5652,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5477,6 +5761,51 @@ checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
 dependencies = [
  "malloc_buf",
  "objc_exception",
+]
+
+[[package]]
+name = "objc-sys"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb91bdd390c7ce1a8607f35f3ca7151b65afc0ff5ff3b34fa350f7d7c7e4310"
+
+[[package]]
+name = "objc2"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46a785d4eeff09c14c487497c162e92766fbb3e4059a71840cecc03d9a50b804"
+dependencies = [
+ "objc-sys",
+ "objc2-encode",
+]
+
+[[package]]
+name = "objc2-core-bluetooth"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a644b62ffb826a5277f536cf0f701493de420b13d40e700c452c36567771111"
+dependencies = [
+ "bitflags 2.11.1",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-encode"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "objc2-foundation"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ee638a5da3799329310ad4cfa62fbf045d5f56e3ef5ba4149e7452dcf89d5a8"
+dependencies = [
+ "bitflags 2.11.1",
+ "block2",
+ "libc",
+ "objc2",
 ]
 
 [[package]]
@@ -5636,7 +5965,7 @@ dependencies = [
  "libc",
  "redox_syscall 0.5.18",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5929,34 +6258,34 @@ dependencies = [
 
 [[package]]
 name = "quillonos-claude"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quillonos-coreutils"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quillonos-init"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quillonos-q-miner"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "quillonos-readfile"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quillonos-sh"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quillonos-uname"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "quinn"
@@ -6752,6 +7081,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-xml-rs"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc2215ce3e6a77550b80a1c37251b7d294febaf42e36e21b7b411e0bf54d540d"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror 2.0.18",
+ "xml",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6854,7 +7195,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sigil-ashwalker"
-version = "0.22.3"
+version = "0.25.0"
 
 [[package]]
 name = "sigil-bank"
@@ -6866,7 +7207,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-cosmos-core"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "blake3",
  "flux-nations",
@@ -6877,7 +7218,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-cosmos-mcp"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde_json",
  "sigil-cosmos-core",
@@ -6909,7 +7250,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dao-bridge-mcp"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "hex",
  "serde_json",
@@ -6966,7 +7307,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-rpc-wasm"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "sigil-dex",
  "sigil-rpc",
@@ -6998,7 +7339,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tip-wasm"
-version = "0.22.3"
+version = "0.25.0"
 dependencies = [
  "serde_json",
  "sigil-tip-proof",
@@ -7020,6 +7361,7 @@ dependencies = [
  "serde",
  "sigil-state",
  "thiserror 1.0.69",
+ "wasmi",
 ]
 
 [[package]]
@@ -7337,6 +7679,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.30.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a5b4ddaee55fb2bea2bf0e5000747e5f5c0de765e5a5ff87f4cd106439f4bb3"
+dependencies = [
+ "cfg-if",
+ "core-foundation-sys",
+ "libc",
+ "ntapi",
+ "once_cell",
+ "rayon",
+ "windows 0.52.0",
+]
+
+[[package]]
 name = "system-configuration"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7600,6 +7957,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7971,6 +8329,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -8167,6 +8526,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmi"
+version = "0.31.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a8281d1d660cdf54c76a3efa9ddd0c270cada1383a995db3ccb43d166456c7"
+dependencies = [
+ "smallvec",
+ "spin 0.9.8",
+ "wasmi_arena",
+ "wasmi_core",
+ "wasmparser-nostd",
+]
+
+[[package]]
+name = "wasmi_arena"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "104a7f73be44570cac297b3035d76b169d6599637631cf37a1703326a0727073"
+
+[[package]]
+name = "wasmi_core"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf1a7db34bff95b85c261002720c00c3a6168256dcb93041d3fa2054d19856a"
+dependencies = [
+ "downcast-rs",
+ "libm",
+ "num-traits",
+ "paste",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8176,6 +8566,15 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap 2.14.0",
  "semver 1.0.28",
+]
+
+[[package]]
+name = "wasmparser-nostd"
+version = "0.100.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a015fe95f3504a94bb1462c717aae75253e39b9dd6c3fb1062c934535c64aa"
+dependencies = [
+ "indexmap-nostd",
 ]
 
 [[package]]
@@ -8370,14 +8769,46 @@ dependencies = [
 
 [[package]]
 name = "windows"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48a53791691ab099e5e2ad123536d0fff50652600abaf43bbf952894110d0be"
+dependencies = [
+ "windows-core 0.52.0",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows"
+version = "0.61.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
+dependencies = [
+ "windows-collections 0.2.0",
+ "windows-core 0.61.2",
+ "windows-future 0.2.1",
+ "windows-link 0.1.3",
+ "windows-numerics 0.2.0",
+]
+
+[[package]]
+name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
 dependencies = [
- "windows-collections",
- "windows-core",
- "windows-future",
- "windows-numerics",
+ "windows-collections 0.3.2",
+ "windows-core 0.62.2",
+ "windows-future 0.3.2",
+ "windows-numerics 0.3.1",
+]
+
+[[package]]
+name = "windows-collections"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3beeceb5e5cfd9eb1d76b381630e82c4241ccd0d27f1a39ed41b2760b255c5e8"
+dependencies = [
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -8386,7 +8817,29 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
 dependencies = [
- "windows-core",
+ "windows-core 0.62.2",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ab640c8d7e35bf8ba19b884ba838ceb4fba93a4e8c65a9059d08afcfc683d9"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
+ "windows-strings 0.4.2",
 ]
 
 [[package]]
@@ -8397,9 +8850,20 @@ checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
  "windows-implement",
  "windows-interface",
- "windows-link",
- "windows-result",
- "windows-strings",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
+name = "windows-future"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc6a41e98427b19fe4b73c550f060b59fa592d7d686537eebf9385621bfbad8e"
+dependencies = [
+ "windows-core 0.61.2",
+ "windows-link 0.1.3",
+ "windows-threading 0.1.0",
 ]
 
 [[package]]
@@ -8408,9 +8872,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
 dependencies = [
- "windows-core",
- "windows-link",
- "windows-threading",
+ "windows-core 0.62.2",
+ "windows-link 0.2.1",
+ "windows-threading 0.2.1",
 ]
 
 [[package]]
@@ -8437,9 +8901,25 @@ dependencies = [
 
 [[package]]
 name = "windows-link"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e6ad25900d524eaabdbbb96d20b4311e1e7ae1699af4fb28c17ae66c80d798a"
+
+[[package]]
+name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-numerics"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9150af68066c4c5c07ddc0ce30421554771e528bde427614c61038bc2c92c2b1"
+dependencies = [
+ "windows-core 0.61.2",
+ "windows-link 0.1.3",
+]
 
 [[package]]
 name = "windows-numerics"
@@ -8447,8 +8927,8 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
- "windows-core",
- "windows-link",
+ "windows-core 0.62.2",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -8457,9 +8937,18 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
 dependencies = [
- "windows-link",
- "windows-result",
- "windows-strings",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
+dependencies = [
+ "windows-link 0.1.3",
 ]
 
 [[package]]
@@ -8468,7 +8957,16 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57"
+dependencies = [
+ "windows-link 0.1.3",
 ]
 
 [[package]]
@@ -8477,7 +8975,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -8504,7 +9002,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -8555,11 +9053,20 @@ dependencies = [
 
 [[package]]
 name = "windows-threading"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66463ad2e0ea3bbf808b7f1d371311c80e115c0b71d60efc142cafbcfb057a6"
+dependencies = [
+ "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-threading"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -8841,6 +9348,12 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
 ]
+
+[[package]]
+name = "xml"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "636f85e5ca6488e96401b61eb7de54f4e44755c988af0f52cf90230c312a1a89"
 
 [[package]]
 name = "xml-rs"

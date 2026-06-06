@@ -1,0 +1,52 @@
+[package]
+name = "flux-filecoin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Filecoin — decentralized storage marketplace built on flux-aether, flux-search, and the Flux MCP platform. Disk-space sharing with proof-of-storage, distributed search, and token economics. Beats Filecoin with no wasteful PoRep, native search indexing, and K-of-N erasure coding."
+
+[dependencies]
+# Core
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+# Storage substrate
+flux-aether = { path = "../flux-aether" }
+flux-search = { path = "../flux-search" }
+flux-db = { path = "../flux-db" }
+
+# P2P + networking
+flux-p2p = { path = "../flux-p2p" }
+libp2p = { version = "0.54", features = ["tokio", "gossipsub", "kad", "identify", "noise", "yamux", "tcp", "request-response"] }
+
+# Economics
+flux-bank-core = { path = "../flux-bank-core" }
+flux-market = { path = "../flux-market" }
+
+# MCP integration
+fluxc-mcp = { path = "../fluxc-mcp", optional = true }
+
+# Crypto
+flux-sqisign = { path = "../flux-sqisign" }
+rand = "0.8"
+
+# Utils
+uuid = { version = "1", features = ["v4", "serde"] }
+futures = "0.3"
+sysinfo = "0.30"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["mcp"]
+mcp = ["fluxc-mcp"]
+
+[[bin]]
+name = "flux-filecoin-node"
+path = "src/bin/node.rs"

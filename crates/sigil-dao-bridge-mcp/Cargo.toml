@@ -1,0 +1,16 @@
+[package]
+name = "sigil-dao-bridge-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP combo: SigilGraph DAO × VM × DEX integration bridge"
+
+[dependencies]
+sigil-dao-bridge = { path = "../../../sigil/crates/sigil-dao-bridge" }
+sigil-council = { path = "../../../sigil/crates/sigil-council" }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[[example]]
+name = "gen_registry"
+path = "examples/gen_registry.rs"

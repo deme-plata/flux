@@ -9,6 +9,7 @@ flux-cache = { path = "../flux-cache" }
 flux-driver = { path = "../flux-driver" }
 flux-graph = { path = "../flux-graph" }
 flux-swarm-tools = { path = "../flux-swarm-tools" }
+flux-swarm-store = { path = "../flux-swarm-store" }
 flux-api = { path = "../flux-api" }
 flux-optimize = { path = "../flux-optimize" }
 flux-ai = { path = "../flux-ai" }

@@ -60,15 +60,9 @@ gate "flux_compile_error_combo parser + handler" bash -c "
   grep -q 'platform_webhook' crates/fluxc-mcp/src/handlers/compile_error.rs
 "
 
-# Gate 5: sigil-vm VM-1 wasmi (sigil repo — fluxc test scoped)
+# Gate 5: sigil-vm VM-1 wasmi (sigil repo — cargo test; no fluxc binary in sigil tree)
 gate "sigil-vm VM-1 wasmi" bash -c "
-  cd '$SIGIL'
-  BIN=\$(ls -t target/debug/deps/sigil_vm-* 2>/dev/null | grep -v '\\.d\$' | head -1)
-  if test -n \"\$BIN\"; then
-    \$BIN 2>&1 | tail -3 | grep -q '0 failed'
-  else
-    $FLUXC test --package sigil-vm 2>&1 | tail -3 | grep -q '0 failed'
-  fi
+  cd '$SIGIL' && cargo test -p sigil-vm 2>&1 | tail -3 | grep -q '0 failed'
 "
 
 # Gate 6: flux-promote-gate + fluxc version 0.25.x

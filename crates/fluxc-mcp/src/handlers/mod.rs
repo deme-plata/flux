@@ -174,4 +174,8 @@ pub mod sigil_ops;
 pub mod flux_error;
 pub mod molt;
 pub mod wallet_xray;
+pub mod platform_security;
+pub mod aether;
+pub mod fleet;
+pub mod compile_error;
 pub mod flux_legacy;

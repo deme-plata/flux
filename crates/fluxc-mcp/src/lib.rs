@@ -41,6 +41,9 @@ fn build_registry() -> ToolRegistry {
     handlers::molt::register(&mut registry);
     handlers::wallet_xray::register(&mut registry);
     handlers::flux_legacy::register(&mut registry);
+    handlers::aether::register(&mut registry);
+    handlers::fleet::register(&mut registry);
+    handlers::compile_error::register(&mut registry);
     registry
 }
 

@@ -12,6 +12,8 @@ flux-extension = { path = "../flux-extension" }
 flux-archive = { path = "../flux-archive" }
 flux-swarm-tools = { path = "../flux-swarm-tools" }
 flux-search = { path = "../flux-search" }
+flux-aether = { path = "../flux-aether" }
+base64 = "0.21"
 flux-gpu = { path = "../flux-gpu" }
 flux-gpu-market = { path = "../flux-gpu-market" }
 flux-0x = { path = "../flux-0x" }
@@ -29,6 +31,8 @@ flux-bank-mcp = { path = "../flux-bank-mcp" }
 sigil-cosmos-mcp = { path = "../sigil-cosmos-mcp" }
 flux-moe = { path = "../flux-moe" }
 serde_json = "1"
+serde = { version = "1.0", features = ["derive"] }
+blake3 = "1.5"
 # Used by handlers/wallet_xray.rs (HEX_RE/INLINE_STYLE_RE/TW_RE) + stats/ops/frontend
 # but were never declared → fresh `fluxc` builds failed (cached binary hid it).
 regex = "1"

@@ -69,11 +69,28 @@ pub fn analyze_ws() -> fluxc_core::quantum_architect::QuantumArchitecture {
     fluxc_core::quantum_architect::analyze_workspace(&ws().to_string_lossy())
 }
 
+
+/// Workspace `target/debug/fluxc` with cargo on PATH (flux-dev: never flux-cargo-wrapper).
+pub fn fluxc_cmd() -> std::process::Command {
+    let fluxc = ws().join("target/debug/fluxc");
+    let mut cmd = std::process::Command::new(fluxc);
+    cmd.current_dir(ws());
+    let path = std::env::var("PATH").unwrap_or_default();
+    if !path.contains("/root/.cargo/bin") {
+        cmd.env("PATH", format!("/root/.cargo/bin:{path}"));
+    }
+    cmd
+}
+
 /// Convenience wrapper: a `cargo` Command pre-anchored at the workspace root.
 /// All cargo subprocesses in handler modules should construct via this.
 pub fn cargo_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("cargo");
     cmd.current_dir(ws());
+    let path = std::env::var("PATH").unwrap_or_default();
+    if !path.contains("/root/.cargo/bin") {
+        cmd.env("PATH", format!("/root/.cargo/bin:{path}"));
+    }
     cmd
 }
 
@@ -175,6 +192,7 @@ pub mod flux_error;
 pub mod molt;
 pub mod wallet_xray;
 pub mod platform_security;
+pub mod platform_webhook;
 pub mod aether;
 pub mod fleet;
 pub mod compile_error;

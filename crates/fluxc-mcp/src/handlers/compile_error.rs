@@ -1,6 +1,7 @@
 //! Compiler error finding combo — rustc diagnostics + source snippets + webhooks.
 
-use crate::handlers::{cargo_cmd, ws, ToolDef, ToolRegistry};
+use crate::handlers::{fluxc_cmd, ws, ToolDef, ToolRegistry};
+use crate::handlers::platform_webhook;
 use fluxc_core::webhook;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -74,6 +75,36 @@ fn read_snippet(path: &Path, line: u32, ctx: u32) -> Option<(u32, Vec<String>)> 
         })
         .collect();
     Some((start as u32 + 1, snippet))
+}
+
+
+fn output_has_compile_errors(combined: &str) -> bool {
+    combined.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("error:")
+            || t.starts_with("error[")
+            || t.starts_with("error ")
+    })
+}
+
+fn fallback_errors(combined: &str) -> Vec<ErrorSnippet> {
+    combined
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("error:") || t.starts_with("error[") || t.starts_with("error ")
+        })
+        .map(|l| ErrorSnippet {
+            message: l.trim().to_string(),
+            code: None,
+            file: "(fluxc)".into(),
+            line: 0,
+            col: 0,
+            snippet_start: 0,
+            snippet_lines: vec![l.trim().to_string()],
+            highlight_line: 0,
+        })
+        .collect()
 }
 
 fn parse_errors(combined: &str, ctx: u32) -> Vec<ErrorSnippet> {
@@ -155,8 +186,8 @@ fn flux_compile_error_combo(args: &Value) -> String {
     let webhook_url = args.get("webhook_url").and_then(|v| v.as_str());
 
     let start = std::time::Instant::now();
-    let mut cmd = cargo_cmd();
-    cmd.args(["check", "--package", package, "--message-format=short"]);
+    let mut cmd = fluxc_cmd();
+    cmd.args(["build", "--package", package]);
     if release {
         cmd.arg("--release");
     }
@@ -164,21 +195,24 @@ fn flux_compile_error_combo(args: &Value) -> String {
     let elapsed_ms = start.elapsed().as_millis();
 
     match output {
-        Ok(out) if out.status.success() => {
-            webhook::auto_dispatch(
-                "build_complete",
-                webhook::build_event_data(package, true, elapsed_ms, 0, 0),
-            );
-            format!(
-                "✓ flux_compile_error_combo — {} compiles clean ({}ms)",
-                package, elapsed_ms
-            )
-        }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             let combined = format!("{stdout}\n{stderr}");
-            let errors = parse_errors(&combined, ctx);
+            if out.status.success() && !output_has_compile_errors(&combined) {
+                webhook::auto_dispatch(
+                    "build_complete",
+                    webhook::build_event_data(package, true, elapsed_ms, 0, 0),
+                );
+                return format!(
+                    "✓ flux_compile_error_combo — {} compiles clean ({}ms)",
+                    package, elapsed_ms
+                );
+            }
+            let mut errors = parse_errors(&combined, ctx);
+            if errors.is_empty() && output_has_compile_errors(&combined) {
+                errors = fallback_errors(&combined);
+            }
             let payload = json!({
                 "event": "compile_error",
                 "package": package,
@@ -188,6 +222,7 @@ fn flux_compile_error_combo(args: &Value) -> String {
             });
 
             webhook::auto_dispatch("compile_error", payload.clone());
+            platform_webhook::dispatch("flux_compile_error_combo", "compile_error", payload.clone());
             webhook::auto_dispatch(
                 "build_failed",
                 webhook::build_event_data(package, false, elapsed_ms, 0, 0),

@@ -171,15 +171,16 @@ fn flux_aether_ingest(args: &Value) -> String {
     };
     match save_bundle(&bundle) {
         Ok(path) => {
-            fluxc_core::webhook::auto_dispatch(
-                "aether_ingest",
-                json!({
+            let payload = json!({
                     "content_root": hex32(&block.content_root),
                     "len": block.len,
                     "shards": bundle.block.n,
                     "path": path.display().to_string(),
-                }),
-            );
+                });
+
+            fluxc_core::webhook::auto_dispatch("aether_ingest", payload.clone());
+
+            crate::handlers::platform_webhook::dispatch("flux_aether_ingest", "aether_ingest", payload);
             format!(
                 "✓ flux_aether_ingest\n  content_root: {}\n  len: {} bytes\n  shards: {} (k={})\n  store: {}",
                 hex32(&block.content_root),
@@ -211,14 +212,15 @@ fn flux_aether_retrieve(args: &Value) -> String {
         Ok(bytes) => {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            fluxc_core::webhook::auto_dispatch(
-                "aether_retrieve",
-                json!({
+            let payload = json!({
                     "content_root": hex32(&root),
                     "len": bytes.len(),
                     "verified": true,
-                }),
-            );
+                });
+
+            fluxc_core::webhook::auto_dispatch("aether_retrieve", payload.clone());
+
+            crate::handlers::platform_webhook::dispatch("flux_aether_retrieve", "aether_retrieve", payload);
             format!(
                 "✓ flux_aether_retrieve\n  content_root: {}\n  len: {} bytes\n  data_b64: {}",
                 hex32(&root),
@@ -296,14 +298,17 @@ fn flux_aether_sync(args: &Value) -> String {
         .unwrap_or_default();
     let sync_plan = plan(&mesh[0].1, &peer_digest);
 
-    fluxc_core::webhook::auto_dispatch(
-        "aether_sync",
-        json!({
+    let payload = json!({
             "divergence": div,
             "sync_executed": sync,
             "nodes": mesh.iter().map(|(n, m)| json!({"node": n, "artifacts": m.len()})).collect::<Vec<_>>(),
-        }),
-    );
+        });
+
+
+    fluxc_core::webhook::auto_dispatch("aether_sync", payload.clone());
+
+
+    crate::handlers::platform_webhook::dispatch("flux_aether_sync", "aether_sync", payload);
 
     format!(
         "✓ flux_aether_sync\n  divergence: {div}\n  sync_executed: {sync}\n  plan_noop: {}\n  mesh_status:\n{status}",

@@ -49,6 +49,9 @@ pub use storage::StorageProvider;
 pub use proof::ProofOfStorage;
 pub use search::SearchNetwork;
 pub use types::*;
+pub use storage::StorageStats;
+pub use market::MarketPrice;
+pub use search::SearchStats;
 pub use node::FilecoinNode;
 
 use std::sync::Arc;

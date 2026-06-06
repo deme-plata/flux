@@ -12,7 +12,9 @@ use tracing::{info, warn};
 use crate::market::StorageMarket;
 use crate::proof::ProofOfStorage;
 use crate::search::SearchNetwork;
-use crate::storage::StorageProvider;
+use crate::storage::{StorageProvider, StorageStats};
+use crate::market::MarketPrice;
+use crate::search::SearchStats;
 use crate::types::*;
 use crate::FilecoinConfig;
 

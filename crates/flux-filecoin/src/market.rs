@@ -100,7 +100,7 @@ impl StorageMarket {
 
         // Calculate price
         let gb = file_size as f64 / 1_073_741_824.0;
-        let months = duration as f64 / (86400.0 * 30.0);
+        let months = duration as f64 / 2_592_000.0; // 86400 * 30
         let total_price = (provider.price_per_gb_month as f64 * gb * months) as u128;
 
         // Generate contract ID

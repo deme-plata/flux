@@ -1,6 +1,8 @@
 //! flux-bank-mcp — agent combos (read + propose dry-run + bifrost skeleton).
 
 use flux_bank_bridge::bank_status;
+pub mod company_launch;
+pub use company_launch::{flux_company_launch_propose, flux_wickes_site_propose};
 use flux_bank_core::{Ledger, TransferProposal, NATIVE};
 
 pub fn flux_bank_status(endpoint: Option<&str>) -> String {

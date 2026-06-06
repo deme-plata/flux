@@ -1,4 +1,4 @@
-//! Flux Bank + Bifrost MCP.
+//! Flux Bank + Bifrost + Wickes CMS company launch MCP.
 
 use super::{ToolDef, ToolFn, ToolRegistry};
 use serde_json::{json, Value};
@@ -45,6 +45,41 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_bifrost_run,
     );
+    registry.register(
+        ToolDef {
+            name: "flux_wickes_site_propose",
+            description: "Proposal-only Wickes CMS site skeleton (flux-cck + flux-pagebuilder patterns). Never auto-publishes.",
+            input_schema: json!({
+                "type":"object",
+                "properties":{
+                    "company_name":{"type":"string"},
+                    "slug":{"type":"string"},
+                    "template":{"type":"string","description":"saas-landing|company-launch"}
+                },
+                "required":["company_name","slug"]
+            }),
+        },
+        flux_wickes_site_propose,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_company_launch_combo",
+            description: "Proposal-first company launch: Wickes CMS site + Sigil Bank treasury seed (dry-run). Spend requires SignedIntent + 2-of-2.",
+            input_schema: json!({
+                "type":"object",
+                "properties":{
+                    "company_name":{"type":"string"},
+                    "slug":{"type":"string"},
+                    "founder_wallet":{"type":"string"},
+                    "treasury_wallet":{"type":"string"},
+                    "seed_capital_uqug":{"type":"integer"},
+                    "bank_endpoint":{"type":"string","description":"quillon|epsilon|delta — default quillon (sigilgraph.fluxapp.xyz)"}
+                },
+                "required":["company_name","slug","founder_wallet","treasury_wallet","seed_capital_uqug"]
+            }),
+        },
+        flux_company_launch_combo,
+    );
 }
 
 fn flux_bank_status(args: &Value) -> String {
@@ -62,6 +97,35 @@ fn flux_bank_propose_transfer(args: &Value) -> String {
     format!(
         "=== flux_bank_propose_transfer ===\n{}",
         flux_bank_mcp::flux_bank_propose_transfer(from, to, amount, token, memo)
+    )
+}
+
+fn flux_wickes_site_propose(args: &Value) -> String {
+    let name = args.get("company_name").and_then(|v| v.as_str()).unwrap_or("");
+    let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() || slug.is_empty() {
+        return "company_name and slug required".into();
+    }
+    let template = args.get("template").and_then(|v| v.as_str());
+    format!(
+        "=== flux_wickes_site_propose ===\n{}",
+        flux_bank_mcp::flux_wickes_site_propose(name, slug, template)
+    )
+}
+
+fn flux_company_launch_combo(args: &Value) -> String {
+    let name = args.get("company_name").and_then(|v| v.as_str()).unwrap_or("");
+    let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+    let founder = args.get("founder_wallet").and_then(|v| v.as_str()).unwrap_or("");
+    let treasury = args.get("treasury_wallet").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() || slug.is_empty() || founder.is_empty() || treasury.is_empty() {
+        return "company_name, slug, founder_wallet, treasury_wallet required".into();
+    }
+    let seed = args.get("seed_capital_uqug").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
+    let endpoint = args.get("bank_endpoint").and_then(|v| v.as_str());
+    format!(
+        "=== flux_company_launch_combo ===\n{}",
+        flux_bank_mcp::flux_company_launch_propose(name, slug, founder, treasury, seed, endpoint)
     )
 }
 
@@ -126,5 +190,19 @@ mod bifrost_tests {
         assert!(out.contains("moe_route"));
         assert!(out.contains("bank_status"));
         assert!(out.contains("flux_vast_recommend"));
+    }
+
+    #[test]
+    fn company_launch_combo_smoke() {
+        let out = flux_company_launch_combo(&json!({
+            "company_name": "Test Co",
+            "slug": "test-co",
+            "founder_wallet": "f",
+            "treasury_wallet": "t",
+            "seed_capital_uqug": 1000,
+            "bank_endpoint": "quillon"
+        }));
+        assert!(out.contains("proposal_only"));
+        assert!(out.contains("flux_company_launch_combo"));
     }
 }

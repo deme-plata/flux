@@ -1880,6 +1880,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-agora-stargate"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "fluxc-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flux-agora-stargate-mcp"
+version = "0.2.0"
+dependencies = [
+ "flux-agora-stargate",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-ai"
 version = "0.22.3"
 dependencies = [
@@ -3016,6 +3034,7 @@ name = "fluxc-mcp"
 version = "0.22.3"
 dependencies = [
  "flux-0x",
+ "flux-agora-stargate-mcp",
  "flux-ai",
  "flux-api",
  "flux-archive",
@@ -3040,6 +3059,8 @@ dependencies = [
  "lazy_static",
  "regex",
  "serde_json",
+ "sigil-cosmos-mcp",
+ "sigil-dao-bridge-mcp",
 ]
 
 [[package]]
@@ -6844,6 +6865,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-cosmos-core"
+version = "0.22.3"
+dependencies = [
+ "blake3",
+ "flux-nations",
+ "flux-quorum",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sigil-cosmos-mcp"
+version = "0.22.3"
+dependencies = [
+ "serde_json",
+ "sigil-cosmos-core",
+]
+
+[[package]]
+name = "sigil-council"
+version = "0.0.10"
+dependencies = [
+ "blake3",
+ "hex",
+]
+
+[[package]]
+name = "sigil-dao-bridge"
+version = "0.0.10"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
+ "sigil-council",
+ "sigil-dex",
+ "sigil-state",
+ "sigil-treasury",
+ "sigil-vm",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "sigil-dao-bridge-mcp"
+version = "0.22.3"
+dependencies = [
+ "hex",
+ "serde_json",
+ "sigil-council",
+ "sigil-dao-bridge",
+]
+
+[[package]]
 name = "sigil-dex"
 version = "0.0.10"
 dependencies = [
@@ -6928,6 +7002,24 @@ version = "0.22.3"
 dependencies = [
  "serde_json",
  "sigil-tip-proof",
+]
+
+[[package]]
+name = "sigil-treasury"
+version = "0.0.10"
+dependencies = [
+ "blake3",
+ "hex",
+]
+
+[[package]]
+name = "sigil-vm"
+version = "0.0.10"
+dependencies = [
+ "blake3",
+ "serde",
+ "sigil-state",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

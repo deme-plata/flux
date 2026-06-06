@@ -1,0 +1,12 @@
+[package]
+name = "flux-agora-stargate-mcp"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+flux-agora-stargate = { path = "../flux-agora-stargate" }
+serde_json = "1.0"
+
+[[example]]
+name = "gen_registry"
+path = "examples/gen_registry.rs"

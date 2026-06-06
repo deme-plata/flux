@@ -9,7 +9,7 @@ pub struct FluxBankClient {
 
 impl FluxBankClient {
     pub fn quillon() -> Self {
-        Self { base: "https://quillon.xyz/api/v1".into() }
+        Self { base: "https://sigilgraph.fluxapp.xyz/api/v1".into() }
     }
 
     pub fn with_base(base: impl Into<String>) -> Self {

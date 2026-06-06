@@ -33,3 +33,5 @@ serde_json = "1"
 # but were never declared → fresh `fluxc` builds failed (cached binary hid it).
 regex = "1"
 lazy_static = "1.4"
+flux-agora-stargate-mcp = { path = "../flux-agora-stargate-mcp" }
+sigil-dao-bridge-mcp = { path = "../sigil-dao-bridge-mcp" }

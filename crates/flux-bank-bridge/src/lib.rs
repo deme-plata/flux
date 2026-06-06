@@ -8,7 +8,7 @@ pub fn resolve_endpoint(alias: &str) -> String {
     match alias.trim().to_lowercase().as_str() {
         "epsilon" => "http://89.149.241.126:8080/api/v1".into(),
         "delta" => "http://5.79.79.158:8080/api/v1".into(),
-        _ => "https://quillon.xyz/api/v1".into(),
+        _ => "https://sigilgraph.fluxapp.xyz/api/v1".into(),
     }
 }
 

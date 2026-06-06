@@ -1,0 +1,13 @@
+[package]
+name = "sigil-cosmos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kristensen κ-phase engine for SigilGraph citizenship"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+flux-nations = { path = "../flux-nations" }
+flux-quorum = { path = "../flux-quorum" }

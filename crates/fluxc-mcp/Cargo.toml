@@ -26,6 +26,7 @@ flux-graph = { path = "../flux-graph" }
 flux-ai = { path = "../flux-ai" }
 flux-chronos = { path = "../flux-chronos" }
 flux-bank-mcp = { path = "../flux-bank-mcp" }
+sigil-cosmos-mcp = { path = "../sigil-cosmos-mcp" }
 flux-moe = { path = "../flux-moe" }
 serde_json = "1"
 # Used by handlers/wallet_xray.rs (HEX_RE/INLINE_STYLE_RE/TW_RE) + stats/ops/frontend

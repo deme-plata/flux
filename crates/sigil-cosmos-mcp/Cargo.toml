@@ -1,0 +1,10 @@
+[package]
+name = "sigil-cosmos-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP combos: Quantum Cosmos κ engine for SigilGraph citizenship"
+
+[dependencies]
+sigil-cosmos-core = { path = "../sigil-cosmos-core" }
+serde_json = { workspace = true }

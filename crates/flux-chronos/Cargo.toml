@@ -11,10 +11,22 @@ description = "Deterministic multiverse simulation framework for Flux chains. Vi
 
 [dependencies]
 serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode   = "1.3"
 thiserror = { workspace = true }
+hex       = "0.4"
+blake3    = "1.5"
 # Deterministic RNG — every scenario is seeded so reruns are identical.
 rand        = { version = "0.8", default-features = false, features = ["std_rng"] }
 rand_chacha = "0.3"
+# Compression for snapshot serde.
+zstd = { version = "0.13", optional = true }
+lz4  = { version = "1.24", optional = true }
+
+[features]
+default = ["zstd"]
+snapshot-zstd = ["zstd"]
+snapshot-lz4  = ["lz4"]
 
 [dev-dependencies]
 serde_json = "1"

@@ -10,9 +10,12 @@ pub mod goals;
 pub mod ai_debug;
 pub mod flux_net;
 pub mod webhook;
+pub mod webhook_inbound;
 pub mod predict;
 pub mod qspec;
 pub mod quantum_architect;
+pub mod cortex;
+pub mod self_heal;
 pub mod benchmark;
 pub mod heatmap;
 pub mod version;
@@ -268,8 +271,11 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
 
     for a in extra_args { cmd.arg(a); }
 
-    cmd.env("RUSTC_WRAPPER", env::current_exe().unwrap());
-    cmd.env("FLUXC_WRAPPING", "1");
+    if config.provenance {
+        cmd.env("RUSTC_WRAPPER", env::current_exe().unwrap());
+        cmd.env("FLUXC_WRAPPING", "1");
+    }
+    
 
     let s = cmd.status().expect("cargo");
     if !s.success() { process::exit(s.code().unwrap_or(1)); }
@@ -855,8 +861,7 @@ pub fn self_build(config: BuildConfig) {
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
     if config.release { cmd.arg("--release"); }
-    cmd.env("RUSTC_WRAPPER", env::current_exe().unwrap());
-    cmd.env("FLUXC_WRAPPING", "1");
+
 
     let status = cmd.status().expect("cargo");
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -938,25 +943,64 @@ pub fn version() -> String {
 pub fn print_usage() {
     let v = version();
     println!("{} ⚡\n", v);
-    println!("Commands:");
-    println!("  fluxc build         Build everything (Rust + Frontend autodetect)");
-    println!("  fluxc self          Self-build: Flux builds Flux (dogfooding)");
-    println!("  fluxc dev           Start dev servers (Vite HMR + fluxc watch)");
-    println!("  fluxc watch         Watch all files, auto-rebuild");
-    println!("  fluxc run           Build + run");
-    println!("  fluxc test          Run tests (Rust or Frontend)");
-    println!("  fluxc stats         Show build statistics and cache info");
-    println!("  fluxc clean         Clear all caches");
-    println!("  fluxc supercluster  Distributed compilation mesh");
-    println!("  fluxc mcp           Start MCP stdio server (AI tools)");
-    println!("  fluxc serve         Start HTTP + SSE dashboard server");
-    println!("  fluxc version       Print version\n");
+    println!("Core Commands:");
+    println!("  fluxc build           Build everything (Rust + Frontend autodetect)");
+    println!("  fluxc check           Cargo check (fast, no codegen)");
+    println!("  fluxc run             Build + run a binary");
+    println!("  fluxc test            Run tests (Rust or Frontend)");
+    println!("  fluxc quick CRATE     Quick build + run (JIT)");
+    println!("  fluxc self            Self-build: Flux builds Flux (dogfooding)");
+    println!("  fluxc dev             Start dev servers (Vite HMR + fluxc watch)");
+    println!("  fluxc watch           Watch all files, auto-rebuild");
+    println!("  fluxc clean           Clear all caches");
+    println!("  fluxc stats           Show build statistics and cache info");
+    println!("  fluxc status [--json] Show workspace status (crates, agility)");
+    println!("  fluxc plan            AI-optimized build plan (batches, est. time)");
+    println!("  fluxc explain CRATE   Explain a crate (path, deps, type)");
+    println!("  fluxc version         Print version\n");
+    println!("Analysis & Optimization:");
+    println!("  fluxc architect       Quantum Architecture Oracle — 6-dim blueprint");
+    println!("  fluxc sigil-plan      SIGIL release plan — Cortex-optimized roadmap");
+    println!("  fluxc cortex [PRESET] Autonomous Cortex Loop (architect→predict→optimize→learn)");
+    println!("  fluxc cortex-summary  Cortex activity summary report");
+    println!("  fluxc optimize        Ranked optimization suggestions (SIMD/io_uring/cache)");
+    println!("  fluxc xray [--json]   Deep workspace X-ray: health, deps, risks");
+    println!("  fluxc disasm PATH     Disassemble object file (nm + objdump)");
+    println!("  fluxc compile FILE    Phase 3: compile a single .rs file");
+    println!("  fluxc compile-native  Phase 3: compile with SQIsign provenance\n");
+    println!("AI & Agents:");
+    println!("  fluxc mcp             Start MCP stdio server (162 AI tools)");
+    println!("  fluxc serve           Start HTTP + SSE dashboard server");
+    println!("  fluxc chat            Interactive AI chat mode");
+    println!("  fluxc ai              AI-assisted build decisions");
+    println!("  fluxc agent-keygen    Generate SQIsign L5 agent keypair\n");
+    println!("Distributed & Mesh:");
+    println!("  fluxc supercluster    Distributed compilation mesh");
+    println!("  fluxc self-heal [MS]  Autonomous swarm failure detection + hot-swap recovery");
+    println!("  fluxc p2p-worker      Run as a P2P mesh worker node");
+    println!("  fluxc swarm           Swarm coordination commands");
+    println!("  fluxc os-stage        QuillonOS stage management\n");
+    println!("Verification & Provenance:");
+    println!("  fluxc verify-proof    Verify SQIsign artifact provenance");
+    println!("  fluxc suggest FILE    Suggest lifetime annotations");
+    println!("  fluxc test-native     Run Phase 3 native integration tests\n");
+    println!("Webhook & API:");
+    println!("  fluxc webhook-gen     Generate webhook handlers from .flux-webhook.toml");
+    println!("  fluxc suggest-webhook Scan project and suggest webhooks");
+    println!("  fluxc api             API generation commands");
+    println!("  fluxc agility         Audit workspace agility score\n");
+    println!("Documentation:");
+    println!("  fluxc latex           Build LaTeX documents\n");
     println!("Flags:");
-    println!("  --release, -r       Build in release mode");
-    println!("  --rust-only         Force Rust-only build (ignore package.json)");
-    println!("  --frontend-only     Force frontend-only build (ignore Cargo.toml)");
-    println!("  --no-cargo          Phase 2: build without cargo (flux-graph)"); 
-    println!("  --package, -p CRATE Build a specific crate in workspace\n");
+    println!("  --release, -r         Build in release mode");
+    println!("  --rust-only           Force Rust-only build (ignore package.json)");
+    println!("  --frontend-only       Force frontend-only build (ignore Cargo.toml)");
+    println!("  --no-cargo            Phase 2: build without cargo (flux-graph)");
+    println!("  --async               Parallel build across batches");
+    println!("  --distributed         Use supercluster for distributed compilation");
+    println!("  --warm                Pre-warm build cache");
+    println!("  --provenance          Sign build artifacts with SQIsign L5");
+    println!("  --package, -p CRATE   Build a specific crate in workspace\n");
     println!("Cache:");
     println!("  Rust:     SHA-256 content-hash (target/flux-cache/)");
     println!("  Frontend: BLAKE3 source-hash (target/flux-cache/frontend/)");

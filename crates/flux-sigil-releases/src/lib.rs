@@ -11,6 +11,8 @@
 //!
 //! Phases are A..J, versions 0.1.0 .. 1.0.9 — 100 slots total.
 
+pub mod plan;
+
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

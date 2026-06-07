@@ -16,6 +16,7 @@
 mod clock;
 mod net;
 mod node;
+pub mod snapshot;
 pub mod tourbillon;
 mod universe;
 

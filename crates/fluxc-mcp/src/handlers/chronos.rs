@@ -39,6 +39,29 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_chronos_run,
     );
+
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_chronos_ci",
+            description: "SIGIL Chronos CI/CD Pipeline: run deterministic chronos simulation on a SIGIL crate, validate chain behavior, auto-diagnose failures via AI cortex, fire webhooks on status changes, and deploy on success. The one-button SIGIL chain validation + deployment loop.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "crate": {"type": "string", "description": "SIGIL crate to validate (e.g. 'sigil-chronos', 'sigil-node', 'sigil-header')"},
+                    "nodes": {"type": "integer", "description": "Simulation nodes (default: 4)"},
+                    "messages": {"type": "integer", "description": "Messages to flood (default: 100)"},
+                    "latency_ms": {"type": "integer", "description": "Simulated latency in ms (default: 50)"},
+                    "drop_prob": {"type": "number", "description": "Packet drop probability (default: 0.05)"},
+                    "redundancy": {"type": "integer", "description": "Gossip re-send count (default: 3)"},
+                    "seed": {"type": "integer", "description": "Scenario seed (default: 42)"},
+                    "heal_on_failure": {"type": "boolean", "description": "Auto-heal via AI cortex if simulation fails"},
+                    "deploy_on_success": {"type": "boolean", "description": "Deploy release on success"},
+                    "webhook_url": {"type": "string", "description": "Webhook URL for CI status notifications"}
+                }
+            }),
+        },
+        flux_sigil_chronos_ci,
+    );
 }
 
 /// Built-in producer: on its first step it floods `messages` to every peer,
@@ -249,4 +272,72 @@ mod tests {
         assert!(!r1.contains("\"actual_deliveries\": 400"), "x1 under loss should drop some: {r1}");
         assert!(r4.contains("\"actual_deliveries\": 400"), "x4 should recover to full delivery: {r4}");
     }
+}
+
+// ── SIGIL Chronos CI/CD Handler ──
+
+fn flux_sigil_chronos_ci(args: &Value) -> String {
+    let crate_name = args.get("crate").and_then(|v| v.as_str()).unwrap_or("sigil-chronos");
+    let nodes = args.get("nodes").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
+    let messages = args.get("messages").and_then(|v| v.as_u64()).unwrap_or(100) as u64;
+    let latency_ms = args.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(50) as u64;
+    let drop_prob = args.get("drop_prob").and_then(|v| v.as_f64()).unwrap_or(0.05);
+    let redundancy = args.get("redundancy").and_then(|v| v.as_u64()).unwrap_or(3) as u64;
+    let seed = args.get("seed").and_then(|v| v.as_u64()).unwrap_or(42);
+    let heal_on_failure = args.get("heal_on_failure").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deploy_on_success = args.get("deploy_on_success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let webhook_url = args.get("webhook_url").and_then(|v| v.as_str());
+
+    let mut steps = Vec::new();
+    let start = std::time::Instant::now();
+
+    // 1. Build
+    let build = std::process::Command::new("fluxc")
+        .args(["build", "-p", crate_name]).output();
+    let build_ok = build.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "build", "ok": build_ok}));
+
+    // 2. Chronos simulation
+    let chronos_result = flux_chronos_run(&json!({
+        "nodes": nodes, "messages": messages,
+        "latency_ms": latency_ms, "drop_prob": drop_prob,
+        "redundancy": redundancy, "seed": seed, "format": "json"
+    }));
+    let chronos_ok = chronos_result.contains("\"actual_deliveries\"");
+    steps.push(json!({"step": "chronos", "ok": chronos_ok, "summary": chronos_result.chars().take(300).collect::<String>()}));
+
+    // 3. AI heal on failure
+    if !chronos_ok && heal_on_failure {
+        let target = format!("crates/{}/src/lib.rs", crate_name);
+        let heal = std::process::Command::new("fluxc")
+            .args(["heal", &target, "-n", "3"]).output();
+        steps.push(json!({"step": "heal", "ok": heal.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    // 4. Deploy on success
+    if deploy_on_success && build_ok && chronos_ok {
+        let deploy = std::process::Command::new("fluxc")
+            .args(["release", crate_name]).output();
+        steps.push(json!({"step": "deploy", "ok": deploy.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    // 5. Fire webhook
+    let status = if build_ok && chronos_ok { "PASSED" } else { "FAILED" };
+    if let Some(url) = webhook_url {
+        let payload = json!({"event":"sigil_chronos_ci","crate":crate_name,"status":status,"steps":steps});
+        let _ = std::process::Command::new("curl")
+            .args(["-s","-X","POST",url,"-H","Content-Type: application/json","-d",&payload.to_string(),"--max-time","5"])
+            .status();
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    fluxc_core::webhook::auto_dispatch("sigil_chronos_ci", json!({
+        "crate": crate_name, "status": status, "elapsed_secs": elapsed
+    }));
+
+    json!({
+        "crate": crate_name, "status": status,
+        "elapsed_secs": format!("{:.1}", elapsed), "steps": steps,
+        "next": if status == "FAILED" { "Run with heal_on_failure=true" } else { "All checks passed" },
+    }).to_string()
 }

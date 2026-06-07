@@ -1,0 +1,18 @@
+[package]
+name = "flux-quic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux QUIC — HTTP/3 transport: io_uring UDP, BBR congestion, SIMD header parsing, 0-RTT handshake, cache-aligned packet buffers"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+chacha20poly1305 = "0.10"
+blake3 = "1"
+rand = "0.8"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

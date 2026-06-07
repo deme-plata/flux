@@ -29,6 +29,11 @@ impl VirtualClock {
         Self { now: 0 }
     }
 
+    /// Construct a clock at a specific tick (used by snapshot restore).
+    pub(crate) fn at(tick: TickId) -> Self {
+        Self { now: tick }
+    }
+
     /// Current tick.
     pub fn now(&self) -> TickId {
         self.now

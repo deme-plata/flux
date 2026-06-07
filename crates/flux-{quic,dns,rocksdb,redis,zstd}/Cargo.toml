@@ -1,0 +1,5 @@
+[package]
+name = "flux-brace-placeholder"
+version = "0.1.0"
+edition = "2021"
+

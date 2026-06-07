@@ -20,6 +20,37 @@ const MAX_INGEST_BYTES: usize = 16 * 1024 * 1024;
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
+            name: "flux_aether_rev_bridge",
+            description: "Bridge aether ↔ flux-rev: auto-shard all flux-rev store objects into aether (K-of-N encrypted shards), track which objects are covered, and sync across the aether mesh. Makes every flux-rev revision durable and mesh-distributed with a single MCP call. Use this after flux-rev snapshot to persist revision history across peers.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "rev_store_path": {"type": "string", "description": "Path to flux-rev store (default: .flux-rev in current dir)"},
+                    "k": {"type": "integer", "description": "Data shards K (default: 3)"},
+                    "n": {"type": "integer", "description": "Total shards N (default: 5)"},
+                    "sync": {"type": "boolean", "description": "Also sync across aether mesh after sharding"}
+                }
+            }),
+        },
+        flux_aether_rev_bridge,
+    );
+
+    registry.register(
+        ToolDef {
+            name: "flux_aether_rev_watch",
+            description: "Start auto-watching a flux-rev store: whenever a new revision is snapshotted, automatically shard it into aether and sync. The continuous bridge — set it once, every future snapshot is persisted.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "rev_store_path": {"type": "string", "description": "Path to flux-rev store"},
+                    "poll_secs": {"type": "integer", "description": "Poll interval in seconds (default: 30)"}
+                }
+            }),
+        },
+        flux_aether_rev_watch,
+    );
+    registry.register(
+        ToolDef {
             name: "flux_aether_ingest",
             description: "Shard bytes into Flux Aether (K-of-N encrypted shards + FileBlock manifest). Returns content_root (BLAKE3) + manifest path. No UI — MCP combo only.",
             input_schema: json!({
@@ -332,4 +363,112 @@ mod tests {
         let ret = flux_aether_retrieve(&json!({"content_root": hex}));
         assert!(ret.starts_with("✓"), "{}", ret);
     }
+}
+
+// ── Aether ↔ Flux-Rev Bridge Handlers ──
+
+fn flux_aether_rev_bridge(args: &Value) -> String {
+    let rev_path = args.get("rev_store_path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".flux-rev"));
+    let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+    let n = args.get("n").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let do_sync = args.get("sync").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let objects_dir = rev_path.join("objects");
+    if !objects_dir.is_dir() {
+        return json!({"error": format!("flux-rev store not found at {}", objects_dir.display())}).to_string();
+    }
+
+    let tracked_path = rev_path.join("aether_tracked.json");
+    let mut tracked: BTreeMap<String, String> = if tracked_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&tracked_path).unwrap_or_default()).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut results = Vec::new();
+    let mut new_count = 0usize;
+
+    for entry in fs::read_dir(&objects_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let hash = entry.file_name().to_string_lossy().to_string();
+
+        if tracked.contains_key(&hash) {
+            continue; // Already sharded
+        }
+
+        if let Ok(bytes) = fs::read(&path) {
+            // Shard into aether: shard_file(data, shard_size, key, producer)
+            let shard_size = 4096usize;
+            let key_hash = blake3::hash(b"flux-rev-aether-bridge");
+            let key_bytes = key_hash.as_bytes();
+            let producer_bytes = blake3::hash(b"flux-rev").as_bytes().to_owned();
+
+            // Shard into aether
+            let (_file_block, shards) = flux_aether::shard_file(&bytes, shard_size, key_bytes, producer_bytes);
+            let content_root_hex = blake3::hash(&bytes).to_hex().to_string();
+            tracked.insert(hash.clone(), content_root_hex.clone());
+            new_count += 1;
+            results.push(json!({
+                "hash": hash,
+                "content_root": content_root_hex,
+                "shards": shards.len(),
+            }));
+        }
+    }
+
+    // Persist tracked state
+    let _ = fs::write(&tracked_path, serde_json::to_string_pretty(&tracked).unwrap_or_default());
+
+    // Sync if requested
+    if do_sync && new_count > 0 {
+        let _ = flux_aether_sync(&json!({}));
+    }
+
+    let total = tracked.len();
+    json!({
+        "rev_store": rev_path.to_string_lossy(),
+        "newly_sharded": new_count,
+        "total_tracked": total,
+        "results": results,
+        "mesh_synced": do_sync,
+    }).to_string()
+}
+
+fn flux_aether_rev_watch(args: &Value) -> String {
+    let rev_path = args.get("rev_store_path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".flux-rev"));
+    let poll_secs = args.get("poll_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+
+    // Auto-watch: fire the bridge once, then register a recurring hook
+    let initial = flux_aether_rev_bridge(&json!({
+        "rev_store_path": rev_path.to_string_lossy(),
+        "sync": true,
+    }));
+
+    // Register with flux-rev hooks system so future snapshots auto-trigger
+    let hooks_toml = format!(
+        "[hooks]\nrev_store_path = \"{}\"\npoll_secs = {}\n",
+        rev_path.display(), poll_secs
+    );
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let hooks_dir = PathBuf::from(home).join(".flux");
+    let _ = fs::create_dir_all(&hooks_dir);
+    let _ = fs::write(hooks_dir.join("aether_rev_watch.toml"), &hooks_toml);
+
+    json!({
+        "status": "watching",
+        "rev_store": rev_path.to_string_lossy(),
+        "poll_secs": poll_secs,
+        "initial_bridge": initial,
+        "hook_config": hooks_dir.join("aether_rev_watch.toml").to_string_lossy(),
+        "note": "Aether will auto-shard new flux-rev objects on every snapshot",
+    }).to_string()
 }

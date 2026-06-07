@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 /// Revision propagation over flux-p2p (the git-push replacement).
 pub mod sync;
 
+/// Webhook + AI workflow hooks for revision events.
+pub mod hooks;
+
+/// Content-addressed blob search (replaces find + grep).
+pub mod search;
+
 /// Directories never captured (build output, vcs metadata, vendored deps).
 pub const SKIP_DIRS: &[&str] = &[
     ".git", ".flux-rev", "target", "node_modules", "dist", "build", ".cargo",

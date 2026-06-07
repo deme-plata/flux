@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 flux-p2p = { path = "../flux-p2p" }
 tokio = { workspace = true }
+toml = "0.8"
 
 [[bin]]
 name = "flux-rev"

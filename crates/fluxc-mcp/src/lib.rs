@@ -44,6 +44,7 @@ fn build_registry() -> ToolRegistry {
     handlers::aether::register(&mut registry);
     handlers::fleet::register(&mut registry);
     handlers::compile_error::register(&mut registry);
+    handlers::cortex::register(&mut registry);
     registry
 }
 

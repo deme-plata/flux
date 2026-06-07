@@ -60,6 +60,53 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_glow,
     );
+
+    // ── SIGIL + AI combo tools (Cortex v2 integration) ──
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_heal",
+            description: "AI-heal a SIGIL crate: compiles via fluxc MIR bridge, captures SIGIL-specific errors (chronos, header, net, bridge), routes through AI agent registry for diagnosis, applies fix, recompiles, verifies with chronos. The one-button SIGIL rescue.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "crate": {"type": "string", "description": "SIGIL crate to heal (e.g. 'sigil-header', 'sigil-net', 'sigil-chronos')"},
+                    "max_attempts": {"type": "integer", "description": "Max heal attempts (default: 5)"}
+                }
+            }),
+        },
+        flux_sigil_heal,
+    );
+
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_audit",
+            description: "AI-audit a SIGIL crate: analyzes for chain-specific issues (consensus safety, BLAKE3 integrity, P2P message handling, bridge security, emission correctness). Routes through AI agents for deep analysis. Returns structured audit report.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "crate": {"type": "string", "description": "SIGIL crate to audit"},
+                    "focus": {"type": "string", "description": "Audit focus: consensus, p2p, bridge, emission, crypto, all (default: all)"}
+                }
+            }),
+        },
+        flux_sigil_audit,
+    );
+
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_dev",
+            description: "Unified SIGIL dev combo: check + test + chronos-run + audit + deploy. The one-button SIGIL development workflow. Uses AI where beneficial, real tools everywhere else.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "crate": {"type": "string", "description": "SIGIL crate or '*' for all"},
+                    "skip_chronos": {"type": "boolean", "description": "Skip chronos simulation (default: false)"},
+                    "deploy": {"type": "boolean", "description": "Deploy after successful test (default: false)"}
+                }
+            }),
+        },
+        flux_sigil_dev,
+    );
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -415,7 +462,159 @@ fn dir_size_bytes(root: &str) -> u64 {
     acc
 }
 
-#[cfg(test)]
+// ── SIGIL + AI Handlers ──
+
+fn flux_sigil_heal(args: &Value) -> String {
+    let crate_name = args.get("crate").and_then(|v| v.as_str()).unwrap_or("sigil-header");
+    let max_attempts = args.get("max_attempts").and_then(|v| v.as_u64()).unwrap_or(5);
+
+    // Find the crate path
+    let sigil_root = std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil");
+    let entry = if crate_name == "*" {
+        sigil_root.join("src/lib.rs")
+    } else {
+        sigil_root.join(format!("crates/{}/src/lib.rs", crate_name))
+    };
+
+    if !entry.exists() {
+        // Try main.rs
+        let main_entry = sigil_root.join(format!("crates/{}/src/main.rs", crate_name));
+        if main_entry.exists() {
+            return run_heal(&main_entry, max_attempts as usize);
+        }
+        return json!({"error": format!("Crate '{}' not found", crate_name)}).to_string();
+    }
+
+    run_heal(&entry, max_attempts as usize)
+}
+
+fn run_heal(path: &std::path::Path, max_attempts: usize) -> String {
+    let output = std::process::Command::new("fluxc")
+        .args(["heal", &path.to_string_lossy(), "-n", &max_attempts.to_string()])
+        .output();
+
+    match output {
+        Ok(out) => json!({
+            "file": path.to_string_lossy(),
+            "success": out.status.success(),
+            "output": String::from_utf8_lossy(&out.stdout).trim(),
+        }).to_string(),
+        Err(e) => json!({"error": format!("{}", e)}).to_string(),
+    }
+}
+
+fn flux_sigil_audit(args: &Value) -> String {
+    let crate_name = args.get("crate").and_then(|v| v.as_str()).unwrap_or("sigil-header");
+    let focus = args.get("focus").and_then(|v| v.as_str()).unwrap_or("all");
+
+    let sigil_root = std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil");
+    let entry = sigil_root.join(format!("crates/{}/src/lib.rs", crate_name));
+    let source = std::fs::read_to_string(&entry).unwrap_or_default();
+
+    if source.is_empty() {
+        return json!({"error": format!("Cannot read crate '{}'", crate_name)}).to_string();
+    }
+
+    let prompt = format!(
+        "Audit this SIGIL blockchain crate for {} issues.\n\
+         Crate: {}\n\
+         Focus areas: consensus safety, BLAKE3 integrity, P2P message validation,\n\
+         bridge security, emission correctness, cryptographic soundness.\n\n\
+         ```rust\n{}\n```\n\n\
+         Return JSON with:\n\
+         - \"findings\": array of {{ \"severity\": \"CRITICAL|HIGH|MEDIUM|LOW\", \
+         \"category\": \"...\", \"line\": N, \"issue\": \"...\", \"fix\": \"...\" }}\n\
+         - \"score\": 0.0-1.0 overall safety score\n\
+         - \"summary\": one-line summary",
+        focus, crate_name, source
+    );
+
+    // Route through AI agents
+    let agent = flux_cortex::ai_cortex::default_agent_registry()
+        .into_iter()
+        .find(|a| a.available && a.capabilities.contains(
+            &flux_cortex::ai_cortex::AgentCapability::Diagnose));
+
+    let result = if let Some(agent) = agent {
+        match std::process::Command::new("ollama")
+            .args(["run", &agent.model]).arg(&prompt).output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => format!("Agent error: {}", e),
+        }
+    } else {
+        "No audit agent available".to_string()
+    };
+
+    json!({
+        "crate": crate_name,
+        "focus": focus,
+        "audit": result,
+    }).to_string()
+}
+
+fn flux_sigil_dev(args: &Value) -> String {
+    let crate_name = args.get("crate").and_then(|v| v.as_str()).unwrap_or("sigil-header");
+    let skip_chronos = args.get("skip_chronos").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deploy = args.get("deploy").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut results = Vec::new();
+    let start = std::time::Instant::now();
+
+    // 1. Check
+    let check = std::process::Command::new("fluxc")
+        .args(["check", "-p", crate_name]).output();
+    results.push(json!({
+        "step": "check",
+        "ok": check.as_ref().map(|o| o.status.success()).unwrap_or(false),
+    }));
+
+    // 2. Test
+    let test = std::process::Command::new("fluxc")
+        .args(["test", "-p", crate_name]).output();
+    results.push(json!({
+        "step": "test",
+        "ok": test.as_ref().map(|o| o.status.success()).unwrap_or(false),
+    }));
+
+    // 3. Chronos simulation
+    if !skip_chronos {
+        let chronos = std::process::Command::new("fluxc")
+            .args(["chronos-run", "--nodes", "4", "--messages", "100"]).output();
+        results.push(json!({
+            "step": "chronos",
+            "ok": chronos.as_ref().map(|o| o.status.success()).unwrap_or(false),
+        }));
+    }
+
+    // 4. AI audit
+    let audit_result = flux_sigil_audit(&json!({"crate": crate_name, "focus": "all"}));
+    results.push(json!({
+        "step": "audit",
+        "result": audit_result,
+    }));
+
+    // 5. Deploy
+    if deploy {
+        let deploy_cmd = std::process::Command::new("fluxc")
+            .args(["release", crate_name]).output();
+        results.push(json!({
+            "step": "deploy",
+            "ok": deploy_cmd.as_ref().map(|o| o.status.success()).unwrap_or(false),
+        }));
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let all_ok = results.iter().all(|r| r["ok"].as_bool().unwrap_or(true));
+
+    json!({
+        "crate": crate_name,
+        "all_ok": all_ok,
+        "elapsed_secs": format!("{:.1}", elapsed),
+        "steps": results,
+    }).to_string()
+}
+
 mod tests {
     use super::*;
 

@@ -1,0 +1,13 @@
+[package]
+name = "flux-cortex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Cortex — Autonomous Continuous Optimization Engine that closes the loop between architect, predict, and optimize with runtime validation and learning"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flux-graph = { path = "../flux-graph" }
+flux-architect = { path = "../flux-architect" }
+flux-optimize = { path = "../flux-optimize" }

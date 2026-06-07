@@ -1,4 +1,55 @@
 // fluxc-core/phase3.rs — Phase 3 CLI commands
+// ── Code Search (replaces find + grep) ──
+
+/// Search the workspace with content-aware BLAKE3 deduplication.
+/// Replaces `find . -name '*.rs' | xargs grep pattern`.
+/// Uses flux-rev's search_live for deduplicated, glob-filtered full-text search.
+pub fn search_code(pattern: &str, glob: Option<&str>, json: bool) {
+    use flux_rev::search::search_live;
+    let root = std::env::current_dir().unwrap_or_default();
+
+    println!("⚡ Flux Search — \"{}\"", pattern);
+    if let Some(g) = glob {
+        println!("  Glob: {}", g);
+    }
+
+    let start = std::time::Instant::now();
+    match search_live(&root, pattern, glob) {
+        Ok(matches) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            if json {
+                let output = serde_json::json!({
+                    "pattern": pattern,
+                    "glob": glob,
+                    "matches": matches.iter().map(|m| serde_json::json!({
+                        "path": m.path,
+                        "line": m.line_number,
+                        "content": m.line,
+                        "hash": m.hash,
+                    })).collect::<Vec<_>>(),
+                    "count": matches.len(),
+                    "elapsed_secs": elapsed,
+                });
+                println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+            } else {
+                let mut by_file: std::collections::BTreeMap<String, Vec<&flux_rev::search::LiveMatch>> = std::collections::BTreeMap::new();
+                for m in &matches {
+                    by_file.entry(m.path.clone()).or_default().push(m);
+                }
+                for (path, ms) in &by_file {
+                    // Color the path cyan (ANSI)
+                    println!("\x1b[36m{}\x1b[0m", path);
+                    for m in ms {
+                        println!("  {:>4}: {}", m.line_number, m.line);
+                    }
+                }
+                println!("\n  {} match(es) in {} file(s) · {:.3}s",
+                    matches.len(), by_file.len(), elapsed);
+            }
+        }
+        Err(e) => eprintln!("  Search error: {}", e),
+    }
+}
 
 pub fn api_generate(title: &str, format: &str) {
     println!("⚡ Flux API Builder — discovering endpoints...");
@@ -72,6 +123,362 @@ pub fn agility_audit() {
 
 pub fn compile_file(path: &str) {
     compile_impl(path, false);
+}
+
+// ── JIT Execution ──
+/// Compile a standalone .rs source file → native executable → run it.
+/// Returns the process exit code. This is the `fluxc run test.rs` path.
+pub fn compile_run(path: &str, args: &[String]) -> i32 {
+    use std::process::Command;
+    println!("⚡ Flux JIT — compile + run {}", path);
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("  Cannot read {}: {}", path, e); return 1; }
+    };
+
+    let hash = blake3::hash(src.as_bytes());
+    let cache_key = hash.to_hex().to_string();
+
+    let tmp_dir = std::env::temp_dir().join("flux_jit");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let obj_path = tmp_dir.join(format!("{}.o", &cache_key[..16]));
+    let exe_path = tmp_dir.join(format!("{}.exe", &cache_key[..16]));
+
+    // Check object cache first (BLAKE3 of source)
+    // Check object cache on disk (BLAKE3 of source)
+    let mir_cache_path = tmp_dir.join(format!("mir_{}.bin", &cache_key[..16]));
+    let cached = mir_cache_path.exists();
+    if !cached {
+        // Compile: rustc --emit=mir → parse → lower → object
+        let tmp_src = tmp_dir.join("_src.rs");
+        let _ = std::fs::write(&tmp_src, &src);
+
+        let tmp_mir = tmp_dir.join("_mir.txt");
+        let _ = Command::new("rustc")
+            .args(["--crate-type", "lib", "--emit=mir", "-o"])
+            .arg(&tmp_mir)
+            .arg(&tmp_src)
+            .status();
+
+        let mir_text = match std::fs::read_to_string(&tmp_mir) {
+            Ok(t) => t,
+            Err(e) => { eprintln!("  rustc MIR failed: {}", e); return 1; }
+        };
+
+        if mir_text.contains("error") && !mir_text.contains("fn ") {
+            eprintln!("  rustc error in source:\n{}", mir_text);
+            return 1;
+        }
+
+        let funcs = match flux_frontend::mir::parse_mir(&mir_text) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("  MIR parse error: {}", e); return 1; }
+        };
+
+        println!("  MIR: {} functions", funcs.len());
+        let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
+            .map(flux_frontend::mir::lower_mir_to_ir)
+            .collect();
+
+        let unit = flux_frontend::TranslationUnit {
+            file_path: path.to_string(),
+            functions: ir_funcs,
+            structs: vec![],
+            imports: vec![],
+        };
+
+        let mir_overrides = build_mir_overrides(&funcs);
+        match flux_backend::compile_unit_to_object_with_mir(&unit, &mir_overrides, &obj_path) {
+            Ok(()) => println!("  Object: ✓ {}", obj_path.display()),
+            Err(e) => { eprintln!("  Object emit: {}", e); return 1; }
+        }
+
+        // Touch cache file to mark this source as compiled
+        let _ = std::fs::write(&mir_cache_path, &cache_key);
+    } else {
+        println!("  Cache: ✓ hit (skipping rustc)");
+    }
+
+    // Link: cc obj_path → exe_path
+    println!("  Link: cc → {}", exe_path.display());
+    let link = Command::new("cc")
+        .arg(&obj_path)
+        .args(["-o", &exe_path.to_string_lossy()])
+        .status();
+    match link {
+        Ok(s) if s.success() => {}
+        Ok(s) => { eprintln!("  Link failed: exit {}", s.code().unwrap_or(1)); return 1; }
+        Err(e) => { eprintln!("  cc not found: {} (install gcc/clang)", e); return 1; }
+    }
+
+    // Run
+    println!("  Run: {}", exe_path.display());
+    let status = Command::new(&exe_path).args(args).status();
+    match status {
+        Ok(s) => {
+            let code = s.code().unwrap_or(0);
+            println!("  Exit: {}", code);
+            code
+        }
+        Err(e) => { eprintln!("  Run failed: {}", e); 1 }
+    }
+}
+
+// ── MIR Cache ──
+/// Try to load cached MIR parse result for source content.
+/// Returns Some(MirFunction vec) on cache hit, None on miss.
+pub fn mir_cache_lookup(source: &str) -> Option<Vec<flux_frontend::mir::MirFunction>> {
+    let hash = blake3::hash(source.as_bytes());
+    let key = hash.to_hex().to_string();
+    let cache_dir = std::path::PathBuf::from("target/flux-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let path = cache_dir.join(format!("mir_{}.bin", &key[..32]));
+    if path.exists() {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match bincode::deserialize::<Vec<flux_frontend::mir::MirFunction>>(&bytes) {
+                    Ok(funcs) => return Some(funcs),
+                    Err(_) => { /* stale format */ }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    None
+}
+
+/// Store MIR parse result in cache.
+pub fn mir_cache_store(source: &str, funcs: &[flux_frontend::mir::MirFunction]) {
+    let hash = blake3::hash(source.as_bytes());
+    let key = hash.to_hex().to_string();
+    let cache_dir = std::path::PathBuf::from("target/flux-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let path = cache_dir.join(format!("mir_{}.bin", &key[..32]));
+    if let Ok(encoded) = bincode::serialize(funcs) {
+        let _ = std::fs::write(&path, &encoded);
+    }
+}
+
+// ── Integration Tests ──
+/// Run the comprehensive native-compile test suite.
+/// Each test: compile .rs → object → link → run → verify expected output.
+/// Returns number of failures (0 = all passed).
+pub fn run_integration_tests() -> usize {
+    use std::process::Command;
+    println!("⚡ Flux Native Integration Tests");
+    println!("═══════════════════════════════");
+
+    let tests: Vec<(&str, &str, &str)> = vec![
+        ("add",   "fn main() -> i64 { let a:i64=40; let b:i64=2; a+b }",         "42"),
+        ("sub",   "fn main() -> i64 { let a:i64=50; let b:i64=8; a-b }",         "42"),
+        ("mul",   "fn main() -> i64 { let a:i64=6; let b:i64=7; a*b }",          "42"),
+        ("div",   "fn main() -> i64 { let a:i64=84; let b:i64=2; a/b }",         "42"),
+        ("eq_t",  "fn main() -> bool { 42 == 42 }",                               "true"),
+        ("eq_f",  "fn main() -> bool { 42 == 0 }",                                "false"),
+        ("neq_t", "fn main() -> bool { 42 != 0 }",                                "true"),
+        ("neq_f", "fn main() -> bool { 42 != 42 }",                               "false"),
+        ("lt_t",  "fn main() -> bool { 1 < 42 }",                                 "true"),
+        ("lt_f",  "fn main() -> bool { 42 < 1 }",                                 "false"),
+        ("gt_t",  "fn main() -> bool { 42 > 1 }",                                 "true"),
+        ("gt_f",  "fn main() -> bool { 1 > 42 }",                                 "false"),
+        ("le_t",  "fn main() -> bool { 42 <= 42 }",                               "true"),
+        ("le_f",  "fn main() -> bool { 43 <= 42 }",                               "false"),
+        ("ge_t",  "fn main() -> bool { 42 >= 42 }",                               "true"),
+        ("ge_f",  "fn main() -> bool { 41 >= 42 }",                               "false"),
+        ("and_t", "fn main() -> bool { true && true }",                           "true"),
+        ("and_f", "fn main() -> bool { true && false }",                          "false"),
+        ("or_t",  "fn main() -> bool { true || false }",                          "true"),
+        ("or_f",  "fn main() -> bool { false || false }",                         "false"),
+        ("if_then",   "fn main() -> i64 { if 42 > 0 { 1 } else { 0 } }",          "1"),
+        ("if_else",   "fn main() -> i64 { if 0 > 42 { 1 } else { 2 } }",          "2"),
+        ("while_sum", "fn main() -> i64 { let mut i:i64=0; let mut s:i64=0; while i<10 { s=s+i; i=i+1; } s }", "45"),
+        ("match_3way","fn main() -> i64 { let x:i64=2; match x { 1=>10, 2=>20, _=>30 } }", "20"),
+        ("fib", "fn main() -> i64 { fib(10) } fn fib(n:i64) -> i64 { if n<=1 { n } else { fib(n-1)+fib(n-2) } }", "55"),
+        ("call", "fn main() -> i64 { add(20,22) } fn add(a:i64,b:i64)->i64 { a+b }", "42"),
+        ("tup",  "fn main() -> i64 { let t:(i64,i64)=(40,2); t.0+t.1 }",      "42"),
+    ];
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let tmp = std::env::temp_dir().join("flux_native_tests");
+    let _ = std::fs::create_dir_all(&tmp);
+
+    for (name, src, expected) in &tests {
+        print!("  {:20} ... ", name);
+        let src_path = tmp.join(format!("test_{}.rs", name));
+        let obj_path = tmp.join(format!("test_{}.o", name));
+        let exe_path = tmp.join(format!("test_{}.exe", name));
+
+        let full_src = format!("{}\n", src);
+        let _ = std::fs::write(&src_path, &full_src);
+
+        let rustc_out = Command::new("rustc")
+            .args(["--crate-type", "lib", "--emit=mir", "-o"])
+            .arg(tmp.join(format!("test_{}.mir", name)))
+            .arg(&src_path)
+            .output();
+
+        match rustc_out {
+            Ok(out) if out.status.success() => {
+                let mir_text = std::fs::read_to_string(tmp.join(format!("test_{}.mir", name)))
+                    .unwrap_or_default();
+                if mir_text.is_empty() || (mir_text.contains("error") && !mir_text.contains("fn ")) {
+                    eprintln!("RUSTC_ERR");
+                    failed += 1;
+                    continue;
+                }
+                match flux_frontend::mir::parse_mir(&mir_text) {
+                    Ok(funcs) => {
+                        let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
+                            .map(flux_frontend::mir::lower_mir_to_ir)
+                            .collect();
+                        let unit = flux_frontend::TranslationUnit {
+                            file_path: src_path.to_string_lossy().to_string(),
+                            functions: ir_funcs, structs: vec![], imports: vec![],
+                        };
+                        let overrides = build_mir_overrides(&funcs);
+                        match flux_backend::compile_unit_to_object_with_mir(&unit, &overrides, &obj_path) {
+                            Ok(()) => {
+                                match Command::new("cc").arg(&obj_path).args(["-o", &exe_path.to_string_lossy()]).status() {
+                                    Ok(s) if s.success() => {
+                                        match Command::new(&exe_path).output() {
+                                            Ok(out) => {
+                                                let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                                if got == *expected {
+                                                    println!("OK ({})", got);
+                                                    passed += 1;
+                                                } else {
+                                                    eprintln!("MISMATCH expected={} got={}", expected, got);
+                                                    failed += 1;
+                                                }
+                                            }
+                                            Err(e) => { eprintln!("RUN_ERR({})", e); failed += 1; }
+                                        }
+                                    }
+                                    Ok(s) => { eprintln!("LINK({})", s.code().unwrap_or(1)); failed += 1; }
+                                    Err(e) => { eprintln!("CC({})", e); failed += 1; }
+                                }
+                            }
+                            Err(e) => { eprintln!("OBJ({})", e); failed += 1; }
+                        }
+                    }
+                    Err(e) => { eprintln!("PARSE({})", e); failed += 1; }
+                }
+            }
+            Ok(_) => { eprintln!("RUSTC_FAIL"); failed += 1; }
+            Err(e) => { eprintln!("RUSTC({})", e); failed += 1; }
+        }
+    }
+
+    println!("═══════════════════════════════");
+    println!("  Passed: {}  Failed: {}  Total: {}", passed, failed, passed + failed);
+    failed
+}
+
+// ── AI Lifetime Suggestion ──
+/// Submit source code to the two-mind gate for lifetime analysis.
+/// Proposer: qwen3.6 (local Ollama). Vetoer: DeepSeek-V4 API.
+/// Returns the suggestion text, or None if vetoed.
+pub fn suggest_lifetime(path: &str) -> Option<String> {
+    use std::process::Command;
+    println!("⚡ Flux AI Lifetime Suggestion — {}", path);
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("  Cannot read {}: {}", path, e); return None; }
+    };
+
+    let prompt = format!(
+        "Analyze this Rust code for lifetime issues. \
+        Identify any missing lifetime annotations, dangling references, \
+        or borrow-checker problems. Return a concise JSON with:\n\
+        - \"issues\": array of {{ \"line\": N, \"problem\": \"...\", \"fix\": \"...\" }}\n\
+        - \"summary\": one-line summary\n\n\
+        Code:\n```rust\n{}\n```",
+        source
+    );
+
+    // Phase 1: Proposer (local qwen3.6 via Ollama)
+    println!("  Proposer: qwen3.6 (local) ...");
+    let proposal = match Command::new("ollama")
+        .args(["run", "qwen3.6:latest"])
+        .arg(&prompt)
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            if text.is_empty() {
+                eprintln!("  qwen3.6 returned empty — skipping veto gate");
+                return None;
+            }
+            println!("  Proposer: {} chars", text.len());
+            text
+        }
+        Err(e) => {
+            eprintln!("  qwen3.6 unavailable (ollama not running?): {}", e);
+            // Fallback: try DeepSeek directly
+            println!("  Fallback: DeepSeek-V4 API ...");
+            send_to_deepseek(&prompt)
+        }
+    };
+
+    // Phase 2: Vetoer (DeepSeek-V4 API)
+    if !proposal.is_empty() && std::env::var("DEEPSEEK_API_KEY").is_ok() {
+        println!("  Vetoer: DeepSeek-V4 ...");
+        let veto_prompt = format!(
+            "You are a Rust compiler safety auditor. Review this lifetime analysis proposal. \
+            If it is correct and safe, reply 'APPROVE'. If any suggestion is wrong or \
+            dangerous, reply 'VETO: <reason>'. Be strict.\n\n\
+            Proposal:\n{}", proposal
+        );
+        match send_to_deepseek(&veto_prompt) {
+            verdict if verdict.to_lowercase().contains("approve") => {
+                println!("  Verdict: APPROVED ✓");
+                return Some(proposal);
+            }
+            verdict => {
+                println!("  Verdict: VETOED — {}", verdict);
+                return None;
+            }
+        }
+    }
+
+    // No vetoer configured — trust the proposer
+    println!("  No veto gate configured — accepting proposal");
+    Some(proposal)
+}
+
+/// Send a prompt to the DeepSeek-V4 API via curl. Returns the response content.
+fn send_to_deepseek(prompt: &str) -> String {
+    use std::process::Command;
+    let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    if api_key.is_empty() { return String::new(); }
+    let body = serde_json::json!({
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+        "temperature": 0.3
+    });
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+    match Command::new("curl")
+        .args(["-s", "-X", "POST", "https://api.deepseek.com/chat/completions"])
+        .args(["-H", &format!("Authorization: Bearer {}", api_key)])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", &body_str])
+        .args(["--max-time", "60"])
+        .output()
+    {
+        Ok(out) => {
+            let resp: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+            resp["choices"][0]["message"]["content"]
+                .as_str().unwrap_or("").to_string()
+        }
+        Err(e) => {
+            eprintln!("  DeepSeek API error: {}", e);
+            String::new()
+        }
+    }
 }
 
 /// Workspace-aware Phase 2: resolve a crate via flux-graph, find its entry source,
@@ -465,6 +872,346 @@ pub fn compile_impl_with_provenance(path: &str, use_mir: bool, provenance: bool)
             Err(e) => eprintln!("  Codegen error: {}", e),
         }
     }
+}
+
+// ── Self-Healing Compiler Loop ──
+/// Agentic closed loop: compile → test → fail → AI diagnose → fix → recompile → retest.
+/// Uses all Flux subsystems: MIR cache, JIT, two-mind AI gate, webhooks, provenance.
+///
+/// On success: provenance-signs the fix, fires webhook, updates cache.
+/// On exhaustion: fires webhook, escalates to swarm bus.
+pub fn heal(path: &str, max_attempts: usize, auto_commit: bool) -> i32 {
+    use std::process::Command;
+    println!("⚡ Flux Self-Healing Compiler");
+    println!("  Target: {}", path);
+    println!("  Max attempts: {}", max_attempts);
+    println!("  Auto-commit: {}", auto_commit);
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("  Cannot read {}: {}", path, e); return 1; }
+    };
+
+    // Save backup
+    let backup_path = format!("{}.heal.bak", path);
+    let _ = std::fs::write(&backup_path, &original);
+
+    let mut current_source = original.clone();
+    let mut attempt = 0usize;
+
+    loop {
+        attempt += 1;
+        println!("\n── Attempt {} / {} ──", attempt, max_attempts);
+
+        // Step 1: Try to compile + run via JIT
+        let tmp_dir = std::env::temp_dir().join("flux_heal");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let tmp_src = tmp_dir.join(format!("heal_{}.rs", attempt));
+        let _ = std::fs::write(&tmp_src, &current_source);
+
+        // Compile via MIR bridge
+        let tmp_mir = tmp_dir.join(format!("heal_{}.mir", attempt));
+        let rustc = Command::new("rustc")
+            .args(["--crate-type", "lib", "--emit=mir", "-o"])
+            .arg(&tmp_mir)
+            .arg(&tmp_src)
+            .output();
+
+        let compile_ok = match &rustc {
+            Ok(out) if out.status.success() => {
+                let mir_text = std::fs::read_to_string(&tmp_mir).unwrap_or_default();
+                if mir_text.contains("error") && !mir_text.contains("fn ") {
+                    // Compile error — capture it
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let error_msg = if !stderr.is_empty() { stderr.to_string() } else { mir_text.clone() };
+                    println!("  ✗ Compile error (attempt {})", attempt);
+                    println!("  ── Error ──\n{}", error_msg.lines().take(15).collect::<Vec<_>>().join("\n"));
+
+                    if attempt >= max_attempts {
+                        println!("\n  ⚠ Max attempts exhausted. Escalating to swarm...");
+                        fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                        return 1;
+                    }
+
+                    // AI diagnose + fix
+                    match ai_diagnose_and_fix(path, &current_source, &error_msg, "compile") {
+                        Some(fixed) => {
+                            current_source = fixed;
+                            let _ = std::fs::write(path, &current_source);
+                            println!("  ✓ Fix applied, retrying...");
+                            continue;
+                        }
+                        None => {
+                            println!("  ✗ AI could not produce a fix");
+                            fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                            return 1;
+                        }
+                    }
+                } else {
+                    // No compile error — proceed to object emission
+                    true
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let error_msg = if !stderr.is_empty() { stderr.to_string() } else { format!("Exit: {}", out.status) };
+                println!("  ✗ rustc failed (attempt {})", attempt);
+                println!("  ── Error ──\n{}", error_msg.lines().take(15).collect::<Vec<_>>().join("\n"));
+
+                if attempt >= max_attempts {
+                    fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                    return 1;
+                }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "compile") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+            Err(e) => {
+                eprintln!("  ✗ rustc not found: {}", e);
+                return 1;
+            }
+        };
+
+        if !compile_ok {
+            continue;
+        }
+
+        // Step 2: Try to build the object
+        let mir_text = std::fs::read_to_string(&tmp_mir).unwrap_or_default();
+        let funcs = match flux_frontend::mir::parse_mir(&mir_text) {
+            Ok(f) => f,
+            Err(e) => {
+                let error_msg = format!("MIR parse: {}", e);
+                if attempt >= max_attempts {
+                    fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                    return 1;
+                }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "parse") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+        };
+
+        let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
+            .map(flux_frontend::mir::lower_mir_to_ir)
+            .collect();
+
+        let unit = flux_frontend::TranslationUnit {
+            file_path: path.to_string(),
+            functions: ir_funcs,
+            structs: vec![],
+            imports: vec![],
+        };
+
+        let obj_path = tmp_dir.join(format!("heal_{}.o", attempt));
+        let mir_overrides = build_mir_overrides(&funcs);
+
+        match flux_backend::compile_unit_to_object_with_mir(&unit, &mir_overrides, &obj_path) {
+            Ok(()) => {}
+            Err(e) => {
+                let error_msg = format!("Object emit: {}", e);
+                if attempt >= max_attempts {
+                    fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                    return 1;
+                }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "codegen") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+        }
+
+        // Step 3: Link and run
+        let exe_path = tmp_dir.join(format!("heal_{}.exe", attempt));
+        let link = Command::new("cc")
+            .arg(&obj_path)
+            .args(["-o", &exe_path.to_string_lossy()])
+            .status();
+
+        match link {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                let error_msg = format!("Link failed: exit {}", s.code().unwrap_or(1));
+                if attempt >= max_attempts { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "link") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+            Err(e) => {
+                eprintln!("  ✗ cc not found: {}", e);
+                return 1;
+            }
+        }
+
+        // Run the executable
+        let run = Command::new(&exe_path).output();
+        match run {
+            Ok(out) if out.status.success() => {
+                // ✓ SUCCESS — heal complete
+                println!("\n  ✓ Heal successful on attempt {}!", attempt);
+                println!("  ── Output ──\n{}", String::from_utf8_lossy(&out.stdout).trim());
+
+                // Provenance-sign the fix
+                if auto_commit {
+                    println!("  Provenance: signing fix...");
+                    let _ = std::process::Command::new("fluxc")
+                        .args(["compile-native", "--provenance", path])
+                        .status();
+                }
+
+                // Fire success webhook
+                fire_heal_webhook("heal_success", path, attempt,
+                    &format!("Fixed in {} attempt(s). Output: {}",
+                        attempt, String::from_utf8_lossy(&out.stdout).trim()));
+
+                // Update MIR cache
+                let hash = blake3::hash(current_source.as_bytes());
+                let key = hash.to_hex().to_string();
+                let cache_dir = std::path::PathBuf::from("target/flux-cache");
+                let _ = std::fs::create_dir_all(&cache_dir);
+                let _ = std::fs::write(
+                    cache_dir.join(format!("mir_{}.bin", &key[..32])),
+                    &key,
+                );
+
+                println!("  ✓ Heal complete. Backup saved at {}", backup_path);
+                return 0;
+            }
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let error_msg = format!("Runtime error (exit {}):\nstdout: {}\nstderr: {}",
+                    out.status.code().unwrap_or(-1), stdout.trim(), stderr.trim());
+                println!("  ✗ Runtime error (attempt {})", attempt);
+                println!("  ── Error ──\n{}", error_msg.lines().take(10).collect::<Vec<_>>().join("\n"));
+
+                if attempt >= max_attempts {
+                    fire_heal_webhook("heal_exhausted", path, attempt, &error_msg);
+                    return 1;
+                }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "runtime") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("Execution error: {}", e);
+                if attempt >= max_attempts { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                match ai_diagnose_and_fix(path, &current_source, &error_msg, "exec") {
+                    Some(fixed) => { current_source = fixed; let _ = std::fs::write(path, &current_source); continue; }
+                    None => { fire_heal_webhook("heal_exhausted", path, attempt, &error_msg); return 1; }
+                }
+            }
+        }
+    }
+}
+
+/// AI diagnose-and-fix: sends source + error to two-mind gate, returns fixed source.
+fn ai_diagnose_and_fix(
+    path: &str,
+    source: &str,
+    error: &str,
+    phase: &str,
+) -> Option<String> {
+    println!("  🧠 AI diagnosing ({})...", phase);
+
+    let prompt = format!(
+        "You are a Rust compiler expert. A program failed during the '{}' phase.\n\n\
+         === SOURCE CODE ({}) ===\n```rust\n{}\n```\n\n\
+         === ERROR ===\n{}\n\n\
+         Analyze the error and produce a CORRECTED version of the FULL source code.\n\
+         Return ONLY the corrected Rust code inside a ```rust code block.\n\
+         Do NOT explain — just output the fixed code.\n\
+         If you cannot fix it, output: CANNOT_FIX\n",
+        phase, path, source, error
+    );
+
+    let proposal = match std::process::Command::new("ollama")
+        .args(["run", "qwen3.6:latest"])
+        .arg(&prompt)
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            if text.is_empty() || text.contains("CANNOT_FIX") {
+                // Fallback to DeepSeek
+                send_to_deepseek(&prompt)
+            } else {
+                text
+            }
+        }
+        Err(_) => send_to_deepseek(&prompt),
+    };
+
+    if proposal.is_empty() || proposal.contains("CANNOT_FIX") {
+        return None;
+    }
+
+    // Extract code from markdown block
+    let fixed = if let Some(start) = proposal.find("```rust") {
+        let rest = &proposal[start + 7..];
+        if let Some(end) = rest.find("```") {
+            rest[..end].trim().to_string()
+        } else {
+            proposal.trim().to_string()
+        }
+    } else if let Some(start) = proposal.find("```") {
+        let rest = &proposal[start + 3..];
+        if let Some(end) = rest.find("```") {
+            rest[..end].trim().to_string()
+        } else {
+            proposal.trim().to_string()
+        }
+    } else {
+        proposal.trim().to_string()
+    };
+
+    if fixed.is_empty() || fixed == source {
+        None
+    } else {
+        // Two-mind veto gate
+        if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+            let veto_prompt = format!(
+                "You are a Rust safety auditor. Review this AI-generated fix. \
+                If it is correct and safe, reply 'APPROVE'. If it introduces bugs \
+                or is dangerous, reply 'VETO: <reason>'. Be strict.\n\n\
+                Original error: {}\n\n\
+                Proposed fix:\n```rust\n{}\n```",
+                error, fixed
+            );
+            let verdict = send_to_deepseek(&veto_prompt);
+            if !verdict.to_lowercase().contains("approve") {
+                println!("  Vetoed: {}", verdict.lines().next().unwrap_or("unknown"));
+                return None;
+            }
+            println!("  Veto gate: APPROVED ✓");
+        }
+
+        Some(fixed)
+    }
+}
+
+/// Fire a webhook for heal events.
+fn fire_heal_webhook(event: &str, path: &str, attempt: usize, error: &str) {
+    let data = serde_json::json!({
+        "event": event,
+        "path": path,
+        "attempt": attempt,
+        "error": error.lines().take(5).collect::<Vec<_>>().join("\n"),
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+    crate::webhook::auto_dispatch(event, data);
+    crate::serve::push_feed_event(
+        "Heal",
+        &format!("{} (attempt {}) → {}", path, attempt, event),
+        "heal",
+    );
 }
 
 // (legacy local lower_mir_to_ir + mir_type_to_ir removed — now using

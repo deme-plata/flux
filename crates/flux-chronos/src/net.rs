@@ -151,6 +151,12 @@ impl InMemoryNet {
     pub(crate) fn in_flight(&self) -> usize {
         self.pending.len()
     }
+
+    /// All pending deliveries (for snapshot serde). Consumed as a Vec;
+    /// reconstruct by pushing back into `pending`.
+    pub(crate) fn all_pending(&self) -> Vec<ScheduledDelivery> {
+        self.pending.clone().into_sorted_vec()
+    }
 }
 
 #[cfg(test)]

@@ -11,5 +11,6 @@ path = "src/main.rs"
 [dependencies]
 fluxc-core = { path = "../fluxc-core" }
 fluxc-mcp = { path = "../fluxc-mcp" }
+flux-sigil-releases = { path = "../flux-sigil-releases" }
 flux-graph = { path = "../flux-graph" }
 serde_json = "1"

@@ -40,7 +40,89 @@ fn main() {
         Some("check") | Some("c") => fluxc_core::run_cargo("check", &config, &subcommand_args[1..]),
         Some("test") | Some("t") => fluxc_core::run_tests(subcommand_args.get(1).map(|s|s.as_str())),
         Some("quick") => fluxc_core::quick_build_run(subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("fluxc"), config.release),
-        Some("run") | Some("r") => fluxc_core::detect_and_run(&config, &subcommand_args[1..]),
+        Some("run") | Some("r") => {
+            // JIT path: if first arg is a .rs file, compile + run natively
+            if let Some(file) = subcommand_args.get(1) {
+                if file.ends_with(".rs") {
+                    let exit = fluxc_core::phase3::compile_run(file, &subcommand_args[2..]);
+                    std::process::exit(exit);
+                }
+            }
+            fluxc_core::detect_and_run(&config, &subcommand_args[1..])
+        }
+        Some("test-native") => {
+            let failed = fluxc_core::phase3::run_integration_tests();
+            if failed > 0 {
+                std::process::exit(1);
+            }
+        }
+        Some("suggest") => {
+            let path = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("main.rs");
+            match fluxc_core::phase3::suggest_lifetime(path) {
+                Some(suggestion) => println!("{}", suggestion),
+                None => eprintln!("  No suggestion produced (vetoed or unavailable)"),
+            }
+        }
+        Some("heal") => {
+            let path = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("main.rs");
+            let mut max_attempts = 5usize;
+            let mut auto_commit = false;
+            let mut i = 2;
+            while i < subcommand_args.len() {
+                match subcommand_args[i].as_str() {
+                    "--max-attempts" | "-n" => {
+                        max_attempts = subcommand_args.get(i + 1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        i += 2;
+                    }
+                    "--auto-commit" | "-y" => { auto_commit = true; i += 1; }
+                    _ => { i += 1; }
+                }
+            }
+            let exit = fluxc_core::phase3::heal(path, max_attempts, auto_commit);
+            std::process::exit(exit);
+        }
+        Some("webhook-gen") => {
+            let input = subcommand_args.get(1)
+                .map(|s| std::path::PathBuf::from(s))
+                .unwrap_or_else(|| std::path::PathBuf::from(".flux-webhook.toml"));
+            let output = subcommand_args.get(2)
+                .map(|s| std::path::PathBuf::from(s))
+                .unwrap_or_else(|| std::path::PathBuf::from("src/generated"));
+            match fluxc_core::webhook_inbound::process_webhook_contracts(&input, &output) {
+                Ok(report) => println!("{}", report),
+                Err(e) => eprintln!("  webhook-gen error: {}", e),
+            }
+        }
+        Some("search") | Some("grep") => {
+            let pattern = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let glob = subcommand_args.get(2).map(|s| s.as_str());
+            let json = subcommand_args.iter().any(|a| a == "--json");
+            if pattern.is_empty() {
+                eprintln!("Usage: fluxc search <pattern> [glob] [--json]");
+                eprintln!("  Replaces: find . -name '*.rs' | xargs grep pattern");
+                eprintln!("  BLAKE3-deduplicated: identical files searched once");
+            } else {
+                fluxc_core::phase3::search_code(pattern, glob, json);
+            }
+        }
+        Some("suggest-webhook") => {
+            let path = subcommand_args.get(1)
+                .map(|s| std::path::PathBuf::from(s))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let suggestions = fluxc_core::webhook_inbound::suggest_webhooks(&path);
+            if suggestions.is_empty() {
+                println!("  No webhook suggestions for this project.");
+            } else {
+                println!("⚡ Flux Webhook Suggestions ({}):", suggestions.len());
+                for s in &suggestions {
+                    println!("  • {} — {} [{}] → {:?}",
+                        s.id, s.description, s.route, s.action);
+                }
+                println!("\n  Run 'fluxc webhook-gen' to generate handlers from .flux-webhook.toml");
+            }
+        }
         Some("watch") | Some("w") => fluxc_core::watch_mode(&config, &subcommand_args[1..]),
         Some("dev") | Some("d") => fluxc_core::dev_mode(&config),
         Some("clean") => fluxc_core::clean(),
@@ -54,6 +136,52 @@ fn main() {
         Some("supercluster") | Some("sc") => fluxc_core::supercluster_mode(&subcommand_args[1..]),
         Some("self") => fluxc_core::self_build(config),
         Some("architect") | Some("arch") => fluxc_core::phase3::architect_plan(),
+        Some("sigil-plan") => {
+            let json = subcommand_args.iter().any(|a| a == "--json");
+            let plan = flux_sigil_releases::plan::generate_release_plan();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan).unwrap_or_default());
+            } else {
+                println!("⚡ SIGIL v{} Release Plan — Cortex-Optimized", plan.version);
+                println!("   {} findings | {} SIGIL-specific | {}% top SIMD gain",
+                    plan.cortex_insights.total_findings,
+                    plan.cortex_insights.sigil_specific_findings,
+                    plan.cortex_insights.top_gain_pct);
+                for phase in &plan.phases {
+                    println!("\n  Phase {}: {} ({} days, {:.0}% Cortex gain)",
+                        phase.phase, phase.name, phase.estimated_days, phase.cortex_gain_pct);
+                    for rel in &phase.releases {
+                        println!("    {} — {} ({:.0}h)", rel.version, rel.title, rel.estimated_hours);
+                    }
+                }
+                println!("\n  Priority Actions:");
+                for a in &plan.priority_actions {
+                    println!("    #{}. [{}] {} — {}", a.rank, a.dimension, a.action, a.impact);
+                }
+            }
+        }
+        Some("cortex") => {
+            let preset = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("MaxPerf");
+            let iterations: usize = subcommand_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let json = subcommand_args.iter().any(|a| a == "--json");
+            fluxc_core::cortex::run_cortex_loop(preset, iterations, json);
+        }
+        Some("cortex-ai") => {
+            let target = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("main.rs");
+            let mode = subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("full");
+            let iterations: usize = subcommand_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let json = subcommand_args.iter().any(|a| a == "--json");
+            fluxc_core::cortex::run_ai_cortex(target, mode, iterations, json);
+        }
+        Some("cortex-summary") => {
+            let json = subcommand_args.iter().any(|a| a == "--json");
+            fluxc_core::cortex::run_cortex_summary(json);
+        }
+        Some("self-heal") => {
+            let poll_ms: u64 = subcommand_args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5000);
+            let auto = subcommand_args.iter().any(|a| a == "--auto" || a == "-y");
+            fluxc_core::self_heal::start_self_heal(poll_ms, auto);
+        }
         Some("p2p-worker") => fluxc_core::p2p_worker::run_p2p_worker(),
         Some("auto-update") => {
             // Args after subcommand: --interval N, --apply (or -y).

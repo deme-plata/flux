@@ -53,6 +53,15 @@ pub trait SimNode {
     /// Free-form name for logs / viz. Doesn't need to be unique (universe
     /// uses [`NodeId`](crate::NodeId) for identity) — humans use it.
     fn name(&self) -> &str;
+
+    /// Type tag for snapshot serde. The default returns `std::any::type_name`
+    /// but implementors should override with a stable short string so that
+    /// snapshots remain loadable across refactors. Used by
+    /// [`crate::snapshot::SnapshotArchive`] to know which concrete type to
+    /// reconstruct on deserialization.
+    fn type_tag(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 #[cfg(test)]

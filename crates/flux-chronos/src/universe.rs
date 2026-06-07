@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::net::{Envelope, InMemoryNet, NetEdge, NodeId};
+use crate::net::{Envelope, InMemoryNet, NetEdge, NodeId, ScheduledDelivery};
 use crate::{NodeStepResult, SimNode, TickId, VirtualClock};
 
 /// Universe seed — drives the deterministic RNG. Same seed → same execution
@@ -65,20 +65,26 @@ pub struct Universe {
 
     /// Universe-wide event log. Each entry is `(tick, node_id, event_str)`.
     event_log: Vec<(TickId, NodeId, String)>,
+
+    /// Scenario seed — stored separately so we can retrieve it without
+    /// extracting from the RNG (ChaCha8Rng doesn't expose get_seed).
+    seed: u64,
 }
 
 impl Universe {
     /// Fresh universe at tick 0, RNG seeded from `seed`.
     pub fn new(seed: ScenarioSeed) -> Self {
+        let s = seed.0;
         Self {
             clock: VirtualClock::new(),
-            rng: ChaCha8Rng::seed_from_u64(seed.0),
+            rng: ChaCha8Rng::seed_from_u64(s),
             net: InMemoryNet::new(),
             nodes: BTreeMap::new(),
             edges: BTreeMap::new(),
             wake_at: BTreeMap::new(),
             next_id: 0,
             event_log: Vec::new(),
+            seed: s,
         }
     }
 
@@ -121,6 +127,221 @@ impl Universe {
     /// Every event every node has emitted, in chronological order.
     pub fn event_log(&self) -> &[(TickId, NodeId, String)] {
         &self.event_log
+    }
+
+    /// Number of nodes in the universe.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Number of pending (not yet delivered) envelopes in the in-memory net.
+    pub fn pending_envelope_count(&self) -> usize {
+        self.net.in_flight()
+    }
+
+    /// The scenario seed this universe was created with.
+    pub fn seed(&self) -> ScenarioSeed {
+        ScenarioSeed(self.seed)
+    }
+
+    /// Serialize universe metadata + all node snapshots to a byte vector.
+    /// Uses bincode for the concrete metadata; each node's `snapshot()` is
+    /// stored alongside its NodeId and type_tag for reconstruction.
+    ///
+    /// This does NOT serialize the full universe — it serializes enough to
+    /// reconstruct it, given a factory that can build nodes from type_tags.
+    pub fn serialize_to_vec(&self) -> Vec<u8> {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct UniverseSnapshot {
+            seed: u64,
+            tick: TickId,
+            next_id: u32,
+            edges: Vec<((u32, u32), NetEdgeWire)>,
+            wake_at: Vec<(u32, TickId)>,
+            event_log: Vec<(TickId, u32, String)>,
+            pending: Vec<PendingEnvelopeWire>,
+            nodes: Vec<NodeSnapshotWire>,
+        }
+
+        #[derive(Serialize)]
+        struct NetEdgeWire {
+            latency_micros: u64,
+            drop_prob: f64,
+            partitioned: bool,
+        }
+
+        #[derive(Serialize)]
+        struct PendingEnvelopeWire {
+            deliver_at: TickId,
+            from: u32,
+            to: u32,
+            sent_at: TickId,
+            payload: Vec<u8>,
+        }
+
+        #[derive(Serialize)]
+        struct NodeSnapshotWire {
+            id: u32,
+            type_tag: String,
+            name: String,
+            snapshot: Vec<u8>,
+        }
+
+        let snap = UniverseSnapshot {
+            seed: self.seed().0,
+            tick: self.clock.now(),
+            next_id: self.next_id,
+            edges: self
+                .edges
+                .iter()
+                .map(|((from, to), e)| {
+                    ((from.0, to.0), NetEdgeWire {
+                        latency_micros: e.latency_micros,
+                        drop_prob: e.drop_prob,
+                        partitioned: e.partitioned,
+                    })
+                })
+                .collect(),
+            wake_at: self
+                .wake_at
+                .iter()
+                .map(|(id, tick)| (id.0, *tick))
+                .collect(),
+            event_log: self
+                .event_log
+                .iter()
+                .map(|(tick, id, s)| (*tick, id.0, s.clone()))
+                .collect(),
+            pending: self
+                .net
+                .all_pending()
+                .iter()
+                .map(|sd| PendingEnvelopeWire {
+                    deliver_at: sd.deliver_at,
+                    from: sd.envelope.from.0,
+                    to: sd.envelope.to.0,
+                    sent_at: sd.envelope.sent_at,
+                    payload: sd.envelope.payload.clone(),
+                })
+                .collect(),
+            nodes: self
+                .nodes
+                .iter()
+                .map(|(id, node)| {
+                    NodeSnapshotWire {
+                        id: id.0,
+                        type_tag: node.type_tag().to_string(),
+                        name: node.name().to_string(),
+                        snapshot: node.snapshot(),
+                    }
+                })
+                .collect(),
+        };
+
+        bincode::serialize(&snap).expect("bincode serialize UniverseSnapshot")
+    }
+
+    /// Deserialize a universe from a byte slice produced by `serialize_to_vec`.
+    /// Requires a `make_node` factory that builds the correct SimNode for each
+    /// stored type_tag, then calls `restore()` on it.
+    pub fn deserialize_from_slice(
+        bytes: &[u8],
+        mut make_node: impl FnMut(&str) -> Box<dyn SimNode>,
+    ) -> Result<Self, String> {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct UniverseSnapshot {
+            seed: u64,
+            tick: TickId,
+            next_id: u32,
+            edges: Vec<((u32, u32), NetEdgeWire)>,
+            wake_at: Vec<(u32, TickId)>,
+            event_log: Vec<(TickId, u32, String)>,
+            pending: Vec<PendingEnvelopeWire>,
+            nodes: Vec<NodeSnapshotWire>,
+        }
+
+        #[derive(Deserialize)]
+        struct NetEdgeWire {
+            latency_micros: u64,
+            drop_prob: f64,
+            partitioned: bool,
+        }
+
+        #[derive(Deserialize)]
+        struct PendingEnvelopeWire {
+            deliver_at: TickId,
+            from: u32,
+            to: u32,
+            sent_at: TickId,
+            payload: Vec<u8>,
+        }
+
+        #[derive(Deserialize)]
+        struct NodeSnapshotWire {
+            id: u32,
+            type_tag: String,
+            name: String,
+            snapshot: Vec<u8>,
+        }
+
+        let snap: UniverseSnapshot =
+            bincode::deserialize(bytes).map_err(|e| format!("bincode deserialize UniverseSnapshot: {e}"))?;
+
+        let mut universe = Universe::new(ScenarioSeed(snap.seed));
+        // Fast-forward clock and next_id to match saved state.
+        universe.clock = VirtualClock::at(snap.tick);
+        universe.next_id = snap.next_id;
+
+        // Restore edges.
+        for ((from, to), e) in snap.edges {
+            universe.edges.insert(
+                (NodeId(from), NodeId(to)),
+                NetEdge {
+                    latency_micros: e.latency_micros,
+                    drop_prob: e.drop_prob,
+                    partitioned: e.partitioned,
+                },
+            );
+        }
+
+        // Restore wake_at.
+        for (id, tick) in snap.wake_at {
+            universe.wake_at.insert(NodeId(id), tick);
+        }
+
+        // Restore event log.
+        universe.event_log = snap
+            .event_log
+            .into_iter()
+            .map(|(tick, id, s)| (tick, NodeId(id), s))
+            .collect();
+
+        // Restore pending deliveries.
+        for p in snap.pending {
+            universe.net.pending.push(ScheduledDelivery {
+                deliver_at: p.deliver_at,
+                envelope: Envelope {
+                    from: NodeId(p.from),
+                    to: NodeId(p.to),
+                    sent_at: p.sent_at,
+                    payload: p.payload,
+                },
+            });
+        }
+
+        // Restore nodes via factory + restore().
+        for ns in snap.nodes {
+            let mut node = make_node(&ns.type_tag);
+            node.restore(&ns.snapshot)
+                .map_err(|e| format!("restore node {} ({}): {e}", ns.id, ns.type_tag))?;
+            universe.nodes.insert(NodeId(ns.id), node);
+        }
+
+        Ok(universe)
     }
 
     /// Run forward by `delta` simulated microseconds. The universe processes
@@ -251,6 +472,19 @@ impl Universe {
             .iter()
             .map(|(&id, n)| (id, n.snapshot()))
             .collect()
+    }
+}
+
+impl std::fmt::Debug for Universe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Universe")
+            .field("tick", &self.clock.now())
+            .field("nodes", &self.nodes.len())
+            .field("edges", &self.edges.len())
+            .field("pending", &self.net.in_flight())
+            .field("events", &self.event_log.len())
+            .field("seed", &self.seed)
+            .finish()
     }
 }
 

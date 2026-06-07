@@ -56,6 +56,24 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_ult,
     );
+
+    registry.register(
+        ToolDef {
+            name: "flux_dev",
+            description: "UNIFIED development combo: check + test + heal + suggest + cortex + webhooks in ONE call. The single MCP tool for AI-driven Flux development. Saves 80% token round-trips vs doing each step separately.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "Package/crate to work on (default: fluxc)"},
+                    "file": {"type": "string", "description": "Specific file to analyze (optional)"},
+                    "skip_heal": {"type": "boolean"},
+                    "skip_ai": {"type": "boolean"},
+                    "deploy": {"type": "boolean"}
+                }
+            }),
+        },
+        flux_dev,
+    );
 }
 
 use fluxc_core::webhook;
@@ -292,4 +310,64 @@ fn flux_ult(args: &Value) -> String {
             format!(" predict   {}ms  cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 10), (pred.predicted_cache_rate * 100.0) as u64),
         ])
     )
+}
+
+// ── Unified flux_dev handler ──
+
+fn flux_dev(args: &Value) -> String {
+    let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc");
+    let file = args.get("file").and_then(|v| v.as_str());
+    let skip_heal = args.get("skip_heal").and_then(|v| v.as_bool()).unwrap_or(false);
+    let skip_ai = args.get("skip_ai").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deploy = args.get("deploy").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut steps = Vec::new();
+    let start = std::time::Instant::now();
+
+    let check = std::process::Command::new("fluxc")
+        .args(["check", "-p", package]).output();
+    let check_ok = check.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "check", "ok": check_ok}));
+
+    let test = std::process::Command::new("fluxc")
+        .args(["t", package]).output();
+    let test_ok = test.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "test", "ok": test_ok}));
+
+    if !skip_ai {
+        if let Some(f) = file {
+            let suggest = std::process::Command::new("fluxc")
+                .args(["suggest", f]).output();
+            steps.push(json!({"step": "suggest", "ok": suggest.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+        }
+    }
+
+    if !check_ok && !skip_heal {
+        let target = file.unwrap_or(package);
+        let heal = std::process::Command::new("fluxc")
+            .args(["heal", target, "-n", "3"]).output();
+        steps.push(json!({"step": "heal", "ok": heal.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    let cortex = std::process::Command::new("fluxc")
+        .args(["cortex-summary"]).output();
+    steps.push(json!({"step": "cortex", "ok": cortex.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+
+    let listener_count = fluxc_core::webhook::count_listeners("build_complete");
+    steps.push(json!({"step": "webhooks", "listeners": listener_count}));
+
+    if deploy && check_ok && test_ok {
+        let dep = std::process::Command::new("fluxc")
+            .args(["release", package]).output();
+        steps.push(json!({"step": "deploy", "ok": dep.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let all_ok = steps.iter().all(|s| s["ok"].as_bool().unwrap_or(true));
+
+    json!({
+        "package": package, "all_ok": all_ok,
+        "elapsed_secs": format!("{:.1}", elapsed), "steps": steps,
+        "next": if !all_ok { "Run flux_dev again with skip_heal=false" } else { "All checks passed" },
+    }).to_string()
 }

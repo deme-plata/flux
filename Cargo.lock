@@ -2307,6 +2307,10 @@ name = "flux-boilerplate"
 version = "0.26.0"
 
 [[package]]
+name = "flux-brace-placeholder"
+version = "0.1.0"
+
+[[package]]
 name = "flux-burst"
 version = "0.26.0"
 dependencies = [
@@ -2332,12 +2336,17 @@ dependencies = [
 name = "flux-chronos"
 version = "0.26.0"
 dependencies = [
+ "bincode",
+ "blake3",
+ "hex",
+ "lz4",
  "memmap2",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "zstd",
 ]
 
 [[package]]
@@ -2388,6 +2397,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-cortex"
+version = "0.26.0"
+dependencies = [
+ "flux-architect",
+ "flux-graph",
+ "flux-optimize",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-cowsim"
 version = "0.26.0"
 dependencies = [
@@ -2406,6 +2426,21 @@ dependencies = [
  "parking_lot 0.12.5",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "flux-dns"
+version = "0.26.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2815,6 +2850,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-quic"
+version = "0.26.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "rustls 0.23.40",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "flux-quorum"
 version = "0.26.0"
 dependencies = [
@@ -2880,6 +2931,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-redis"
+version = "0.26.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "flux-refactor"
 version = "0.26.0"
 dependencies = [
@@ -2919,6 +2984,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
+]
+
+[[package]]
+name = "flux-rocksdb"
+version = "0.26.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3078,6 +3157,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-tor"
+version = "0.26.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "crossbeam",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "rustls 0.23.40",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-uring",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
 name = "flux-torrent"
 version = "0.26.0"
 dependencies = [
@@ -3161,6 +3263,29 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "flux-wireguard"
+version = "0.26.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "crossbeam",
+ "hex",
+ "ipnet",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "snow",
+ "tokio",
+ "tokio-uring",
+ "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -3275,10 +3400,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-zstd"
+version = "0.26.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "parking_lot 0.12.5",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "fluxc"
 version = "0.26.0"
 dependencies = [
  "flux-graph",
+ "flux-sigil-releases",
  "fluxc-core",
  "fluxc-mcp",
  "serde_json",
@@ -3288,17 +3427,22 @@ dependencies = [
 name = "fluxc-core"
 version = "0.26.0"
 dependencies = [
+ "bincode",
  "blake3",
  "flux-ai",
  "flux-api",
  "flux-architect",
  "flux-backend",
  "flux-cache",
+ "flux-cortex",
  "flux-driver",
  "flux-frontend",
  "flux-graph",
  "flux-optimize",
  "flux-p2p",
+ "flux-rev",
+ "flux-science",
+ "flux-self-heal",
  "flux-sqisign",
  "flux-swarm-store",
  "flux-swarm-tools",
@@ -3316,6 +3460,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-uring",
+ "toml",
 ]
 
 [[package]]
@@ -3343,6 +3488,7 @@ dependencies = [
  "flux-bench",
  "flux-chronos",
  "flux-context",
+ "flux-cortex",
  "flux-extension",
  "flux-gpu",
  "flux-gpu-market",
@@ -9729,3 +9875,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

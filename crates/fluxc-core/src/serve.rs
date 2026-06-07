@@ -444,6 +444,13 @@ impl LiveStats {
 // ── Route Handlers ──
 
 fn handle_dashboard(_req: &Request, _stats: &LiveStats) -> Response {
+    // Serve static index.html (Flux landing page with hostname-based routing) when available
+    if let Ok(html_bytes) = std::fs::read(
+        std::env::var("FLUX_STATIC_DIR").unwrap_or_default() + "/index.html"
+    ) {
+        let html = String::from_utf8_lossy(&html_bytes).into_owned();
+        return Response::ok_html(&html);
+    }
     let html = include_str!("../dashboard_sse.html");
     Response::ok_html(html)
 }

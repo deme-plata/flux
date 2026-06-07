@@ -1,0 +1,54 @@
+[package]
+name = "flux-webhook-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Webhook-MCP Combo v2 — bidirectional webhook ↔ MCP bridge. Inbound webhook server, webhook→MCP tool dispatch, aether file watchers that trigger fluxfood iterate loops, and search re-index webhooks. Faster, bidirectional, and fully integrated with flux-aether + flux-search + fluxfood."
+
+[dependencies]
+# Core
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+# HTTP
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# MCP bridge
+fluxc-mcp = { path = "../fluxc-mcp" }
+fluxc-core = { path = "../fluxc-core" }
+
+# Aether storage
+flux-aether = { path = "../flux-aether" }
+
+# Search
+flux-search = { path = "../flux-search" }
+
+# Crypto
+flux-sqisign = { path = "../flux-sqisign" }
+hmac = "0.12"
+sha2 = "0.10"
+
+# Filesystem watcher
+notify = "6"
+
+# Utils
+uuid = { version = "1", features = ["v4", "serde"] }
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "flux-webhookd"
+path = "src/bin/webhookd.rs"

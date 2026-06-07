@@ -1,0 +1,11 @@
+[package]
+name = "flux-kyberkem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kyber-1024 post-quantum KEM for Flux P2P key exchange"
+
+[dependencies]
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha3 = "0.10"

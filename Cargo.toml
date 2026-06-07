@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/flux-kyberkem",
     "crates/sigil-cosmos-core",
     "crates/sigil-cosmos-mcp","crates/*"]
 resolver = "2"

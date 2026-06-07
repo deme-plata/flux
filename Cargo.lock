@@ -2628,6 +2628,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-kyberkem"
+version = "0.26.0"
+dependencies = [
+ "rand 0.8.6",
+ "serde",
+ "sha3",
+]
+
+[[package]]
 name = "flux-lab"
 version = "0.26.0"
 

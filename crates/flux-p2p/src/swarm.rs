@@ -24,11 +24,17 @@ use super::entanglement::{EntanglementRouter, EntanglementConfig};
 
 use libp2p::{
     core::{muxing::StreamMuxerBox, upgrade},
-    gossipsub, identify, kad, noise, ping,
+    gossipsub, identify, kad, noise, ping, request_response,
+    request_response::{ProtocolSupport, ResponseChannel},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder, Transport,
+    tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use libp2p::futures::StreamExt;
+
+/// Protocol id for the point-to-point backfill request-response channel.
+/// Request and response payloads are opaque `Vec<u8>` — flux-p2p stays
+/// domain-agnostic; the application defines block types and encodes to bytes.
+pub const BACKFILL_PROTOCOL: &str = "/sigil/backfill/1";
 // ═══════════════════════════════════════════════════════════════
 // Behaviour
 // ═══════════════════════════════════════════════════════════════
@@ -40,6 +46,8 @@ pub struct FluxBehaviour {
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
+    /// Point-to-point backfill (CBOR-coded, opaque Vec<u8> payloads).
+    pub request_response: request_response::cbor::Behaviour<Vec<u8>, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -48,6 +56,7 @@ pub enum FluxBehaviourEvent {
     Kademlia(kad::Event),
     Identify(identify::Event),
     Ping(ping::Event),
+    RequestResponse(request_response::Event<Vec<u8>, Vec<u8>>),
 }
 
 impl From<gossipsub::Event> for FluxBehaviourEvent {
@@ -61,6 +70,9 @@ impl From<identify::Event> for FluxBehaviourEvent {
 }
 impl From<ping::Event> for FluxBehaviourEvent {
     fn from(e: ping::Event) -> Self { Self::Ping(e) }
+}
+impl From<request_response::Event<Vec<u8>, Vec<u8>>> for FluxBehaviourEvent {
+    fn from(e: request_response::Event<Vec<u8>, Vec<u8>>) -> Self { Self::RequestResponse(e) }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -194,6 +206,18 @@ pub struct FluxSwarmManager {
     /// Entanglement router for knot-based peer selection (QtFT Path C).
     pub entanglement: EntanglementRouter,
     pub event_rx: Option<std::sync::Arc<parking_lot::RwLock<Vec<SwarmAppEvent>>>>,
+    /// Request-response: inbound response channels keyed by the opaque u64 id
+    /// handed to the application. ResponseChannel is NOT Send across the drain
+    /// boundary, so it stays owned by the swarm task; the app only sees the u64.
+    inbound_channels: HashMap<u64, ResponseChannel<Vec<u8>>>,
+    /// Monotonic counter for assigning inbound request ids.
+    next_inbound_id: u64,
+    /// Request-response: outbound oneshot senders keyed by OutboundRequestId.
+    /// Resolved on Message::Response / OutboundFailure inside handle_swarm_event.
+    outbound_waiters: HashMap<request_response::OutboundRequestId, tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    /// Currently-connected peers, shared so NetworkManager::connected_peers can
+    /// read it. Tracked from ConnectionEstablished/ConnectionClosed.
+    pub connected: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<PeerId>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +272,14 @@ pub enum SwarmAppEvent {
         peer_id: PeerId,
         agent_version: String,
         protocols: Vec<String>,
+    },
+    /// A point-to-point backfill request arrived from `peer`. The application
+    /// answers it by calling `NetworkManager::respond(request_id, payload)` with
+    /// the same opaque `request_id`. Payload is opaque (CBOR-coded Vec<u8>).
+    InboundRequest {
+        peer: PeerId,
+        request_id: u64,
+        payload: Vec<u8>,
     },
     /// v0.7.0: Block sync progress update — fired when a block sync operation
     /// makes progress. Sigil-top consumes this to drive the TUI sync gauge.
@@ -371,12 +403,22 @@ impl FluxSwarmManager {
             .with_timeout(Duration::from_secs(5));
         let ping = ping::Behaviour::new(ping_config);
 
+        // Build request-response (point-to-point backfill). libp2p's built-in
+        // CBOR codec; payloads are opaque Vec<u8> so flux-p2p stays
+        // domain-agnostic. 30s request timeout.
+        let request_response = request_response::cbor::Behaviour::<Vec<u8>, Vec<u8>>::new(
+            [(StreamProtocol::new(BACKFILL_PROTOCOL), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30)),
+        );
+
         // Assemble behaviour
         let behaviour = FluxBehaviour {
             gossipsub,
             kademlia,
             identify,
             ping,
+            request_response,
         };
 
         // Build swarm
@@ -412,6 +454,10 @@ impl FluxSwarmManager {
                 bootstrap_peers_cache: config.bootstrap_peers.clone(),
                 entanglement: EntanglementRouter::new(config.entanglement_config.clone()),
                 event_rx: Some(event_rx.clone()),
+                inbound_channels: HashMap::new(),
+                next_inbound_id: 1,
+                outbound_waiters: HashMap::new(),
+                connected: std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
             },
             event_rx,
         ))
@@ -517,6 +563,38 @@ impl FluxSwarmManager {
                 peer_count: self.peers.len(),
             });
         }
+    }
+
+    /// Answer an inbound backfill request previously surfaced via
+    /// `SwarmAppEvent::InboundRequest`. Looks up the stored ResponseChannel by
+    /// the opaque `request_id` and sends the response bytes. Logs if the id is
+    /// unknown (already answered, or the channel expired/timed out).
+    pub fn respond(&mut self, request_id: u64, payload: Vec<u8>) {
+        match self.inbound_channels.remove(&request_id) {
+            Some(channel) => {
+                if self.swarm.behaviour_mut().request_response
+                    .send_response(channel, payload).is_err()
+                {
+                    tracing::warn!(request_id, "respond: response channel closed (peer gone?)");
+                }
+            }
+            None => {
+                tracing::warn!(request_id, "respond: no inbound channel for request_id (already answered or expired)");
+            }
+        }
+    }
+
+    /// Send an outbound backfill request to `peer`, registering `resp` to be
+    /// fulfilled when the response (or failure) arrives. The result is delivered
+    /// via the RequestResponse handler in handle_swarm_event.
+    pub fn send_request(
+        &mut self,
+        peer: PeerId,
+        payload: Vec<u8>,
+        resp: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
+    ) {
+        let id = self.swarm.behaviour_mut().request_response.send_request(&peer, payload);
+        self.outbound_waiters.insert(id, resp);
     }
 
     /// Force-flush all pending batches — call before shutdown or on a timer.
@@ -678,6 +756,43 @@ impl FluxSwarmManager {
                     tracing::debug!(%peer, "Kademlia routing updated");
                 }
             }
+            SwarmEvent::Behaviour(FluxBehaviourEvent::RequestResponse(ev)) => {
+                match ev {
+                    request_response::Event::Message { peer, message } => match message {
+                        request_response::Message::Request { request, channel, .. } => {
+                            // Assign an opaque u64 id, stash the channel, surface to app.
+                            let request_id = self.next_inbound_id;
+                            self.next_inbound_id = self.next_inbound_id.wrapping_add(1);
+                            self.inbound_channels.insert(request_id, channel);
+                            tracing::debug!(%peer, request_id, len = request.len(), "Backfill request received");
+                            if let Some(ref rx) = self.event_rx {
+                                rx.write().push(SwarmAppEvent::InboundRequest {
+                                    peer,
+                                    request_id,
+                                    payload: request,
+                                });
+                            }
+                        }
+                        request_response::Message::Response { request_id, response } => {
+                            if let Some(tx) = self.outbound_waiters.remove(&request_id) {
+                                let _ = tx.send(Ok(response));
+                            } else {
+                                tracing::warn!(%request_id, "Backfill response for unknown request_id");
+                            }
+                        }
+                    },
+                    request_response::Event::OutboundFailure { request_id, error, .. } => {
+                        if let Some(tx) = self.outbound_waiters.remove(&request_id) {
+                            let _ = tx.send(Err(error.to_string()));
+                        }
+                        tracing::warn!(%request_id, %error, "Backfill outbound failure");
+                    }
+                    request_response::Event::InboundFailure { request_id, error, .. } => {
+                        tracing::warn!(%request_id, %error, "Backfill inbound failure");
+                    }
+                    request_response::Event::ResponseSent { .. } => { /* ignore */ }
+                }
+            }
             SwarmEvent::Behaviour(FluxBehaviourEvent::Ping(ev)) => {
                 #[allow(irrefutable_let_patterns)]
                 if let ping::Event { peer, result, .. } = ev {
@@ -693,6 +808,7 @@ impl FluxSwarmManager {
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 let addr = endpoint.get_remote_address().to_string();
                 tracing::info!(%peer_id, %addr, "Peer connected");
+                self.connected.write().insert(peer_id);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -713,8 +829,12 @@ impl FluxSwarmManager {
                     rx.write().push(SwarmAppEvent::PeerConnected { peer_id, addr });
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
                 tracing::info!(%peer_id, "Peer disconnected");
+                // Only drop from the connected set when the LAST connection closes.
+                if num_established == 0 {
+                    self.connected.write().remove(&peer_id);
+                }
                 self.peers.remove(&peer_id);
                 if let Some(ref rx) = self.event_rx {
                     rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });

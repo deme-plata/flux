@@ -74,11 +74,23 @@ pub struct NetworkManager {
     /// Notifier signalled when new events are pushed to app_events.
     /// Subscribers use this to wake instead of polling.
     event_notify: Arc<tokio::sync::Notify>,
+    /// Set of currently-connected libp2p PeerIds, shared with the swarm task.
+    /// Populated on start(); empty until then. Read by `connected_peer_ids()`.
+    connected: Arc<RwLock<std::collections::HashSet<libp2p::PeerId>>>,
 }
 
 /// Commands sent to the swarm event loop.
 enum SwarmCommand {
     Publish { topic: String, data: Vec<u8> },
+    /// Point-to-point backfill: send a request to `peer`, fulfil `resp` with the
+    /// response bytes (or an error string).
+    SendRequest {
+        peer: libp2p::PeerId,
+        payload: Vec<u8>,
+        resp: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// Point-to-point backfill: answer an inbound request by its opaque u64 id.
+    Respond { request_id: u64, payload: Vec<u8> },
     Shutdown,
 }
 
@@ -151,6 +163,7 @@ impl NetworkManager {
             cmd_tx: None,
             app_events: Arc::new(RwLock::new(Vec::new())),
             event_notify: Arc::new(tokio::sync::Notify::new()),
+            connected: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -209,6 +222,8 @@ impl NetworkManager {
         let (swarm_manager, event_rx) =
             FluxSwarmManager::new(swarm_config)?;
         self.app_events = event_rx;
+        // Share the swarm's connected-peer set so connected_peer_ids() can read it.
+        self.connected = swarm_manager.connected.clone();
 
         // Channel for application commands
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SwarmCommand>();
@@ -315,6 +330,12 @@ impl NetworkManager {
                         match cmd {
                             Some(SwarmCommand::Publish { topic, data }) => {
                                 let _ = swarm.publish(&topic, data);
+                            }
+                            Some(SwarmCommand::SendRequest { peer, payload, resp }) => {
+                                swarm.send_request(peer, payload, resp);
+                            }
+                            Some(SwarmCommand::Respond { request_id, payload }) => {
+                                swarm.respond(request_id, payload);
                             }
                             Some(SwarmCommand::Shutdown) => {
                                 tracing::info!("Flux P2P event loop shutting down");
@@ -592,9 +613,45 @@ impl NetworkManager {
         self.inner.read().dagknight_round
     }
 
-    /// Get connected peer info.
-    pub fn connected_peers(&self) -> Vec<PeerInfo> {
+    /// Get the libp2p PeerIds we're currently connected to. The application
+    /// picks one of these to send a backfill request to via `send_request`.
+    pub fn connected_peers(&self) -> Vec<libp2p::PeerId> {
+        self.connected.read().iter().copied().collect()
+    }
+
+    /// Get full connected-peer info (multiaddr, protocols, agent version).
+    /// Updated by the swarm event loop from Identify + ConnectionEstablished.
+    pub fn connected_peer_infos(&self) -> Vec<PeerInfo> {
         self.inner.read().peers.clone()
+    }
+
+    // ── Point-to-point backfill (request-response over /sigil/backfill/1) ──
+
+    /// Send a backfill request to `peer` and await the response bytes.
+    /// Returns Err on timeout, dial failure, disconnect, or if the network
+    /// is not started. Payload is opaque (the application encodes block types).
+    pub async fn send_request(&self, peer: libp2p::PeerId, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+        let tx = match &self.cmd_tx {
+            Some(tx) => tx.clone(),
+            None => return Err("NetworkManager not started".into()),
+        };
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        tx.send(SwarmCommand::SendRequest { peer, payload, resp: resp_tx })
+            .map_err(|e| format!("Request channel closed: {}", e))?;
+        match resp_rx.await {
+            Ok(result) => result,
+            Err(_) => Err("Request dropped before a response arrived".into()),
+        }
+    }
+
+    /// Answer an inbound backfill request surfaced via
+    /// `SwarmAppEvent::InboundRequest`. Pass the same opaque `request_id`.
+    /// Fire-and-forget; if the network is not started or the id is unknown,
+    /// the request simply goes unanswered (the peer sees a timeout).
+    pub fn respond(&self, request_id: u64, payload: Vec<u8>) {
+        if let Some(ref tx) = self.cmd_tx {
+            let _ = tx.send(SwarmCommand::Respond { request_id, payload });
+        }
     }
 
     /// Get SAP peer score for a given peer ID.

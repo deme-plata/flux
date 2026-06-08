@@ -22,3 +22,10 @@ dist/
 
 # Logs
 *.log
+
+# content-addressed flux-rev stores (regenerable)
+.flux-rev/
+**/.flux-rev/
+
+# generated context engine output (regenerable)
+.whale/

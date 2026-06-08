@@ -335,6 +335,52 @@ fn flux_search(args: &Value) -> String {
         category: args.get("category").and_then(|v| v.as_str()).map(|s| s.to_string()),
         language: args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string()),
     });
+    // Fast fallback: if index has 0 results, do a live grep scan
+    if resp.total_results == 0 {
+        let mut fallback_results = Vec::new();
+        let paths = args.get("paths").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec!["src", "crates"]);
+        for search_path in &paths {
+            if let Ok(entries) = std::fs::read_dir(search_path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().map_or(false, |e| e == "rs" || e == "ts" || e == "tsx" || e == "js" || e == "toml" || e == "md") {
+                        if let Ok(contents) = std::fs::read_to_string(&p) {
+                            if contents.contains(query) {
+                                let line_count = contents.lines().count();
+                                let match_lines: Vec<String> = contents.lines()
+                                    .enumerate()
+                                    .filter(|(_, l)| l.contains(query))
+                                    .take(3)
+                                    .map(|(i, l)| format!("  {}: {}", i+1, l.trim()))
+                                    .collect();
+                                fallback_results.push(format!("{} ({} LOC)
+{}", 
+                                    p.display(), line_count, match_lines.join("
+")));
+                                if fallback_results.len() >= per_page { break; }
+                            }
+                        }
+                    }
+                }
+            }
+            if fallback_results.len() >= per_page { break; }
+        }
+        if !fallback_results.is_empty() {
+            return format!("⚡ Flux Search (live grep fallback)
+  Query: {}
+  Results: {}
+  Time: fast
+{}", 
+                query, fallback_results.len(),
+                fallback_results.iter().enumerate()
+                    .map(|(i, r)| format!("
+── {}. ──
+{}", i+1, r))
+                    .collect::<Vec<_>>().join(""));
+        }
+    }
     format_search_response("Flux Search", &index_path, &resp)
 }
 

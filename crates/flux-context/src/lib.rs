@@ -30,6 +30,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Semantic chunking + dependency-ripple scoring over the Flux workspace.
+/// Task 1 of `docs/1M_CONTEXT_WINDOW_PLAN.md` — the "what to load" side that
+/// complements this crate's CUR ("how well we used what we loaded"). Built on
+/// flux-graph (no new manifest parser).
+pub mod chunk;
+
+/// Differential context updates (Task 2). Compares a fresh chunk manifest against
+/// the last snapshot — only changed chunks need re-serializing. Fingerprints +
+/// snapshot persistence reuse flux-rev (BLAKE3 + content-addressed Store).
+pub mod diff;
+
+/// Context-watch daemon (Task 3): poll-based filesystem watcher that keeps the
+/// chunk manifest + diff hot in an L1 (/dev/shm) cache so the 1M context is ready
+/// in <500ms. Cheap idle cost via an mtime-signature gate.
+pub mod watch;
+
+/// Multi-model context routing (Task 4): pick a model tier per task and fill its
+/// token budget with the highest-ripple chunks. Tiers map onto the model ladder
+/// (and flux-moe's local/DeepSeek two-mind for the cheap path).
+pub mod router;
+
 /// Default model context window (tokens). Override per-model if needed.
 pub const DEFAULT_WINDOW_TOKENS: u32 = 1_000_000;
 

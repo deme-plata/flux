@@ -29,8 +29,6 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder, Transport,
 };
 use libp2p::futures::StreamExt;
-use tokio::sync::mpsc;
-
 // ═══════════════════════════════════════════════════════════════
 // Behaviour
 // ═══════════════════════════════════════════════════════════════
@@ -237,10 +235,12 @@ pub enum SwarmAppEvent {
         data: Vec<u8>,
         message_id: gossipsub::MessageId,
     },
-    /// A peer connected.
-    PeerConnected(PeerId),
+    /// A peer connected. `addr` is the remote multiaddr (so consumers can
+    /// identify a peer by its IP, e.g. map 89.149.241.126 → Epsilon). Empty
+    /// string if the endpoint address was unavailable.
+    PeerConnected { peer_id: PeerId, addr: String },
     /// A peer disconnected.
-    PeerDisconnected(PeerId),
+    PeerDisconnected { peer_id: PeerId },
     /// New listen address confirmed.
     NewListenAddr(Multiaddr),
     /// Peer identified itself.
@@ -248,6 +248,20 @@ pub enum SwarmAppEvent {
         peer_id: PeerId,
         agent_version: String,
         protocols: Vec<String>,
+    },
+    /// v0.7.0: Block sync progress update — fired when a block sync operation
+    /// makes progress. Sigil-top consumes this to drive the TUI sync gauge.
+    SyncProgress {
+        /// Height of the latest synced block.
+        height: u64,
+        /// Hex-encoded hash of the latest synced block.
+        hash_hex: String,
+        /// Best known peer height (target for sync).
+        peer_best_height: u64,
+        /// Total blocks synced in this session.
+        total_synced: u64,
+        /// Number of peers we're syncing from.
+        peer_count: usize,
     },
 }
 
@@ -491,6 +505,20 @@ impl FluxSwarmManager {
         self.entanglement.config.min_score
     }
 
+    /// v0.7.0: Push a sync progress event to the application event channel.
+    /// Called by sigil-top's block sync loop to update the TUI sync gauge.
+    pub fn push_sync_progress(&self, height: u64, hash_hex: &str, peer_best_height: u64, total_synced: u64) {
+        if let Some(ref rx) = self.event_rx {
+            rx.write().push(SwarmAppEvent::SyncProgress {
+                height,
+                hash_hex: hash_hex.to_string(),
+                peer_best_height,
+                total_synced,
+                peer_count: self.peers.len(),
+            });
+        }
+    }
+
     /// Force-flush all pending batches — call before shutdown or on a timer.
     pub fn flush_all(&mut self) {
         let topics: Vec<String> = self.batcher.keys().cloned().collect();
@@ -662,8 +690,9 @@ impl FluxSwarmManager {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "New listen address");
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                tracing::info!(%peer_id, "Peer connected");
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                let addr = endpoint.get_remote_address().to_string();
+                tracing::info!(%peer_id, %addr, "Peer connected");
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -671,16 +700,25 @@ impl FluxSwarmManager {
 
                 self.peers.entry(peer_id).or_insert_with(|| PeerInfo {
                     peer_id: peer_id.to_string(),
-                    multiaddr: String::new(),
+                    multiaddr: addr.clone(),
                     connected_since_ms: now,
                     last_seen_ms: now,
                     protocols: Vec::new(),
                     agent_version: String::new(),
                 });
+                // Surface to the application layer so the TUI can light up
+                // peer/mesh indicators (previously this event was never emitted,
+                // leaving sigil-top's peer detection as dead code).
+                if let Some(ref rx) = self.event_rx {
+                    rx.write().push(SwarmAppEvent::PeerConnected { peer_id, addr });
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 tracing::info!(%peer_id, "Peer disconnected");
                 self.peers.remove(&peer_id);
+                if let Some(ref rx) = self.event_rx {
+                    rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
+                }
             }
             _ => {}
         }
@@ -732,3 +770,12 @@ pub fn flux_topic(version: u32, kind: &str) -> String {
 pub fn dagknight_topic(version: u32, kind: &str) -> String {
     format!("/dagknight/{}/{}", version, kind)
 }
+
+/// Build a SIGIL-specific gossipsub topic string.
+/// Standard form: `/sigil/{network}/{kind}` e.g. `/sigil/g0/blocks`.
+pub fn sigil_topic(network: &str, kind: &str) -> String {
+    format!("/sigil/{}/{}", network, kind)
+}
+
+/// The canonical SIGIL block sync topic for network g0.
+pub const SIGIL_G0_BLOCKS_TOPIC: &str = "/sigil/g0/blocks";

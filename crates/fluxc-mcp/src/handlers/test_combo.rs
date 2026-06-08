@@ -74,6 +74,25 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_dev,
     );
+
+    registry.register(
+        ToolDef {
+            name: "flux_develop",
+            description: "THE unified cortex-driven development cycle: flux-rev snapshot → cortex AI review → auto-heal → test → provenance-sign → deploy. The single MCP tool for the complete AI-native dev loop. Replaces 7 separate tool calls.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "Package/crate (default: fluxc)"},
+                    "message": {"type": "string", "description": "Revision message for flux-rev"},
+                    "skip_ai": {"type": "boolean"},
+                    "skip_heal": {"type": "boolean"},
+                    "deploy": {"type": "boolean"},
+                    "webhook": {"type": "string", "description": "Webhook URL for CI notification"}
+                }
+            }),
+        },
+        flux_develop,
+    );
 }
 
 use fluxc_core::webhook;
@@ -369,5 +388,96 @@ fn flux_dev(args: &Value) -> String {
         "package": package, "all_ok": all_ok,
         "elapsed_secs": format!("{:.1}", elapsed), "steps": steps,
         "next": if !all_ok { "Run flux_dev again with skip_heal=false" } else { "All checks passed" },
+    }).to_string()
+}
+
+// ── flux_develop: unified cortex-driven development cycle ──
+
+fn flux_develop(args: &Value) -> String {
+    let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc");
+    let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("flux_develop auto-revision");
+    let skip_ai = args.get("skip_ai").and_then(|v| v.as_bool()).unwrap_or(false);
+    let skip_heal = args.get("skip_heal").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deploy = args.get("deploy").and_then(|v| v.as_bool()).unwrap_or(false);
+    let webhook_url = args.get("webhook").and_then(|v| v.as_str());
+
+    let mut steps = Vec::new();
+    let start = std::time::Instant::now();
+
+    // 1. Flux-rev snapshot
+    let rev = std::process::Command::new("flux-rev")
+        .args(["snapshot", "--message", message, "--author", "flux_develop"]).output();
+    let rev_ok = rev.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "snapshot", "ok": rev_ok,
+        "output": String::from_utf8_lossy(&rev.as_ref().map(|o| &o.stdout[..]).unwrap_or(&[])).lines().last().unwrap_or("").to_string()
+    }));
+
+    // 2. Build
+    let build = std::process::Command::new("fluxc")
+        .args(["build", "-p", package]).output();
+    let build_ok = build.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "build", "ok": build_ok}));
+
+    // 3. AI Cortex review
+    if !skip_ai {
+        let ai = std::process::Command::new("fluxc")
+            .args(["cortex-ai", "review", "--json"]).output();
+        steps.push(json!({"step": "cortex-ai", "ok": ai.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    // 4. Auto-heal if build failed
+    if !build_ok && !skip_heal {
+        let heal = std::process::Command::new("fluxc")
+            .args(["heal", &format!("crates/{}/src/lib.rs", package), "-n", "3"]).output();
+        let heal_ok = heal.as_ref().map(|o| o.status.success()).unwrap_or(false);
+        steps.push(json!({"step": "heal", "ok": heal_ok}));
+        // Rebuild after heal
+        if heal_ok {
+            let rebuild = std::process::Command::new("fluxc")
+                .args(["build", "-p", package]).output();
+            steps.push(json!({"step": "rebuild", "ok": rebuild.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+        }
+    }
+
+    // 5. Test
+    let test = std::process::Command::new("fluxc")
+        .args(["test", "-p", package]).output();
+    let test_ok = test.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    steps.push(json!({"step": "test", "ok": test_ok}));
+
+    // 6. Cortex summary
+    let cortex = std::process::Command::new("fluxc")
+        .args(["cortex-summary"]).output();
+    steps.push(json!({"step": "cortex", "ok": cortex.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+
+    // 7. Deploy
+    if deploy {
+        let dep = std::process::Command::new("fluxc")
+            .args(["release", package]).output();
+        steps.push(json!({"step": "deploy", "ok": dep.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
+    }
+
+    // 8. Webhook
+    if let Some(url) = webhook_url {
+        let payload = json!({"event":"flux_develop","package":package,"steps":steps});
+        let _ = std::process::Command::new("curl")
+            .args(["-s","-X","POST",url,"-H","Content-Type: application/json","-d",&payload.to_string(),"--max-time","5"])
+            .status();
+        steps.push(json!({"step": "webhook", "url": url}));
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let all_ok = steps.iter().all(|s| s["ok"].as_bool().unwrap_or(true));
+
+    // Fire internal webhook
+    fluxc_core::webhook::auto_dispatch("flux_develop", json!({
+        "package": package, "all_ok": all_ok, "elapsed_secs": elapsed, "steps": steps
+    }));
+
+    json!({
+        "package": package, "all_ok": all_ok,
+        "elapsed_secs": format!("{:.1}", elapsed), "steps": steps,
+        "cycle": "snapshot → build → cortex AI → heal → test → cortex summary → deploy → webhook",
+        "next": if !all_ok { "Check heal step — re-run to auto-fix" } else { "Development cycle complete ✓" },
     }).to_string()
 }

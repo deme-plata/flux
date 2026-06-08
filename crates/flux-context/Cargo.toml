@@ -14,3 +14,29 @@ description = "flux-context — measure and optimize how an AI agent spends its 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 1M-context plan Task 1: semantic chunking reuses the workspace dep DAG instead
+# of re-parsing manifests. flux-graph already resolves crates + path-deps + batches.
+flux-graph = { path = "../flux-graph" }
+# Task 2 context-diff: BLAKE3 content fingerprints (hash_bytes) + content-addressed
+# snapshot persistence (.flux-rev Store). Don't hand-roll a hasher.
+flux-rev = { path = "../flux-rev" }
+
+# Chunk-manifest writer: `flux-context-chunks [workspace_root]` → .whale/context/chunks.json
+[[bin]]
+name = "flux-context-chunks"
+path = "src/bin/flux-context-chunks.rs"
+
+# Context-diff: `flux-context-diff [workspace_root] [--save]` — diff vs latest snapshot
+[[bin]]
+name = "flux-context-diff"
+path = "src/bin/flux-context-diff.rs"
+
+# Context-watch daemon: `flux-context-watch [root] [--status|--once|--poll N]`
+[[bin]]
+name = "flux-context-watch"
+path = "src/bin/flux-context-watch.rs"
+
+# Context router: `flux-context-route [root] --task read|edit|refactor|review|audit|build|swarm`
+[[bin]]
+name = "flux-context-route"
+path = "src/bin/flux-context-route.rs"

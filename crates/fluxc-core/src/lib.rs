@@ -171,6 +171,29 @@ pub fn detect_and_build(config: &BuildConfig, extra: &[String]) {
     let start = std::time::Instant::now();
     BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // `--distributed` (and `--release`/`--package`) may arrive as SUBCOMMAND flags in
+    // `extra` (e.g. `fluxc build --distributed --package X`), which otherwise get passed
+    // verbatim to cargo and ignored by the config. Honor them here, independent of
+    // --no-cargo, and route to the supercluster coordinator.
+    if config.distributed || extra.iter().any(|a| a == "--distributed" || a == "--dist") {
+        let mut cfg = config.clone();
+        cfg.distributed = true;
+        if extra.iter().any(|a| a == "--release" || a == "-r") {
+            cfg.release = true;
+        }
+        let mut it = extra.iter();
+        while let Some(a) = it.next() {
+            if a == "--package" || a == "-p" {
+                if let Some(p) = it.next() {
+                    cfg.package = Some(p.clone());
+                }
+            } else if let Some(p) = a.strip_prefix("--package=") {
+                cfg.package = Some(p.to_string());
+            }
+        }
+        return distributed_build(&cfg);
+    }
+
     if config.no_cargo {
         if config.warm {
             println!("🔥 Warming dependency cache (cargo check --workspace)...");
@@ -979,6 +1002,9 @@ pub fn print_usage() {
     println!("  fluxc self-heal [MS]  Autonomous swarm failure detection + hot-swap recovery");
     println!("  fluxc p2p-worker      Run as a P2P mesh worker node");
     println!("  fluxc swarm           Swarm coordination commands");
+    println!("  fluxc fleet           Fleet status (Delta/Epsilon nodes)");
+    println!("  fluxc mesh            P2P mesh health report");
+    println!("  fluxc wallet          Open the TRON wallet in browser");
     println!("  fluxc os-stage        QuillonOS stage management\n");
     println!("Verification & Provenance:");
     println!("  fluxc verify-proof    Verify SQIsign artifact provenance");

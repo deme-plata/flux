@@ -20,6 +20,9 @@ flux-self-heal = { path = "../flux-self-heal" }
 flux-science = { path = "../flux-science" }
 flux-backend = { path = "../flux-backend" }
 flux-rev = { path = "../flux-rev" }
+# Verifiable build receipt for distributed builds: content-addressed (BLAKE3),
+# K-of-N sharded, mesh-distributable — reconciliation provenance, not raw rsync.
+flux-aether = { path = "../flux-aether" }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

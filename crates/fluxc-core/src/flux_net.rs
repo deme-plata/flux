@@ -436,6 +436,116 @@ impl FluxOcean {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v0.9: Fleet + Mesh health — CLI-facing status queries
+// ═══════════════════════════════════════════════════════════════
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+/// A fleet node as seen by the CLI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FleetNodeCli {
+    pub name: String,
+    pub online: bool,
+    pub height: u64,
+    pub version: String,
+    pub uptime_secs: u64,
+}
+
+/// Mesh health snapshot.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MeshHealthCli {
+    pub connected_peers: u32,
+    pub quality: String,
+    pub fan_out: u32,
+    pub blocks_received: u64,
+    pub avg_block_latency_ms: f64,
+    pub messages_processed: u64,
+    pub estimated_drop_rate: f64,
+    pub peer_heights: std::collections::HashMap<String, u64>,
+}
+
+/// Simple blocking HTTP GET returning body string (no external deps).
+fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
+    let addr = format!("{host}:{port}");
+    let mut stream = TcpStream::connect_timeout(
+        &addr.parse().map_err(|e| format!("parse: {e}"))?,
+        Duration::from_secs(3),
+    ).map_err(|e| format!("connect {addr}: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    let body = String::from_utf8_lossy(&buf);
+    // Find JSON body after headers
+    if let Some(start) = body.find('{') {
+        Ok(body[start..].to_string())
+    } else {
+        Err("no JSON body".into())
+    }
+}
+
+/// Query the fleet node status from API endpoints.
+pub fn fleet_status() -> Result<Vec<FleetNodeCli>, String> {
+    let peers: Vec<(&str, &str, u16)> = vec![
+        ("Delta", "5.79.79.158", 8181),
+        ("Epsilon", "89.149.241.126", 8181),
+    ];
+    let mut nodes = Vec::new();
+    for (name, host, port) in peers {
+        match http_get(host, port, "/api/v1/status") {
+            Ok(body) => {
+                let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                nodes.push(FleetNodeCli {
+                    name: name.into(), online: true,
+                    height: json.get("block_height").or_else(|| json.get("tip_height"))
+                        .and_then(|v| v.as_u64()).unwrap_or(0),
+                    version: json.get("version").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    uptime_secs: json.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
+                });
+            }
+            Err(_) => {
+                nodes.push(FleetNodeCli {
+                    name: name.into(), online: false,
+                    height: 0, version: String::new(), uptime_secs: 0,
+                });
+            }
+        }
+    }
+    Ok(nodes)
+}
+
+/// Read mesh health from the local serve or sigil-status feed.
+pub fn mesh_health() -> Result<MeshHealthCli, String> {
+    if let Ok(body) = http_get("127.0.0.1", 9800, "/sigil-status.json") {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            let st = json.get("status").or_else(|| json.as_object().map(|_| &json));
+            if let Some(st) = st {
+                let peers = st.get("peers").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                return Ok(MeshHealthCli {
+                    connected_peers: peers,
+                    quality: if peers >= 4 { "healthy" } else if peers >= 1 { "warming" } else { "empty" }.into(),
+                    fan_out: (peers as f64).sqrt().round() as u32,
+                    blocks_received: st.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+                    avg_block_latency_ms: 0.0,
+                    messages_processed: 0,
+                    estimated_drop_rate: 0.0,
+                    peer_heights: std::collections::HashMap::new(),
+                });
+            }
+        }
+    }
+    Ok(MeshHealthCli {
+        connected_peers: 0, quality: "empty".into(), fan_out: 0,
+        blocks_received: 0, avg_block_latency_ms: 0.0,
+        messages_processed: 0, estimated_drop_rate: 0.0,
+        peer_heights: std::collections::HashMap::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

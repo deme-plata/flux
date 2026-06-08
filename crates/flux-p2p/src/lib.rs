@@ -15,6 +15,11 @@ pub mod sap;
 pub mod x_algo;
 pub mod entanglement;
 pub mod swarm;
+pub mod cortex_optimizer;
+/// Content-addressed block backfill protocol (flux-sync over the gossip mesh).
+/// The reusable version of what sigil-top wired inline — any flux-p2p consumer
+/// gets verify-don't-trust history backfill, not just live gossip.
+pub mod backfill;
 
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -27,11 +32,32 @@ use swarm::{FluxSwarmManager, FluxSwarmConfig, TransportMode, PeerInfo};
 /// Consume via [`NetworkManager::drain_events`].
 pub use swarm::SwarmAppEvent;
 
+/// Re-export SIGIL block topic helpers for sigil-top integration.
+pub use swarm::{sigil_topic, SIGIL_G0_BLOCKS_TOPIC};
+
 /// Default bootstrap peers — always configured for out-of-the-box P2P.
 /// Delta (5.79.79.158) and Epsilon (89.149.241.126) are the core mesh.
 pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("delta",  "/ip4/5.79.79.158/tcp/9003"),
     ("epsilon","/ip4/89.149.241.126/tcp/9003"),
+];
+
+/// SIGIL g0 testnet bootstrap peers — port 9501 is the sigil-node P2P port.
+/// Use these when connecting to the SIGIL block mesh for sync.
+pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
+    ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501"),
+    ("delta-sigil",   "/ip4/5.79.79.158/tcp/9501"),
+    ("gamma-sigil",   "/ip4/109.205.176.60/tcp/9501"),
+    ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501"),
+];
+
+/// SIGIL gossipsub topics — matches sigil-net crate constants.
+pub const SIGIL_TOPICS: &[&str] = &[
+    "/sigil/g0/blocks",
+    "/sigil/g0/peer-heights",
+    "/sigil/g0/tip-proofs",
+    "/sigil/g0/txs",
+    "/sigil/g0/release",
 ];
 
 /// Global P2P network manager — thread-safe, cloneable.
@@ -45,6 +71,9 @@ pub struct NetworkManager {
     /// gossipsub messages, peer connect/disconnect, listen-address updates.
     /// Drain via [`NetworkManager::drain_events`].
     app_events: Arc<RwLock<Vec<SwarmAppEvent>>>,
+    /// Notifier signalled when new events are pushed to app_events.
+    /// Subscribers use this to wake instead of polling.
+    event_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Commands sent to the swarm event loop.
@@ -61,6 +90,10 @@ struct NetworkInner {
     x_algo_scores: x_algo::CrossScoreTable,
     /// Cached peer info updated by the swarm event loop.
     peers: Vec<PeerInfo>,
+    /// v0.8: Mesh health metrics for SIGIL fleet dashboard
+    mesh_health: MeshHealth,
+    /// v0.8: Cortex-driven autonomous P2P optimizer
+    cortex_opt: cortex_optimizer::CortexP2POptimizer,
 }
 
 /// Configuration for the Flux P2P network node.
@@ -102,6 +135,7 @@ impl Default for NetworkConfig {
 impl NetworkManager {
     /// Create a new NetworkManager with the given configuration.
     pub fn new(config: NetworkConfig) -> Self {
+        let node_id = config.node_id.clone();
         NetworkManager {
             inner: Arc::new(RwLock::new(NetworkInner {
                 started: false,
@@ -110,10 +144,13 @@ impl NetworkManager {
                 sap_scores: sap::ScoreTable::new(),
                 x_algo_scores: x_algo::CrossScoreTable::new(),
                 peers: Vec::new(),
+                mesh_health: MeshHealth::new(),
+                cortex_opt: cortex_optimizer::CortexP2POptimizer::new(&node_id),
             })),
             config,
             cmd_tx: None,
             app_events: Arc::new(RwLock::new(Vec::new())),
+            event_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -180,6 +217,7 @@ impl NetworkManager {
         // Shared state for the event loop to update
         let inner = Arc::clone(&self.inner);
         let node_id = self.config.node_id.clone();
+        let event_notify = Arc::clone(&self.event_notify);
 
         // Spawn the swarm event loop on tokio
         tokio::spawn(async move {
@@ -258,6 +296,9 @@ impl NetworkManager {
                     event = swarm.swarm.select_next_some() => {
                         swarm.handle_swarm_event(event);
 
+                        // Wake subscribers — new events may have been pushed
+                        event_notify.notify_one();
+
                         // Update shared peer state
                         let peers: Vec<PeerInfo> = swarm.connected_peers()
                             .into_iter().cloned().collect();
@@ -317,6 +358,82 @@ impl NetworkManager {
         std::mem::take(&mut *guard)
     }
 
+    /// Subscribe to a specific gossipsub topic. Returns a non-blocking receiver
+    /// that yields `(topic, Vec<u8>)` tuples for each message on that topic.
+    /// Event-driven — no polling delay. Call `try_recv()` in your event loop.
+    ///
+    /// Uses a broadcast fan-out: the swarm's event buffer is shared, and the
+    /// subscription task wakes on a notifier instead of sleeping. Multiple
+    /// subscribers can coexist; each gets its own copy of matching messages.
+    pub fn subscribe(&self, topic_filter: &str) -> tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let filter = topic_filter.to_string();
+        let events = self.app_events.clone();
+        let notify = self.event_notify.clone();
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+                let mut guard = events.write();
+                let matching: Vec<(String, Vec<u8>)> = guard.iter().filter_map(|ev| {
+                    match ev {
+                        SwarmAppEvent::GossipsubMessage { topic, data, .. } if *topic == filter => {
+                            Some((topic.clone(), data.clone()))
+                        }
+                        _ => None,
+                    }
+                }).collect();
+                guard.retain(|ev| {
+                    !matches!(ev, SwarmAppEvent::GossipsubMessage { topic, .. } if *topic == filter)
+                });
+                drop(guard);
+                for msg in matching {
+                    if tx.send(msg).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        rx
+    }
+
+    /// Synchronous wrapper: block the calling thread until a message arrives
+    /// on the given topic. For use in non-async contexts (e.g. sigil-top's
+    /// TUI event loop). Returns `None` if the subscription was dropped.
+    pub fn subscribe_blocking(&self, topic_filter: &str) -> std::sync::mpsc::Receiver<(String, Vec<u8>)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let filter = topic_filter.to_string();
+        let events = self.app_events.clone();
+        let notify = self.event_notify.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time().build().unwrap();
+            rt.block_on(async move {
+                loop {
+                    notify.notified().await;
+                    let mut guard = events.write();
+                    let matching: Vec<(String, Vec<u8>)> = guard.iter().filter_map(|ev| {
+                        match ev {
+                            SwarmAppEvent::GossipsubMessage { topic, data, .. } if *topic == filter => {
+                                Some((topic.clone(), data.clone()))
+                            }
+                            _ => None,
+                        }
+                    }).collect();
+                    guard.retain(|ev| {
+                        !matches!(ev, SwarmAppEvent::GossipsubMessage { topic, .. } if *topic == filter)
+                    });
+                    drop(guard);
+                    for msg in matching {
+                        if tx.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        });
+        rx
+    }
+
     pub fn publish(&self, topic: &str, data: Vec<u8>) -> Result<(), String> {
         match &self.cmd_tx {
             Some(tx) => {
@@ -327,6 +444,137 @@ impl NetworkManager {
             }
             None => Err("NetworkManager not started".into()),
         }
+    }
+
+    /// v0.7.0: Publish a compile request to the fleet. Build nodes subscribed
+    /// to /flux/1/compile-request pick it up, compile the package, and publish
+    /// results to /flux/1/compile-result with the same request_id.
+    /// Returns the request_id so the caller can correlate results.
+    pub fn request_compile(&self, package: &str, workspace: &str, release: bool) -> Result<String, String> {
+        let request_id = format!("compile-{}-{}",
+            package,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let payload = serde_json::json!({
+            "request_id": request_id,
+            "package": package,
+            "workspace": workspace,
+            "release": release,
+            "requester": self.config.node_id,
+            "ts_unix": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        });
+        let data = serde_json::to_vec(&payload)
+            .map_err(|e| format!("json encode: {e}"))?;
+        self.publish("/flux/1/compile-request", data)?;
+        Ok(request_id)
+    }
+
+    /// v0.7.0: Publish a compile result back to the fleet. Build nodes call
+    /// this after completing a compile requested via /flux/1/compile-request.
+    pub fn publish_compile_result(
+        &self,
+        request_id: &str,
+        package: &str,
+        success: bool,
+        elapsed_ms: u64,
+        binary_path: Option<&str>,
+        blake3_hex: Option<&str>,
+    ) -> Result<(), String> {
+        let payload = serde_json::json!({
+            "request_id": request_id,
+            "package": package,
+            "success": success,
+            "elapsed_ms": elapsed_ms,
+            "binary_path": binary_path,
+            "blake3_hex": blake3_hex,
+            "builder": self.config.node_id,
+            "ts_unix": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        });
+        let data = serde_json::to_vec(&payload)
+            .map_err(|e| format!("json encode: {e}"))?;
+        self.publish("/flux/1/compile-result", data)
+    }
+
+    /// v0.7.0: Subscribe to compile results matching a specific request_id.
+    /// Returns a receiver that yields (request_id, package, success, elapsed_ms).
+    pub fn subscribe_compile_results(
+        &self,
+        request_id_filter: &str,
+    ) -> std::sync::mpsc::Receiver<(String, String, bool, u64)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let filter = request_id_filter.to_string();
+        let events = self.app_events.clone();
+        let notify = self.event_notify.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time().build().unwrap();
+            rt.block_on(async move {
+                loop {
+                    notify.notified().await;
+                    let mut guard = events.write();
+                    let matching: Vec<(String, String, bool, u64)> = guard.iter().filter_map(|ev| {
+                        match ev {
+                            SwarmAppEvent::GossipsubMessage { topic, data, .. }
+                                if topic == "/flux/1/compile-result" =>
+                            {
+                                if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(data) {
+                                    let rid = payload.get("request_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if rid == filter {
+                                        let pkg = payload.get("package")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let ok = payload.get("success")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+                                        let ms = payload.get("elapsed_ms")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        return Some((rid.to_string(), pkg.to_string(), ok, ms));
+                                    }
+                                }
+                                None
+                            }
+                            _ => None,
+                        }
+                    }).collect();
+                    guard.retain(|ev| {
+                        !matches!(ev, SwarmAppEvent::GossipsubMessage { topic, .. } if topic == "/flux/1/compile-result")
+                    });
+                    drop(guard);
+                    for msg in matching {
+                        if tx.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        });
+        rx
+    }
+
+    /// v0.7.0: Push a block sync progress update to the application event
+    /// channel. Sigil-top calls this from its block sync loop so the TUI
+    /// can render a live sync gauge without polling.
+    pub fn push_sync_progress(&self, height: u64, hash_hex: &str, peer_best_height: u64, total_synced: u64) {
+        let peer_count = self.inner.read().peers.len();
+        self.app_events.write().push(SwarmAppEvent::SyncProgress {
+            height,
+            hash_hex: hash_hex.to_string(),
+            peer_best_height,
+            total_synced,
+            peer_count,
+        });
     }
 
     /// Check if the network is running.
@@ -366,9 +614,53 @@ impl NetworkManager {
         self.inner.write().dagknight_round = round;
     }
 
+    /// Create a NetworkManager pre-configured for the Flux compile mesh.
+    /// Uses port 9003, compile-request/compile-result topics, and the
+    /// Delta+Epsilon bootstrap. For distributed compilation across the fleet.
+    pub fn for_fleet_compile(node_name: &str) -> Self {
+        let mut config = NetworkConfig::default();
+        config.node_id = format!("flux-compile-{node_name}-{}", std::process::id());
+        config.listen_addr = "/ip4/0.0.0.0/tcp/0".into(); // ephemeral
+        config.gossipsub_topics = vec![
+            "/flux/1/compile-request".into(),
+            "/flux/1/compile-result".into(),
+            "/flux/1/cache-invalidate".into(),
+            "/flux/1/rev-snapshot".into(),
+        ];
+        config.bootstrap_peers = DEFAULT_BOOTSTRAP_PEERS.iter()
+            .map(|(_, addr)| addr.to_string())
+            .collect();
+        config.dagknight_enabled = false;
+        config.sap_enabled = false;
+        config.x_algo_enabled = false;
+        config.entanglement_enabled = false;
+        Self::new(config)
+    }
+
+    /// Create a NetworkManager pre-configured for the SIGIL block mesh.
+    /// Uses port 9501, SIGIL topics, and the 4-node testnet bootstrap.
+    pub fn for_sigil(node_name: &str) -> Self {
+        let mut config = NetworkConfig::default();
+        config.node_id = format!("sigil-top-{node_name}-{}", std::process::id());
+        config.listen_addr = "/ip4/0.0.0.0/tcp/0".into(); // ephemeral
+        config.gossipsub_topics = SIGIL_TOPICS.iter().map(|s| s.to_string()).collect();
+        config.bootstrap_peers = SIGIL_BOOTSTRAP_PEERS.iter()
+            .map(|(_, addr)| addr.to_string())
+            .collect();
+        // Disable DAGKnight/SAP/X-Algo for light clients — only need gossipsub
+        config.dagknight_enabled = false;
+        config.sap_enabled = false;
+        config.x_algo_enabled = false;
+        config.entanglement_enabled = false;
+        Self::new(config)
+    }
+
     /// Get a summary of the network state (for MCP tools / stats).
     pub fn summary(&self) -> NetworkSummary {
         let inner = self.inner.read();
+        let mut health = inner.mesh_health.clone();
+        health.connected_peers = inner.peer_count;
+        health.update_quality();
         NetworkSummary {
             node_id: self.config.node_id.clone(),
             started: inner.started,
@@ -379,7 +671,97 @@ impl NetworkManager {
             listen_addr: self.config.listen_addr.clone(),
             topics: self.config.gossipsub_topics.clone(),
             bootstrap_peers: self.config.bootstrap_peers.clone(),
+            mesh_health: Some(health),
         }
+    }
+
+    /// v0.8: Get live mesh health metrics for SIGIL fleet dashboard.
+    pub fn mesh_health(&self) -> MeshHealth {
+        let inner = self.inner.read();
+        let mut h = inner.mesh_health.clone();
+        h.connected_peers = inner.peer_count;
+        h.update_quality();
+        h
+    }
+
+    /// v0.8: Record a block propagation latency sample.
+    pub fn record_block_latency(&self, latency_ms: f64, peer_height: Option<u64>) {
+        let mut inner = self.inner.write();
+        inner.mesh_health.record_latency(latency_ms);
+        inner.mesh_health.messages_processed += 1;
+        if let Some(h) = peer_height {
+            inner.mesh_health.peer_heights.insert("last".into(), h);
+        }
+    }
+
+    // ── v0.8: Cortex-driven autonomous P2P optimization ──
+
+    /// Feed observed P2P metrics into the Cortex optimizer.
+    /// Call periodically (every few seconds) with current SAP scores and mesh state.
+    pub fn observe_cortex(&self, metrics: &cortex_optimizer::P2PMetrics) {
+        self.inner.write().cortex_opt.observe(metrics);
+    }
+
+    /// Run the Cortex optimization loop against current P2P state.
+    /// Returns recommended SAP/X-Algo weight adjustments, batch config,
+    /// predicted mesh health, and preferred compile nodes.
+    ///
+    /// The caller should apply the returned weights to SAP/X-Algo scorers
+    /// and update the batch configuration for optimal throughput.
+    pub fn optimize_cortex(
+        &self,
+        preset: flux_optimize::OptimizationPreset,
+    ) -> cortex_optimizer::CortexP2PResult {
+        // Collect current metrics
+        let inner = self.inner.read();
+        let peer_count = inner.peer_count;
+        let mesh = inner.mesh_health.clone();
+        drop(inner);
+
+        // Build current metrics snapshot
+        let mut sap_map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        sap_map.insert("self".to_string(), 0.8);
+
+        let metrics = cortex_optimizer::collect_metrics(
+            peer_count,
+            &sap_map,
+            &mesh,
+            &swarm::BatchConfig::default(),
+            100.0,
+        );
+
+        // Run the optimizer
+        let mut inner = self.inner.write();
+        inner.cortex_opt.observe(&metrics);
+        inner.cortex_opt.optimize(&metrics, preset)
+    }
+
+    /// Get a summary of Cortex optimization activity for this node.
+    pub fn cortex_summary(&self) -> cortex_optimizer::CortexP2PSummary {
+        self.inner.read().cortex_opt.summary()
+    }
+
+    /// Apply optimized weights from a CortexP2PResult to the live SAP scorer.
+    /// Call this after optimize_cortex() to enact the recommendations.
+    pub fn apply_cortex_weights(&self, result: &cortex_optimizer::CortexP2PResult) {
+        let mut inner = self.inner.write();
+        // Apply SAP weights by rebuilding the score table with new weights
+        let w = &result.sap_weights;
+        inner.sap_scores = sap::ScoreTable::with_weights(sap::SAPWeights {
+            contribution_weight: w.contribution,
+            latency_weight: w.latency,
+            stake_weight: w.stake,
+            accuracy_weight: w.accuracy,
+            uptime_weight: w.uptime,
+        });
+        // Update mesh health predictions
+        inner.mesh_health.quality = if result.predicted_peer_count >= 8 {
+            "healthy".into()
+        } else if result.predicted_peer_count >= 2 {
+            "warming".into()
+        } else {
+            "empty".into()
+        };
     }
 }
 
@@ -395,6 +777,54 @@ pub struct NetworkSummary {
     pub listen_addr: String,
     pub topics: Vec<String>,
     pub bootstrap_peers: Vec<String>,
+    /// v0.8: Mesh health metrics for SIGIL fleet dashboard
+    pub mesh_health: Option<MeshHealth>,
+}
+
+/// v0.8: Aggregated mesh quality metrics — feeds sigil-top fleet panel.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct MeshHealth {
+    /// How many peers we're connected to
+    pub connected_peers: u32,
+    /// Mesh quality: healthy / warming / empty
+    pub quality: String,
+    /// Estimated gossip message drop rate (0.0–1.0)
+    pub estimated_drop_rate: f64,
+    /// Average block propagation latency in milliseconds
+    pub avg_block_latency_ms: f64,
+    /// Blocks received via gossip in the last window
+    pub blocks_received: u64,
+    /// Total gossip messages processed
+    pub messages_processed: u64,
+    /// Fan-out derived from sqrt(peers)
+    pub fan_out: u32,
+    /// v0.8: Known peer heights — keyed by peer_id
+    pub peer_heights: std::collections::HashMap<String, u64>,
+    /// v0.8: Block propagation latency samples (last N blocks)
+    pub recent_latencies_ms: Vec<f64>,
+}
+
+impl MeshHealth {
+    pub fn new() -> Self {
+        Self { quality: "warming".into(), ..Default::default() }
+    }
+    /// Update quality string based on peer count
+    pub fn update_quality(&mut self) {
+        self.fan_out = (self.connected_peers as f64).sqrt().round() as u32;
+        self.quality = if self.connected_peers >= 8 { "healthy".into() }
+            else if self.connected_peers >= 2 { "warming".into() }
+            else { "empty".into() };
+    }
+    /// Record a block propagation latency sample
+    pub fn record_latency(&mut self, latency_ms: f64) {
+        self.recent_latencies_ms.push(latency_ms);
+        if self.recent_latencies_ms.len() > 20 {
+            self.recent_latencies_ms.remove(0);
+        }
+        self.avg_block_latency_ms = self.recent_latencies_ms.iter().sum::<f64>()
+            / self.recent_latencies_ms.len() as f64;
+        self.blocks_received += 1;
+    }
 }
 
 // ── P2P multiaddr parsing helpers ──

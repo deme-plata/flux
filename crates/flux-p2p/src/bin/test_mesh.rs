@@ -5,7 +5,7 @@
 
 use flux_p2p::swarm::{FluxSwarmManager, FluxSwarmConfig, TransportMode};
 use std::time::{Duration, Instant};
-use libp2p::{Multiaddr, PeerId, swarm::SwarmEvent};
+use libp2p::{Multiaddr, swarm::SwarmEvent};
 use libp2p::futures::StreamExt;
 
 #[tokio::main]

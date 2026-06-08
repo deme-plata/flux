@@ -35,6 +35,65 @@ use libp2p::futures::StreamExt;
 /// Request and response payloads are opaque `Vec<u8>` — flux-p2p stays
 /// domain-agnostic; the application defines block types and encodes to bytes.
 pub const BACKFILL_PROTOCOL: &str = "/sigil/backfill/1";
+
+/// Max request-response payload (request OR response), in bytes. 64 MiB — far above
+/// the built-in cbor codec's hardcoded 10 MiB response cap, so backfill can ship big
+/// block-range chunks point-to-point.
+pub const BACKFILL_MAX_MSG: u64 = 64 * 1024 * 1024;
+
+/// Raw opaque codec for the backfill request-response protocol: payloads are already
+/// application-serialized `Vec<u8>`, so we just length-bound + read-to-end (the
+/// substream is closed after each write, signalling end). No CBOR wrapping; cap is
+/// [`BACKFILL_MAX_MSG`] (vs the built-in cbor codec's fixed 10 MiB).
+#[derive(Clone, Default)]
+pub struct BackfillCodec;
+
+#[async_trait::async_trait]
+impl request_response::Codec for BackfillCodec {
+    type Protocol = StreamProtocol;
+    type Request = Vec<u8>;
+    type Response = Vec<u8>;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+        let mut v = Vec::new();
+        io.take(BACKFILL_MAX_MSG).read_to_end(&mut v).await?;
+        Ok(v)
+    }
+
+    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+        let mut v = Vec::new();
+        io.take(BACKFILL_MAX_MSG).read_to_end(&mut v).await?;
+        Ok(v)
+    }
+
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Vec<u8>) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+        io.write_all(&req).await?;
+        io.close().await?;
+        Ok(())
+    }
+
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, resp: Vec<u8>) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+        io.write_all(&resp).await?;
+        io.close().await?;
+        Ok(())
+    }
+}
 // ═══════════════════════════════════════════════════════════════
 // Behaviour
 // ═══════════════════════════════════════════════════════════════
@@ -47,7 +106,7 @@ pub struct FluxBehaviour {
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     /// Point-to-point backfill (CBOR-coded, opaque Vec<u8> payloads).
-    pub request_response: request_response::cbor::Behaviour<Vec<u8>, Vec<u8>>,
+    pub request_response: request_response::Behaviour<BackfillCodec>,
 }
 
 #[derive(Debug)]
@@ -403,10 +462,12 @@ impl FluxSwarmManager {
             .with_timeout(Duration::from_secs(5));
         let ping = ping::Behaviour::new(ping_config);
 
-        // Build request-response (point-to-point backfill). libp2p's built-in
-        // CBOR codec; payloads are opaque Vec<u8> so flux-p2p stays
-        // domain-agnostic. 30s request timeout.
-        let request_response = request_response::cbor::Behaviour::<Vec<u8>, Vec<u8>>::new(
+        // Build request-response (point-to-point backfill). Custom BackfillCodec
+        // (raw opaque Vec<u8>, 64 MiB cap) instead of libp2p's built-in cbor codec,
+        // whose response cap is a hardcoded 10 MiB const — too small for big
+        // backfill chunks. 30s request timeout.
+        let request_response = request_response::Behaviour::<BackfillCodec>::with_codec(
+            BackfillCodec,
             [(StreamProtocol::new(BACKFILL_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(30)),

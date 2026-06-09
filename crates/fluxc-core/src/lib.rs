@@ -13,7 +13,7 @@ pub mod webhook;
 pub mod webhook_inbound;
 pub mod predict;
 pub mod qspec;
-pub mod quantum_architect;
+pub use ::flux_quantum_architect as quantum_architect; // P1: extracted to own crate; re-export keeps fluxc_core::quantum_architect::* stable
 pub mod cortex;
 pub mod self_heal;
 pub mod benchmark;

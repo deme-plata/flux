@@ -69,6 +69,20 @@ pub const SIGIL_TOPICS: &[&str] = &[
     "/sigil/g0/release",
 ];
 
+/// Extract the `/ip4/<ip>/tcp/<port>` (or ip6) endpoint prefix from a multiaddr string,
+/// dropping any `/p2p/<id>` suffix. Used for ENDPOINT-based bootstrap dedup that's robust
+/// to peer-id rotation: a node that doesn't persist its libp2p identity changes its id on
+/// every restart, so id-based matching breaks — but the ip:port endpoint is stable.
+fn ip_tcp_endpoint(ma: &str) -> Option<String> {
+    let p: Vec<&str> = ma.split('/').collect();
+    // ["", "ip4"|"ip6", "<ip>", "tcp", "<port>", ...]
+    if p.len() >= 5 && (p[1] == "ip4" || p[1] == "ip6") && p[3] == "tcp" {
+        Some(format!("/{}/{}/tcp/{}", p[1], p[2], p[4]))
+    } else {
+        None
+    }
+}
+
 /// Global P2P network manager — thread-safe, cloneable.
 /// Wraps a tokio task running the real libp2p FluxSwarmManager.
 pub struct NetworkManager {
@@ -305,22 +319,33 @@ impl NetworkManager {
                         // a steady self-heal otherwise. (No backoff: 4 cheap dials/5s is fine, and
                         // a thin pool must recover promptly, not exponentially slowly.)
                         if !swarm.bootstrap_peers_cache.is_empty() {
-                            // connected_peers() -> Vec<&PeerInfo>; PeerInfo.peer_id is a String,
-                            // so compare against the bootstrap addr's /p2p/<id> as a String.
-                            let connected: std::collections::HashSet<String> =
-                                swarm.connected_peers().into_iter().map(|pi| pi.peer_id.clone()).collect();
+                            // v0.30 (connections fixed for good): dedup by ENDPOINT (ip4+tcp), NOT
+                            // peer-id — bootstrap sigil-nodes that don't persist their libp2p identity
+                            // ROTATE their id every restart, so a hardcoded /p2p/<id> goes stale and
+                            // the dial is rejected on mismatch (the node capped at 3/4 despite all
+                            // bootstraps being up). Build the set of connected /ip4/_/tcp/_ endpoints;
+                            // for any bootstrap endpoint NOT connected, dial the BARE address (strip
+                            // /p2p/) — we reach WHOEVER is listening there regardless of their current
+                            // id, and Identify learns the real id post-handshake (Kademlia adopts it).
+                            // Immune to id rotation; a no-op at full mesh.
+                            let connected_eps: std::collections::HashSet<String> =
+                                swarm.connected_peers().into_iter()
+                                    .filter_map(|pi| ip_tcp_endpoint(&pi.multiaddr)).collect();
                             for addr in &swarm.bootstrap_peers_cache.clone() {
-                                let already = addr.iter().find_map(|p| match p {
-                                    libp2p::multiaddr::Protocol::P2p(id) => Some(id.to_string()),
-                                    _ => None,
-                                }).is_some_and(|id| connected.contains(&id));
-                                if already { continue; }
-                                if let Err(e) = swarm.swarm.dial(addr.clone()) {
-                                    tracing::debug!(%addr, %e, "bootstrap re-dial failed (will retry)");
+                                let ep = ip_tcp_endpoint(&addr.to_string());
+                                if let Some(ref e) = ep {
+                                    if connected_eps.contains(e) { continue; } // already connected here
+                                }
+                                let target = ep.clone().unwrap_or_else(|| addr.to_string());
+                                match target.parse::<libp2p::Multiaddr>() {
+                                    Ok(ma) => if let Err(e) = swarm.swarm.dial(ma) {
+                                        tracing::debug!(%target, %e, "bootstrap bare re-dial failed (will retry)");
+                                    },
+                                    Err(e) => tracing::debug!(%target, %e, "bad bootstrap endpoint"),
                                 }
                             }
-                            if connected.is_empty() {
-                                tracing::warn!("no connected peers — re-dialing all bootstrap");
+                            if swarm.connected_peers().is_empty() {
+                                tracing::warn!("no connected peers — re-dialing all bootstrap (bare)");
                             }
                         }
                     }
@@ -719,9 +744,18 @@ impl NetworkManager {
         config.node_id = format!("sigil-top-{node_name}-{}", std::process::id());
         config.listen_addr = "/ip4/0.0.0.0/tcp/0".into(); // ephemeral
         config.gossipsub_topics = SIGIL_TOPICS.iter().map(|s| s.to_string()).collect();
-        config.bootstrap_peers = SIGIL_BOOTSTRAP_PEERS.iter()
-            .map(|(_, addr)| addr.to_string())
-            .collect();
+        // SIGIL_BOOTSTRAP env override (comma-separated multiaddrs, each WITH /p2p/<PeerId>):
+        // user-supplied peers are tried FIRST, then the built-in fleet. Lets an operator whose
+        // network can't reach the default nodes (firewall/NAT on tcp/9501, or a private fleet)
+        // point at a reachable bootstrap and escape "0 peers" without a rebuild.
+        let mut bootstrap: Vec<String> = Vec::new();
+        if let Ok(extra) = std::env::var("SIGIL_BOOTSTRAP") {
+            for a in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                bootstrap.push(a.to_string());
+            }
+        }
+        bootstrap.extend(SIGIL_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
+        config.bootstrap_peers = bootstrap;
         // Disable DAGKnight/SAP/X-Algo for light clients — only need gossipsub
         config.dagknight_enabled = false;
         config.sap_enabled = false;

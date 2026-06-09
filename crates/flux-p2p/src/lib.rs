@@ -44,11 +44,20 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 
 /// SIGIL g0 testnet bootstrap peers — port 9501 is the sigil-node P2P port.
 /// Use these when connecting to the SIGIL block mesh for sync.
+///
+/// ⚠️ Each multiaddr MUST carry the node's `/p2p/<PeerId>` suffix. A bare
+/// `/ip4/.../tcp/9501` opens a transport connection but libp2p/Kademlia can't
+/// register the peer without its PeerId, so `peer_count` stays 0, the
+/// peer-gated backfill never starts, and sync sits at ~0 blk/s (root-caused
+/// 2026-06-09). Epsilon's id pulled live from `journalctl -u sigil-node`.
 pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
-    ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501"),
-    ("delta-sigil",   "/ip4/5.79.79.158/tcp/9501"),
-    ("gamma-sigil",   "/ip4/109.205.176.60/tcp/9501"),
-    ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501"),
+    // All four ids confirmed LIVE from the [p2p-sync] connection log (libp2p verifies
+    // the PeerId during the Noise handshake, so a connected id is authoritative — more
+    // reliable than `journalctl`, which can hold a stale id from an old node restart).
+    ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
+    ("delta-sigil",   "/ip4/5.79.79.158/tcp/9501/p2p/12D3KooWPTkN7eVEfjWBkojcecTEsGr1udU2VgjxxbDSiQpDja9b"),
+    ("gamma-sigil",   "/ip4/109.205.176.60/tcp/9501/p2p/12D3KooWGr61P7jks3NjPMQkRa8Qmc2TNVyWYXm24BxZLtK675gd"),
+    ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501/p2p/12D3KooWSJxrXTttxp6WVPTWxAZJG1JQ46zSRF1C6gY6LLtyVMuA"),
 ];
 
 /// SIGIL gossipsub topics — matches sigil-net crate constants.

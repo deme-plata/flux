@@ -572,12 +572,99 @@ fn merge_manifest(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// P2P worker stub — placeholder for the future libp2p notification layer.
+// P2P worker — v6.0: real libp2p runtime (drives flux-p2p NetworkManager).
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn run_p2p_worker() {
-    println!("⚡ fluxc p2p-worker — placeholder (HTTPS auto-update covers distribution)");
-    println!("   Use `fluxc auto-update` for the actual update channel.");
+    // v6.0: Activate runtime — drive the real libp2p NetworkManager from flux-p2p.
+    // run_p2p_worker is sync (called straight from main.rs), so we own a tokio
+    // runtime here; the swarm event loop is spawned inside NetworkManager::start.
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("❌ fluxc p2p-worker: failed to build tokio runtime: {}", e);
+            return;
+        }
+    };
+    rt.block_on(run_p2p_worker_async());
+}
+
+/// The actual worker: build a NetworkManager (env-configurable), start the real
+/// libp2p swarm, then loop draining app-events + reporting peer count until Ctrl-C.
+async fn run_p2p_worker_async() {
+    use flux_p2p::{NetworkConfig, NetworkManager, SwarmAppEvent};
+
+    // Base config + env overrides:
+    //   FLUX_NODE_ID, FLUX_LISTEN_ADDR, FLUX_BOOTSTRAP_PEERS (comma-separated multiaddrs)
+    let mut config = NetworkConfig::default();
+    if let Ok(id) = std::env::var("FLUX_NODE_ID") {
+        if !id.trim().is_empty() {
+            config.node_id = id;
+        }
+    }
+    if let Ok(addr) = std::env::var("FLUX_LISTEN_ADDR") {
+        if !addr.trim().is_empty() {
+            config.listen_addr = addr;
+        }
+    }
+    if let Ok(peers) = std::env::var("FLUX_BOOTSTRAP_PEERS") {
+        let list: Vec<String> = peers
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.is_empty() {
+            config.bootstrap_peers = list;
+        }
+    }
+
+    println!("⚡ fluxc p2p-worker — activating real libp2p runtime");
+    println!("   node_id   = {}", config.node_id);
+    println!("   listen    = {}", config.listen_addr);
+    println!("   bootstrap = {} peer(s)", config.bootstrap_peers.len());
+    println!("   topics    = {}", config.gossipsub_topics.len());
+
+    let mut net = NetworkManager::new(config);
+    if let Err(e) = net.start().await {
+        eprintln!("❌ fluxc p2p-worker: NetworkManager::start failed: {}", e);
+        return;
+    }
+    println!("✅ P2P swarm started — entering worker loop (Ctrl-C to stop)");
+
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut last_peer_count = u32::MAX;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n⏹  Ctrl-C received — shutting down P2P worker");
+                let _ = net.stop().await;
+                break;
+            }
+            _ = ticker.tick() => {
+                for ev in net.drain_events() {
+                    match ev {
+                        SwarmAppEvent::GossipsubMessage { topic, from, data, .. } =>
+                            println!("📨 gossip [{}] {} bytes from {}", topic, data.len(), from),
+                        SwarmAppEvent::PeerConnected { peer_id, addr } =>
+                            println!("🔗 peer connected: {} ({})", peer_id, addr),
+                        SwarmAppEvent::PeerDisconnected { peer_id } =>
+                            println!("✂️  peer disconnected: {}", peer_id),
+                        SwarmAppEvent::NewListenAddr(addr) =>
+                            println!("📍 listening on {}", addr),
+                        SwarmAppEvent::PeerIdentified { peer_id, agent_version, .. } =>
+                            println!("🪪 peer identified: {} ({})", peer_id, agent_version),
+                        _ => {}
+                    }
+                }
+                let pc = net.peer_count();
+                if pc != last_peer_count {
+                    println!("👥 peers: {}", pc);
+                    last_peer_count = pc;
+                }
+            }
+        }
+    }
+    println!("👋 fluxc p2p-worker stopped");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

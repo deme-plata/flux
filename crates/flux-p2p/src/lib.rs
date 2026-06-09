@@ -281,11 +281,11 @@ impl NetworkManager {
                 std::time::Duration::from_millis(swarm.batch_config.flush_interval_ms)
             );
 
-            // Connection retry timer — exponential backoff for bootstrap peers
+            // v0.28: bootstrap MESH-MAINTENANCE timer — steady 5s; re-dials MISSING peers
+            // (not only when the pool is empty). See the retry arm below.
             let mut retry_interval = tokio::time::interval(
                 std::time::Duration::from_secs(5)
             );
-            let mut retry_backoff_secs: u64 = 5;
 
             loop {
                 tokio::select! {
@@ -296,23 +296,32 @@ impl NetworkManager {
 
                     // Connection retry — exponential backoff
                     _ = retry_interval.tick() => {
-                        let peer_count = swarm.connected_peers().len();
-                        if peer_count == 0 && !swarm.bootstrap_peers_cache.is_empty() {
-                            tracing::warn!(
-                                backoff_secs = retry_backoff_secs,
-                                "No connected peers — retrying bootstrap connections"
-                            );
+                        // v0.28 MESH-MAINTENANCE FIX (connections issue): re-dial any bootstrap
+                        // peer that ISN'T currently connected — every tick, not only when
+                        // peer_count==0. Before this, a dropped bootstrap peer (e.g. 4→3) was
+                        // never re-connected while others remained, so the pool silently thinned
+                        // toward a single point of failure (the "connections issue"). Connected
+                        // peers are skipped via their /p2p/<id>, so it's a no-op at full mesh and
+                        // a steady self-heal otherwise. (No backoff: 4 cheap dials/5s is fine, and
+                        // a thin pool must recover promptly, not exponentially slowly.)
+                        if !swarm.bootstrap_peers_cache.is_empty() {
+                            // connected_peers() -> Vec<&PeerInfo>; PeerInfo.peer_id is a String,
+                            // so compare against the bootstrap addr's /p2p/<id> as a String.
+                            let connected: std::collections::HashSet<String> =
+                                swarm.connected_peers().into_iter().map(|pi| pi.peer_id.clone()).collect();
                             for addr in &swarm.bootstrap_peers_cache.clone() {
+                                let already = addr.iter().find_map(|p| match p {
+                                    libp2p::multiaddr::Protocol::P2p(id) => Some(id.to_string()),
+                                    _ => None,
+                                }).is_some_and(|id| connected.contains(&id));
+                                if already { continue; }
                                 if let Err(e) = swarm.swarm.dial(addr.clone()) {
-                                    tracing::debug!(%addr, %e, "Dial failed (will retry)");
+                                    tracing::debug!(%addr, %e, "bootstrap re-dial failed (will retry)");
                                 }
                             }
-                            retry_backoff_secs = (retry_backoff_secs * 2).min(120);
-                            retry_interval = tokio::time::interval(
-                                std::time::Duration::from_secs(retry_backoff_secs)
-                            );
-                        } else if peer_count > 0 {
-                            retry_backoff_secs = 5; // Reset backoff when connected
+                            if connected.is_empty() {
+                                tracing::warn!("no connected peers — re-dialing all bootstrap");
+                            }
                         }
                     }
 

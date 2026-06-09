@@ -6,6 +6,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::Sha256;
 use hmac::{Hmac, Mac};
@@ -13,7 +15,36 @@ use serde::{Deserialize, Serialize};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Auto-quarantine an endpoint after this many consecutive delivery failures.
+/// Quarantined endpoints are disabled so build-event dispatch stops wasting
+/// curl subprocesses on a dead URL — and an AI agent can `flux_webhook_prune`
+/// them in one call instead of eyeballing a list of 20+ stale registrations.
+const QUARANTINE_THRESHOLD: u32 = 5;
+
+// Serializes read-modify-write on the webhooks.json file. auto_dispatch fires a
+// thread per webhook and each records its delivery health back into the same
+// file; without this lock those concurrent saves would clobber each other.
+static CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn config_guard() -> MutexGuard<'static, ()> {
+    CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 // ── Data Model ──
+
+/// Rolling delivery health for one endpoint. Lets an AI agent reason about
+/// which webhooks are actually alive instead of trusting that every registered
+/// URL still works.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebhookHealth {
+    pub last_status: u16,             // last HTTP status (0 = unreachable)
+    pub last_attempt_ts: u64,         // unix secs of last dispatch attempt
+    pub last_success_ts: u64,         // unix secs of last 2xx
+    pub consecutive_failures: u32,    // reset to 0 on any success
+    pub total_delivered: u64,         // lifetime 2xx count
+    pub total_failed: u64,            // lifetime non-2xx / unreachable count
+    pub quarantined: bool,            // auto-disabled after QUARANTINE_THRESHOLD
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Webhook {
@@ -27,6 +58,8 @@ pub struct Webhook {
     pub retries: u32,            // max retries on failure (default 3)
     #[serde(default)]
     pub timeout_secs: u64,       // HTTP timeout (default 10)
+    #[serde(default)]
+    pub health: WebhookHealth,   // delivery observability (default = never delivered)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -124,35 +157,115 @@ pub fn register_webhook(
         enabled: true,
         retries: 3,
         timeout_secs: 10,
+        health: WebhookHealth::default(),
     });
 
     save_config(&config)?;
     Ok(format!("✓ Webhook '{}' registered → {}", id, url))
 }
 
-/// List all registered webhooks.
+/// Per-endpoint health badge for the list view.
+fn health_badge(w: &Webhook) -> String {
+    let h = &w.health;
+    if h.quarantined {
+        return "⛔ quarantined".into();
+    }
+    if !w.enabled {
+        return "✗ disabled".into();
+    }
+    if h.last_attempt_ts == 0 {
+        return "• untested".into();
+    }
+    if h.consecutive_failures > 0 {
+        return format!("⚠ {} fail(s), last HTTP {}", h.consecutive_failures, h.last_status);
+    }
+    format!("✓ live (HTTP {})", h.last_status)
+}
+
+/// List all registered webhooks with delivery-health badges.
 pub fn list_webhooks() -> String {
     let config = load_config();
     if config.webhooks.is_empty() {
         return "No webhooks registered. Use flux_webhook_register to add one.".into();
     }
 
-    let mut lines = vec![format!("⚡ {} webhook(s) registered:", config.webhooks.len())];
+    let live = config.webhooks.iter().filter(|w| w.enabled && !w.health.quarantined).count();
+    let quarantined = config.webhooks.iter().filter(|w| w.health.quarantined).count();
+    let mut lines = vec![format!(
+        "⚡ {} webhook(s) — {} live, {} quarantined:",
+        config.webhooks.len(), live, quarantined
+    )];
     for w in &config.webhooks {
-        let status = if w.enabled { "✓" } else { "✗" };
         lines.push(format!(
-            "  {} {} → {} (events: {})",
-            status,
+            "  [{}] {} → {} (events: {}) — {}✓/{}✗",
+            health_badge(w),
             w.id,
             w.url,
-            w.events.join(", ")
+            w.events.join(", "),
+            w.health.total_delivered,
+            w.health.total_failed,
+        ));
+    }
+    if quarantined > 0 {
+        lines.push(format!(
+            "  → {} dead endpoint(s); call flux_webhook_prune to remove them.",
+            quarantined
         ));
     }
     lines.join("\n")
 }
 
+/// Structured health report (for `flux_webhook_health`) — machine-readable so an
+/// AI agent can decide what to prune/retry without parsing the list text.
+pub fn health_report() -> serde_json::Value {
+    let config = load_config();
+    let endpoints: Vec<serde_json::Value> = config
+        .webhooks
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "url": w.url,
+                "enabled": w.enabled,
+                "quarantined": w.health.quarantined,
+                "last_status": w.health.last_status,
+                "last_attempt_ts": w.health.last_attempt_ts,
+                "last_success_ts": w.health.last_success_ts,
+                "consecutive_failures": w.health.consecutive_failures,
+                "total_delivered": w.health.total_delivered,
+                "total_failed": w.health.total_failed,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "total": config.webhooks.len(),
+        "live": config.webhooks.iter().filter(|w| w.enabled && !w.health.quarantined).count(),
+        "quarantined": config.webhooks.iter().filter(|w| w.health.quarantined).count(),
+        "endpoints": endpoints,
+    })
+}
+
+/// Enable or disable a webhook by ID. Disabling clears the quarantine flag's
+/// auto-management (a manually-disabled hook stays disabled until re-enabled).
+pub fn set_webhook_enabled(id: &str, enabled: bool) -> Result<String, String> {
+    let _guard = config_guard();
+    let mut config = load_config();
+    let Some(w) = config.webhooks.iter_mut().find(|w| w.id == id) else {
+        return Err(format!("Webhook '{}' not found", id));
+    };
+    w.enabled = enabled;
+    if enabled {
+        // Re-enabling clears quarantine + failure streak for a fresh chance.
+        w.health.quarantined = false;
+        w.health.consecutive_failures = 0;
+    }
+    save_config(&config)?;
+    Ok(format!("✓ Webhook '{}' {}", id, if enabled { "enabled" } else { "disabled" }))
+}
+
 /// Remove a webhook by ID.
 pub fn remove_webhook(id: &str) -> Result<String, String> {
+    let _guard = config_guard();
     let mut config = load_config();
     let len_before = config.webhooks.len();
     config.webhooks.retain(|w| w.id != id);
@@ -161,6 +274,39 @@ pub fn remove_webhook(id: &str) -> Result<String, String> {
     }
     save_config(&config)?;
     Ok(format!("✓ Webhook '{}' removed", id))
+}
+
+/// Prune dead endpoints: removes every quarantined webhook, plus (when
+/// `include_failing` is set) any endpoint with at least one consecutive failure.
+/// Returns a human-readable summary listing what was removed.
+pub fn prune_webhooks(include_failing: bool) -> String {
+    let _guard = config_guard();
+    let mut config = load_config();
+    let removed: Vec<String> = config
+        .webhooks
+        .iter()
+        .filter(|w| w.health.quarantined || (include_failing && w.health.consecutive_failures > 0))
+        .map(|w| format!("{} ({})", w.id, w.url))
+        .collect();
+
+    if removed.is_empty() {
+        return "Nothing to prune — no quarantined or failing endpoints.".into();
+    }
+
+    config
+        .webhooks
+        .retain(|w| !(w.health.quarantined || (include_failing && w.health.consecutive_failures > 0)));
+
+    if let Err(e) = save_config(&config) {
+        return format!("✗ Prune failed to save: {}", e);
+    }
+
+    let mut out = vec![format!("🧹 Pruned {} dead endpoint(s):", removed.len())];
+    for r in &removed {
+        out.push(format!("  - {}", r));
+    }
+    out.push(format!("  {} webhook(s) remain.", config.webhooks.len()));
+    out.join("\n")
 }
 
 /// Manually trigger a webhook event — fires all matching webhooks.
@@ -202,7 +348,9 @@ pub fn trigger_event(event: &str, data: serde_json::Value) -> String {
     results.join("\n")
 }
 
-/// Dispatch a single webhook (HTTP POST with HMAC-SHA256 signature).
+/// Dispatch a single webhook (HTTP POST with HMAC-SHA256 signature), retrying
+/// up to `webhook.retries` extra times with exponential backoff. Records the
+/// outcome into the endpoint's persisted health before returning.
 fn dispatch_single(webhook: &Webhook, payload: &WebhookPayload) -> Result<u16, String> {
     let body = serde_json::to_string(payload).map_err(|e| format!("json: {}", e))?;
 
@@ -212,19 +360,71 @@ fn dispatch_single(webhook: &Webhook, payload: &WebhookPayload) -> Result<u16, S
     mac.update(body.as_bytes());
     let signature = hex::encode(mac.finalize().into_bytes());
 
-    // Build and send HTTP POST
-    // Phase 1: use a simple reqwest-style blocking call if available,
-    // otherwise fall back to curl subprocess.
-    match send_http_post(&webhook.url, &body, &signature, webhook.timeout_secs) {
-        Ok(status) => {
-            if (200..300).contains(&status) {
-                Ok(status)
-            } else {
-                Err(format!("HTTP {}", status))
+    // A 0s timeout is never intended (old configs default the field to 0); clamp
+    // to a sane 10s. `retries` is honored verbatim — 0 means a single attempt.
+    let timeout = if webhook.timeout_secs == 0 { 10 } else { webhook.timeout_secs };
+    let attempts = webhook.retries.saturating_add(1);
+
+    let mut last_status: u16 = 0;
+    let mut last_err = String::new();
+    for attempt in 0..attempts {
+        match send_http_post(&webhook.url, &body, &signature, timeout) {
+            Ok(status) => {
+                last_status = status;
+                if (200..300).contains(&status) {
+                    record_delivery(&webhook.id, true, status);
+                    return Ok(status);
+                }
+                last_err = format!("HTTP {}", status);
+            }
+            Err(e) => {
+                last_status = 0;
+                last_err = e;
             }
         }
-        Err(e) => Err(e),
+        // Exponential backoff between attempts: 200ms, 400ms, 800ms…
+        if attempt + 1 < attempts {
+            let backoff_ms = 200u64 << attempt.min(5);
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        }
     }
+
+    record_delivery(&webhook.id, false, last_status);
+    Err(last_err)
+}
+
+/// Record the outcome of a delivery attempt into the endpoint's persisted
+/// health. Auto-quarantines (disables) an endpoint after
+/// `QUARANTINE_THRESHOLD` consecutive failures so dead URLs stop being dialed.
+/// Serialized via `CONFIG_LOCK` because auto_dispatch records from many threads.
+fn record_delivery(id: &str, ok: bool, status: u16) {
+    let _guard = config_guard();
+    let mut config = load_config();
+    let Some(w) = config.webhooks.iter_mut().find(|w| w.id == id) else { return };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    w.health.last_attempt_ts = now;
+    w.health.last_status = status;
+    if ok {
+        w.health.last_success_ts = now;
+        w.health.consecutive_failures = 0;
+        w.health.total_delivered += 1;
+        // A successful delivery lifts quarantine (endpoint came back to life).
+        if w.health.quarantined {
+            w.health.quarantined = false;
+            w.enabled = true;
+        }
+    } else {
+        w.health.consecutive_failures += 1;
+        w.health.total_failed += 1;
+        if w.health.consecutive_failures >= QUARANTINE_THRESHOLD && !w.health.quarantined {
+            w.health.quarantined = true;
+            w.enabled = false;
+        }
+    }
+    let _ = save_config(&config);
 }
 
 /// Send HTTP POST — uses curl subprocess for broad compatibility.
@@ -383,6 +583,77 @@ mod tests {
     fn test_remove_nonexistent() {
         let result = remove_webhook("nonexistent-id-12345");
         assert!(result.is_err());
+    }
+
+    // Run config-mutating tests against an isolated HOME so the live
+    // ~/.flux/webhooks.json (with its real registrations) is never touched.
+    // Serialized because they all repoint the process-global HOME env var.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_temp_home<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("HOME").ok();
+        let dir = std::env::temp_dir().join(format!("flux-wh-test-{}", tag));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HOME", &dir);
+        let out = f();
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn test_quarantine_after_threshold() {
+        with_temp_home("quarantine", || {
+            register_webhook("dead", "http://127.0.0.1:0/x", "s", vec!["build_complete".into()]).unwrap();
+            // Simulate QUARANTINE_THRESHOLD consecutive failures.
+            for _ in 0..QUARANTINE_THRESHOLD {
+                record_delivery("dead", false, 0);
+            }
+            let cfg = load_config();
+            let w = cfg.webhooks.iter().find(|w| w.id == "dead").unwrap();
+            assert!(w.health.quarantined, "should auto-quarantine");
+            assert!(!w.enabled, "quarantine must disable the endpoint");
+            assert_eq!(w.health.consecutive_failures, QUARANTINE_THRESHOLD);
+        });
+    }
+
+    #[test]
+    fn test_success_lifts_quarantine_and_resets_streak() {
+        with_temp_home("lift", || {
+            register_webhook("flaky", "http://127.0.0.1:0/x", "s", vec!["build_complete".into()]).unwrap();
+            for _ in 0..QUARANTINE_THRESHOLD {
+                record_delivery("flaky", false, 0);
+            }
+            record_delivery("flaky", true, 200);
+            let cfg = load_config();
+            let w = cfg.webhooks.iter().find(|w| w.id == "flaky").unwrap();
+            assert!(!w.health.quarantined, "success should lift quarantine");
+            assert!(w.enabled);
+            assert_eq!(w.health.consecutive_failures, 0);
+            assert_eq!(w.health.total_delivered, 1);
+            assert_eq!(w.health.total_failed, QUARANTINE_THRESHOLD as u64);
+        });
+    }
+
+    #[test]
+    fn test_prune_removes_quarantined_only() {
+        with_temp_home("prune", || {
+            register_webhook("good", "http://127.0.0.1:1/x", "s", vec!["build_complete".into()]).unwrap();
+            register_webhook("bad", "http://127.0.0.1:0/x", "s", vec!["build_complete".into()]).unwrap();
+            for _ in 0..QUARANTINE_THRESHOLD {
+                record_delivery("bad", false, 0);
+            }
+            let out = prune_webhooks(false);
+            assert!(out.contains("bad"), "prune should report removed endpoint");
+            let cfg = load_config();
+            assert!(cfg.webhooks.iter().any(|w| w.id == "good"));
+            assert!(!cfg.webhooks.iter().any(|w| w.id == "bad"), "quarantined should be gone");
+        });
     }
 
     #[test]

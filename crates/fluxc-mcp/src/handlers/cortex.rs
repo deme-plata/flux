@@ -54,7 +54,7 @@ fn flux_cortex_loop(args: &Value) -> String {
         _ => OptimizationPreset::MaxPerf,
     };
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_loop: {e}") };
-    let mut cortex = flux_cortex::Cortex::new(ws);
+    let mut cortex = flux_cortex::Cortex::with_persistence(ws);
     let result = cortex.run_loop(preset);
     serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("❌ {e}"))
 }
@@ -68,7 +68,7 @@ fn flux_cortex_continuous(args: &Value) -> String {
         _ => OptimizationPreset::Balanced,
     };
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_continuous: {e}") };
-    let mut cortex = flux_cortex::Cortex::new(ws);
+    let mut cortex = flux_cortex::Cortex::with_persistence(ws);
     let results = cortex.run_continuous(iterations, preset);
     let total_gain: f64 = results.iter().filter_map(|r| r.actual_total_gain_pct).sum();
     let summary = json!({"iterations_completed": results.len(), "iterations_requested": iterations, "total_actual_gain_pct": format!("{:.2}%", total_gain), "results": results});
@@ -77,16 +77,25 @@ fn flux_cortex_continuous(args: &Value) -> String {
 
 fn flux_cortex_summary(_args: &Value) -> String {
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_summary: {e}") };
-    let cortex = flux_cortex::Cortex::new(ws);
+    let cortex = flux_cortex::Cortex::with_persistence(ws);
     let summary = cortex.summary();
     serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("❌ {e}"))
 }
 
 fn flux_cortex_reset(_args: &Value) -> String {
+    // Actually clear the persisted state on disk — previously this constructed a
+    // fresh in-memory Cortex and threw it away, so "reset" was a no-op and the
+    // next summary still showed the old (zeroed) numbers.
+    let path = flux_cortex::Cortex::state_path();
+    let removed = std::fs::remove_file(&path).is_ok();
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_reset: {e}") };
-    let cortex = flux_cortex::Cortex::new(ws);
-    let summary = cortex.summary();
-    json!({"status": "reset", "message": "Cortex state cleared.", "initial_summary": summary}).to_string()
+    let summary = flux_cortex::Cortex::with_persistence(ws).summary();
+    json!({
+        "status": "reset",
+        "message": if removed { "Cortex state cleared." } else { "No persisted state to clear (already empty)." },
+        "state_file": path.display().to_string(),
+        "initial_summary": summary,
+    }).to_string()
 }
 
 fn discover_workspace() -> Result<WorkspaceGraph, String> {

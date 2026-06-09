@@ -122,7 +122,7 @@ pub fn run_cortex_loop(preset: &str, iterations: usize, json: bool) {
         _ => OptimizationPreset::MaxPerf,
     };
 
-    let mut cortex = Cortex::new(ws);
+    let mut cortex = Cortex::with_persistence(ws);
 
     if iterations > 1 {
         let results = cortex.run_continuous(iterations, preset);
@@ -204,7 +204,7 @@ pub fn run_cortex_summary(json: bool) {
         batches: vec![],
     };
 
-    let cortex = Cortex::new(ws);
+    let cortex = Cortex::with_persistence(ws);
     let summary = cortex.summary();
 
     if json {

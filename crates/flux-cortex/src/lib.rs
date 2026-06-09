@@ -159,6 +159,60 @@ impl Cortex {
         }
     }
 
+    /// Create a Cortex engine that restores cumulative state from disk.
+    ///
+    /// This is what the MCP surface (`flux_cortex_loop` / `flux_cortex_summary`)
+    /// should use: each tool call constructs a fresh `Cortex`, so without on-disk
+    /// state the summary always reported zeros even after many loops. Mirrors
+    /// `AiCortex::load_agent_state`.
+    pub fn with_persistence(ws: WorkspaceGraph) -> Self {
+        let mut cortex = Self::new(ws);
+        cortex.load_state();
+        cortex
+    }
+
+    /// Path to the persisted cortex state file (`~/.flux/cortex_state.json`).
+    pub fn state_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home)
+            .join(".flux")
+            .join("cortex_state.json")
+    }
+
+    /// Restore cumulative state from disk, if present. Silent on missing/corrupt
+    /// file — a fresh workspace simply starts from an empty state.
+    pub fn load_state(&mut self) {
+        let path = Self::state_path();
+        if let Ok(json) = std::fs::read_to_string(&path) {
+            if let Ok(persisted) = serde_json::from_str::<CortexState>(&json) {
+                self.state = persisted;
+            }
+        }
+    }
+
+    /// Persist cumulative state to disk, bounding the unbounded histories so the
+    /// file can't grow without limit across thousands of loops.
+    pub fn save_state(&self) {
+        const MAX_ACTIONS: usize = 500;
+        const MAX_LOOPS: usize = 100;
+        let mut snapshot = self.state.clone();
+        let n = snapshot.action_history.len();
+        if n > MAX_ACTIONS {
+            snapshot.action_history.drain(0..n - MAX_ACTIONS);
+        }
+        let n = snapshot.loop_history.len();
+        if n > MAX_LOOPS {
+            snapshot.loop_history.drain(0..n - MAX_LOOPS);
+        }
+        let path = Self::state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
     /// Run a single complete Cortex Loop: Architect → Predict → Optimize → Apply → Validate → Learn.
     pub fn run_loop(&mut self, preset: OptimizationPreset) -> CortexLoopResult {
         let loop_start = Instant::now();
@@ -422,6 +476,9 @@ impl Cortex {
         self.state.loop_history.push(result.clone());
         self.state.cumulative_perf_gain_pct += actual_total_gain;
         self.state.total_actions_applied += applied_count as u64;
+
+        // Persist to disk so cumulative state survives across MCP tool calls.
+        self.save_state();
 
         result
     }

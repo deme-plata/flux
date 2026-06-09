@@ -59,6 +59,85 @@ pub fn register(registry: &mut ToolRegistry) {
         },
         flux_webhook_test,
     );
+    registry.register(
+        ToolDef {
+            name: "flux_webhook_remove",
+            description: "Remove a registered webhook by id.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Webhook id to remove"}},
+                "required": ["id"]
+            }),
+        },
+        flux_webhook_remove,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_webhook_prune",
+            description: "Remove dead webhook endpoints (auto-quarantined after 5 consecutive failures). Set include_failing=true to also drop endpoints with any current failure streak. Use to clean up stale registrations.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"include_failing": {"type": "boolean", "description": "Also remove endpoints with a current failure streak (default false = quarantined only)"}}
+            }),
+        },
+        flux_webhook_prune,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_webhook_health",
+            description: "Machine-readable delivery health for every webhook: last status, success/fail counts, consecutive failures, quarantine state. Lets an agent decide what to prune or retry.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        flux_webhook_health,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_webhook_enable",
+            description: "Enable or disable a webhook by id. Re-enabling clears quarantine and the failure streak.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Webhook id"},
+                    "enabled": {"type": "boolean", "description": "true to enable, false to disable"}
+                },
+                "required": ["id", "enabled"]
+            }),
+        },
+        flux_webhook_enable,
+    );
+}
+
+fn flux_webhook_remove(args: &Value) -> String {
+    let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        return "Error: 'id' parameter is required".into();
+    }
+    match webhook::remove_webhook(id) {
+        Ok(msg) => msg,
+        Err(e) => format!("✗ {}", e),
+    }
+}
+
+fn flux_webhook_prune(args: &Value) -> String {
+    let include_failing = args.get("include_failing").and_then(|v| v.as_bool()).unwrap_or(false);
+    webhook::prune_webhooks(include_failing)
+}
+
+fn flux_webhook_health(_args: &Value) -> String {
+    serde_json::to_string_pretty(&webhook::health_report())
+        .unwrap_or_else(|e| format!("✗ {}", e))
+}
+
+fn flux_webhook_enable(args: &Value) -> String {
+    let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    if id.is_empty() {
+        return "Error: 'id' parameter is required".into();
+    }
+    match webhook::set_webhook_enabled(id, enabled) {
+        Ok(msg) => msg,
+        Err(e) => format!("✗ {}", e),
+    }
 }
 
 fn flux_webhook_register(args: &Value) -> String {

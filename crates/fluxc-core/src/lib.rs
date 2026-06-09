@@ -8,7 +8,7 @@ pub mod tune;
 pub mod portal;
 pub mod goals;
 pub mod ai_debug;
-pub mod flux_net;
+pub use ::flux_net; // P1: extracted to its own flux-net crate; re-export keeps fluxc_core::flux_net::* stable
 pub mod webhook;
 pub mod webhook_inbound;
 pub mod predict;

@@ -22,23 +22,26 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
 - `preset` arg interpolated into inline JSON inside an `ssh_exec` shell string; `"` breaks out.
 - FIXED 2026-06-10: preset restricted to identifier chars `[A-Za-z0-9_-]` before use.
 
-### SEC-003 ⚪ SQIsign agent private key written world-readable
+### SEC-003 ✅ SQIsign agent private key written world-readable
 - `crates/fluxc-core/src/provenance.rs:236`
 - `std::fs::write(~/.flux-agent-key.json)` → mode 0644 under default umask. The sk_hex inside is the
   agent's provenance signing identity; any local user can forge all .proof signatures.
-- Fix: `#[cfg(unix)] set_permissions(0o600)` immediately after write (better: open with mode via OpenOptionsExt).
+- FIXED 2026-06-10: new `write_key_file()` opens with `OpenOptionsExt::mode(0o600)` AND re-tightens
+  via `set_permissions(0o600)` (covers pre-existing 0644 files). Live `/root/.flux-agent-key.json`
+  chmod'd 0600 out-of-band. provenance tests 5/5.
 
-### SEC-004 ⚪ DeepSeek API key visible in /proc/*/cmdline
+### SEC-004 ✅ DeepSeek API key visible in /proc/*/cmdline
 - `crates/fluxc-core/src/phase3.rs:466`, `crates/flux-cortex/src/ai_cortex.rs:680`
 - Key passed to subprocess curl as `-H "Authorization: Bearer <key>"` → visible to every process via
   /proc cmdline / ps.
-- Fix: use reqwest (flux-0x / flux-cmc already do this correctly) or `curl -H @headerfile`.
+- FIXED 2026-06-10: both call sites now feed the Authorization header to curl via a stdin curl-config
+  (`-K -`, `header = "..."`), so the key never appears in any argv. stderr→null. Builds green.
 
-### SEC-005 ⚪ thread_rng() used for long-term cryptographic keys
-- `crates/flux-wireguard/src/lib.rs:174` (X25519 StaticSecret)
-- `crates/flux-zk-p2p/src/lib.rs:102` (proof-system secret key)
-- (`crates/flux-kyberkem/src/lib.rs:77,82,91-94` — test code, fix for hygiene)
-- Fix: `OsRng` / `getrandom` everywhere key material is generated.
+### SEC-005 ✅ thread_rng() used for long-term cryptographic keys
+- `crates/flux-wireguard/src/lib.rs:174,305` (X25519 StaticSecret)
+- `crates/flux-zk-p2p/src/lib.rs:102` (proof-system secret key), `anonymous_identity.rs:214` (nonce)
+- (`crates/flux-kyberkem/src/lib.rs:74-94` — test code, fixed for hygiene)
+- FIXED 2026-06-10: all sites now use `rand::rngs::OsRng`. flux-wireguard 8/8, flux-kyberkem 3/3.
 
 ### SEC-006 ⚪ SSRF in webhook registration
 - `crates/fluxc-core/src/webhook.rs:431-451` (dispatch), `:132-165` (register — no URL validation)
@@ -66,8 +69,9 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
   `safe_url_path()` (no quotes/spaces/metacharacters). `body` was already correctly
   single-quote-escaped for the single remote shell layer (local side passes the command
   as a discrete ssh arg — there is only ONE shell layer, on Delta).
-- REMAINS OPEN (tracked under key-hygiene batch): the Moltbook key extraction
-  `K=$(jq ...)` still runs inside Delta's shell context (history/audit exposure).
+- KEY-HYGIENE HALF FIXED 2026-06-10: the `K=$(jq ...)` shell-variable form (key in Delta's process
+  env / history) replaced — jq now emits a curl-config `header` line piped to `curl -K -`, so the
+  Moltbook key never lands in any argv or shell variable on Delta. fluxc-mcp 63/63.
 
 ### SEC-010 ⚪ SQIsign verify does not enforce Level-5 signature length
 - `crates/flux-sqisign/src/lib.rs:29-38`

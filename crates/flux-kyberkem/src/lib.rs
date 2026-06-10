@@ -71,16 +71,18 @@ impl KyberP2pHandshake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::thread_rng;
+    // SEC-005 hygiene: tests use OsRng too, so no thread_rng keygen example
+    // exists in this crate to copy-paste into production code.
+    use rand::rngs::OsRng;
     #[test]
     fn test_keygen_produces_pk() {
-        let (pk, _) = keygen(&mut thread_rng());
+        let (pk, _) = keygen(&mut OsRng);
         assert_eq!(pk.to_bytes().len(), 1568);
     }
     #[test]
     fn test_encap_decap_roundtrip() {
-        let (pk, sk) = keygen(&mut thread_rng());
-        let (_ct, ss1) = encapsulate(&mut thread_rng(), &pk);
+        let (pk, sk) = keygen(&mut OsRng);
+        let (_ct, ss1) = encapsulate(&mut OsRng, &pk);
         let ss2 = decapsulate(&sk, &_ct);
         assert_eq!(ss1, ss2);
     }
@@ -88,10 +90,10 @@ mod tests {
     fn test_p2p_handshake() {
         let mut a = KyberP2pHandshake::new();
         let mut b = KyberP2pHandshake::new();
-        let apk = a.init(&mut thread_rng());
-        let bpk = b.init(&mut thread_rng());
-        let _ = a.exchange(&mut thread_rng(), &bpk);
-        let _ = b.exchange(&mut thread_rng(), &apk);
+        let apk = a.init(&mut OsRng);
+        let bpk = b.init(&mut OsRng);
+        let _ = a.exchange(&mut OsRng, &bpk);
+        let _ = b.exchange(&mut OsRng, &apk);
         assert!(a.shared_secret.is_some() && b.shared_secret.is_some());
     }
 }

@@ -99,7 +99,8 @@ pub fn field_from_u64(val: u64) -> ark_bn254::Fr {
 pub fn generate_secret_key() -> [u8; 32] {
     use rand::RngCore;
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    // SEC-005: secret keys MUST come from the OS CSPRNG, never thread_rng.
+    rand::rngs::OsRng.fill_bytes(&mut key);
     key
 }
 

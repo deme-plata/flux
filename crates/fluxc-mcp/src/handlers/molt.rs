@@ -78,14 +78,19 @@ fn molt_via_delta(method: &str, path: &str, body: Option<&str>) -> String {
     if !crate::handlers::safe_url_path(path) {
         return format!("error: path {path:?} rejected (URL-path chars only, no shell metacharacters) [SEC-009]");
     }
+    // SEC-009 (key-hygiene half): jq emits a curl-config `header = "..."` line
+    // that curl reads from stdin (`-K -`) — the key never appears in ANY argv
+    // on Delta (the old `-H "Bearer $K"` form landed in /proc/<curl>/cmdline).
     let curl = match body {
         Some(b) => format!(
-            "curl -s --max-time 15 -X {method} {MOLT_API}{path} -H \"Authorization: Bearer $K\" -H 'Content-Type: application/json' -d '{}'",
+            "curl -s --max-time 15 -X {method} {MOLT_API}{path} -K - -H 'Content-Type: application/json' -d '{}'",
             b.replace('\'', "'\\''")
         ),
-        None => format!("curl -s --max-time 15 -X {method} {MOLT_API}{path} -H \"Authorization: Bearer $K\""),
+        None => format!("curl -s --max-time 15 -X {method} {MOLT_API}{path} -K -"),
     };
-    let remote = format!("K=$(jq -r .api_key ~/.config/moltbook/credentials.json 2>/dev/null); {curl}");
+    let remote = format!(
+        "jq -r '\"header = \\\"Authorization: Bearer \" + .api_key + \"\\\"\"' ~/.config/moltbook/credentials.json 2>/dev/null | {curl}"
+    );
     let out = Command::new("ssh")
         .args([
             "-o", "StrictHostKeyChecking=no",

@@ -171,7 +171,8 @@ impl Default for WgConfig {
 impl WireGuard {
     /// Create a new WireGuard instance with a fresh keypair.
     pub fn new(config: WgConfig) -> Self {
-        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
+        // SEC-005: long-term static key MUST come from the OS CSPRNG, never thread_rng.
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public = x25519_dalek::PublicKey::from(&secret);
         Self {
             private_key: secret.to_bytes(),
@@ -302,7 +303,7 @@ mod tests {
     use super::*;
 
     fn mock_peer() -> Peer {
-        let key = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
+        let key = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public = x25519_dalek::PublicKey::from(&key);
         Peer {
             public_key: public.to_bytes(),

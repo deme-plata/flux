@@ -461,14 +461,27 @@ fn send_to_deepseek(prompt: &str) -> String {
         "temperature": 0.3
     });
     let body_str = serde_json::to_string(&body).unwrap_or_default();
-    match Command::new("curl")
+    // SEC-004: the Authorization header goes in via a stdin-fed curl config
+    // (`-K -`), NEVER as an argv `-H` — argv is world-readable in /proc.
+    let spawned = Command::new("curl")
         .args(["-s", "-X", "POST", "https://api.deepseek.com/chat/completions"])
-        .args(["-H", &format!("Authorization: Bearer {}", api_key)])
+        .args(["-K", "-"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", &body_str])
         .args(["--max-time", "60"])
-        .output()
-    {
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let out = spawned.and_then(|mut child| {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(format!("header = \"Authorization: Bearer {}\"\n", api_key).as_bytes());
+        }
+        drop(child.stdin.take());
+        child.wait_with_output()
+    });
+    match out {
         Ok(out) => {
             let resp: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
             resp["choices"][0]["message"]["content"]

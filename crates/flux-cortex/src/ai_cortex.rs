@@ -258,14 +258,17 @@ pub struct AiCortex {
 impl AiCortex {
     /// Create a new AI Cortex with the default agent registry.
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        AiCortex {
+        let mut cortex = AiCortex {
             agents: default_agent_registry(),
             task_history: Vec::new(),
             result_history: Vec::new(),
             iteration_count: 0,
             total_tokens: 0,
             workspace_root,
-        }
+        };
+        // Load persisted agent scores from previous sessions
+        cortex.load_agent_state();
+        cortex
     }
 
     /// Find the best agent for a given task kind, considering capabilities and score.
@@ -436,6 +439,8 @@ impl AiCortex {
         };
 
         self.result_history.push(result.clone());
+        // Persist agent learning across sessions
+        self.save_agent_state();
         result
     }
 
@@ -503,6 +508,40 @@ impl AiCortex {
         let avg = recent.iter().sum::<f64>() / 5.0;
         let variance = recent.iter().map(|x| (x - avg).powi(2)).sum::<f64>() / 5.0;
         variance < 0.001
+    }
+
+    /// Save agent state to disk for persistence across sessions.
+    pub fn save_agent_state(&self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::PathBuf::from(home).join(".flux").join("cortex_agents.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.agents) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Load agent state from disk. Merges: updates scores + task counts from
+    /// persisted state, keeps the default capability + provider definitions.
+    pub fn load_agent_state(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::PathBuf::from(home).join(".flux").join("cortex_agents.json");
+        if path.exists() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(persisted) = serde_json::from_str::<Vec<AiAgent>>(&json) {
+                    // Merge: update scores and task counts from persisted state
+                    for pa in &persisted {
+                        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == pa.id) {
+                            agent.score = pa.score;
+                            agent.tasks_completed = pa.tasks_completed;
+                            agent.tasks_correct = pa.tasks_correct;
+                            agent.tokens_used = pa.tokens_used;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -636,14 +675,27 @@ fn query_deepseek(model: &str, prompt: &str) -> String {
 
     let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-    match std::process::Command::new("curl")
+    // SEC-004: the Authorization header goes in via a stdin-fed curl config
+    // (`-K -`), NEVER as an argv `-H` — argv is world-readable in /proc.
+    let spawned = std::process::Command::new("curl")
         .args(["-s", "-X", "POST", "https://api.deepseek.com/chat/completions"])
-        .args(["-H", &format!("Authorization: Bearer {}", api_key)])
+        .args(["-K", "-"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", &body_str])
         .args(["--max-time", "60"])
-        .output()
-    {
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let out = spawned.and_then(|mut child| {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(format!("header = \"Authorization: Bearer {}\"\n", api_key).as_bytes());
+        }
+        drop(child.stdin.take());
+        child.wait_with_output()
+    });
+    match out {
         Ok(out) => {
             let resp: serde_json::Value =
                 serde_json::from_slice(&out.stdout).unwrap_or_default();

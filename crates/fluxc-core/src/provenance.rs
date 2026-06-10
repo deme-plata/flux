@@ -233,9 +233,33 @@ pub fn ensure_agent_key(path: Option<&str>) -> Result<(Vec<u8>, Vec<u8>), Proven
     });
     let serialized = serde_json::to_vec_pretty(&body)
         .map_err(|e| ProvenanceError::Serde(e.to_string()))?;
-    std::fs::write(&path_owned, serialized)
+    write_key_file(&path_owned, &serialized)
         .map_err(|e| ProvenanceError::Serde(format!("write {}: {}", path_owned, e)))?;
     Ok((sk, pk))
+}
+
+/// SEC-003: the key file holds `sk_hex` (the agent's SQIsign signing identity).
+/// Create it 0600 from the first byte — `std::fs::write` would leave a 0644
+/// world-readable window under the default umask — and re-tighten the mode if
+/// the file pre-existed from an older fluxc.
+fn write_key_file(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        // mode() only applies on CREATE — an existing 0644 file keeps its mode,
+        // so tighten it explicitly.
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(bytes)
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {

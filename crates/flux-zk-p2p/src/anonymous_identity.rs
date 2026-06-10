@@ -211,7 +211,8 @@ impl OnionOwnershipProof {
         let challenge_nonce = {
             use rand::RngCore;
             let mut nonce = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut nonce);
+            // SEC-005: challenge nonces from the OS CSPRNG.
+            rand::rngs::OsRng.fill_bytes(&mut nonce);
             nonce
         };
 

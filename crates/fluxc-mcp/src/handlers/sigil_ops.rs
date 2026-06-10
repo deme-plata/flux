@@ -64,6 +64,58 @@ fn preview_id(parts: &[&str]) -> String {
 }
 
 pub fn register(registry: &mut ToolRegistry) {
+    // ── LANE-Y agentic money: mandates gate every agent-driven movement ──
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_mandate_create",
+            description: "Grant a persisted agent spend-mandate: max TOTAL amount (base units), purpose, \
+                          ttl_hours (default 24). Returns the mandate id. Every flux_sigil_txn_send must \
+                          reference an active mandate with headroom. Args: agent, max_amount, purpose, [ttl_hours].",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "agent identity granted the mandate"},
+                    "max_amount": {"type": "number", "description": "max TOTAL spend, base units"},
+                    "purpose": {"type": "string", "description": "what the agent may spend on"},
+                    "ttl_hours": {"type": "number", "description": "expiry horizon (default 24h)"}
+                },
+                "required": ["agent", "max_amount", "purpose"]
+            }),
+        },
+        sigil_mandate_create,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_mandate_list",
+            description: "List agent mandates (active + closed + expired): spent vs max, purpose, expiry.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        sigil_mandate_list,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_mandate_close",
+            description: "Close a mandate by id — no further spends can reference it. Args: id.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"]
+            }),
+        },
+        sigil_mandate_close,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_agent_panel",
+            description: "One-call agent overview: rpcd balance for the wallet + active mandates with \
+                          remaining headroom. Args: [wallet] (64-hex).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"wallet": {"type": "string", "description": "64-hex wallet for balance"}}
+            }),
+        },
+        sigil_agent_panel,
+    );
     registry.register(
         ToolDef {
             name: "flux_sigil_dex_swap",
@@ -219,6 +271,15 @@ fn sigil_txn_send(a: &Value) -> String {
     if from.is_empty() || to.is_empty() || amount == 0 {
         return "error: from, to, amount required".into();
     }
+    // LANE-Y: agent money moves ONLY under an active mandate with headroom.
+    let mandate = arg_str(a, "mandate", "");
+    if mandate.is_empty() {
+        return "error: mandate required — agents move SIGIL only under an active spend-mandate (flux_sigil_mandate_create)".into();
+    }
+    let remaining = match mandate_reserve(&mandate, amount) {
+        Ok(r) => r,
+        Err(e) => return format!("mandate refused: {e}"),
+    };
     let id = preview_id(&[&from, &to, &amount.to_string(), &token]);
     format!(
         "⬡ SIGIL SignedTx::Send — built + ready to broadcast\n{}\n\
@@ -226,7 +287,7 @@ fn sigil_txn_send(a: &Value) -> String {
          → BROADCAST SEAM: sigil-node is P2P-only; wire to :8181 JSON-RPC `submit_tx` when it lands.",
         json!({
             "kind": "Send", "from": from, "to": to, "amount": amount, "token": token, "fee": fee,
-            "preview_id": id, "network_id": "sigil-g0",
+            "preview_id": id, "network_id": "sigil-g0", "mandate": mandate, "mandate_remaining": remaining.to_string(),
             "signature_scheme": "SQIsign-L5 (292B)", "status": "constructed, unsigned-on-wire"
         })
     )
@@ -383,4 +444,158 @@ fn run_ssh(host: &str, remote: &str, what: &str) -> String {
         }
         Err(e) => format!("⬡ SIGIL {what} @ {host} — ssh error: {e}"),
     }
+}
+
+
+// ── LANE-Y: persisted agent mandates ─────────────────────────────────────────
+// A mandate is a spend-authorization an operator (or a 2-of-2 council flow)
+// grants an agent: max TOTAL amount, purpose, expiry. It lives in flux-state on
+// the storage array (never root, never tmpfs) so a box reboot cannot erase the
+// ledger of what agents were allowed to move — the same persistence lesson the
+// mine-chain taught us the hard way today.
+const MANDATE_STORE: &str = "/home/storage/flux-state/sigil-mandates.json";
+
+fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn mandates_load() -> Vec<Value> {
+    std::fs::read_to_string(MANDATE_STORE)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<Value>>(&t).ok())
+        .unwrap_or_default()
+}
+
+fn mandates_save(v: &[Value]) -> Result<(), String> {
+    let dir = std::path::Path::new(MANDATE_STORE).parent().unwrap();
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = format!("{MANDATE_STORE}.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, MANDATE_STORE).map_err(|e| e.to_string()) // atomic — feed-writer lesson
+}
+
+/// Validate a spend of `amount` against mandate `id`; on success RESERVE it
+/// (spent += amount, persisted) and return Ok(remaining). Reservation happens at
+/// construction time: better to under-spend a mandate than let a failed
+/// broadcast double-spend its headroom.
+fn mandate_reserve(id: &str, amount: u128) -> Result<u128, String> {
+    let mut all = mandates_load();
+    let now = now_ts();
+    for m in all.iter_mut() {
+        if m["id"].as_str() == Some(id) {
+            if m["status"].as_str() != Some("active") {
+                return Err(format!("mandate {id} is {}", m["status"].as_str().unwrap_or("?")));
+            }
+            if m["expires_ts"].as_u64().unwrap_or(0) < now {
+                m["status"] = json!("expired");
+                let _ = mandates_save(&all);
+                return Err(format!("mandate {id} expired"));
+            }
+            let max = m["max_amount"].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+            let spent = m["spent"].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+            if spent.saturating_add(amount) > max {
+                return Err(format!(
+                    "mandate {id} headroom exceeded: spent {spent} + {amount} > max {max}"
+                ));
+            }
+            let new_spent = spent.saturating_add(amount);
+            m["spent"] = json!(new_spent.to_string());
+            mandates_save(&all)?;
+            return Ok(max - new_spent);
+        }
+    }
+    Err(format!("mandate {id} not found — create one with flux_sigil_mandate_create"))
+}
+
+fn sigil_mandate_create(a: &Value) -> String {
+    let agent = arg_str(a, "agent", "unnamed-agent");
+    let max_amount = arg_u128(a, "max_amount", 0);
+    let purpose = arg_str(a, "purpose", "");
+    let ttl_hours = arg_u128(a, "ttl_hours", 24) as u64;
+    if max_amount == 0 || purpose.is_empty() {
+        return "error: max_amount (base units) and purpose required — a mandate without a bound or a reason is not a mandate".into();
+    }
+    let id = preview_id(&[&agent, &max_amount.to_string(), &purpose, &now_ts().to_string()]);
+    let mut all = mandates_load();
+    all.push(json!({
+        "id": id, "agent": agent, "max_amount": max_amount.to_string(), "spent": "0",
+        "purpose": purpose, "created_ts": now_ts(),
+        "expires_ts": now_ts() + ttl_hours * 3600, "status": "active",
+    }));
+    if let Err(e) = mandates_save(&all) {
+        return format!("error: mandate not persisted ({e}) — refusing to grant an unpersisted authorization");
+    }
+    format!("⬡ MANDATE GRANTED {id}\n  agent: {agent}\n  max: {max_amount} base units\n  purpose: {purpose}\n  expires in {ttl_hours}h\n  → pass mandate=\"{id}\" on flux_sigil_txn_send / flux_sigil_dex_swap")
+}
+
+fn sigil_mandate_list(_a: &Value) -> String {
+    let all = mandates_load();
+    if all.is_empty() {
+        return "no mandates — flux_sigil_mandate_create grants the first one".into();
+    }
+    let now = now_ts();
+    let mut out = String::from("⬡ SIGIL AGENT MANDATES\n");
+    for m in &all {
+        let exp = m["expires_ts"].as_u64().unwrap_or(0);
+        let status = if m["status"].as_str() == Some("active") && exp < now { "expired" }
+                     else { m["status"].as_str().unwrap_or("?") };
+        out.push_str(&format!(
+            "  {} [{}] agent={} spent={}/{} purpose={} expires_in={}s\n",
+            m["id"].as_str().unwrap_or("?"), status,
+            m["agent"].as_str().unwrap_or("?"),
+            m["spent"].as_str().unwrap_or("0"), m["max_amount"].as_str().unwrap_or("0"),
+            m["purpose"].as_str().unwrap_or(""), exp.saturating_sub(now),
+        ));
+    }
+    out
+}
+
+fn sigil_mandate_close(a: &Value) -> String {
+    let id = arg_str(a, "id", "");
+    let mut all = mandates_load();
+    for m in all.iter_mut() {
+        if m["id"].as_str() == Some(&id as &str) {
+            m["status"] = json!("closed");
+            return match mandates_save(&all) {
+                Ok(()) => format!("mandate {id} closed"),
+                Err(e) => format!("error: close not persisted ({e})"),
+            };
+        }
+    }
+    format!("mandate {id} not found")
+}
+
+fn sigil_agent_panel(a: &Value) -> String {
+    let wallet = arg_str(a, "wallet", "");
+    let bal = if wallet.len() == 64 {
+        std::process::Command::new("curl")
+            .args(["-s", "--max-time", "4",
+                   &format!("http://127.0.0.1:8099/api/v1/balance?wallet={wallet}")])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|| "rpcd unreachable".into())
+    } else {
+        "(pass wallet=64-hex for balance)".into()
+    };
+    let now = now_ts();
+    let active: Vec<String> = mandates_load().iter()
+        .filter(|m| m["status"].as_str() == Some("active")
+                 && m["expires_ts"].as_u64().unwrap_or(0) >= now)
+        .map(|m| {
+            let max = m["max_amount"].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+            let spent = m["spent"].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+            format!("{} headroom={} purpose={}",
+                    m["id"].as_str().unwrap_or("?"), max.saturating_sub(spent),
+                    m["purpose"].as_str().unwrap_or(""))
+        })
+        .collect();
+    format!("⬡ SIGIL AGENT PANEL\n  balance: {}\n  active mandates: {}\n{}",
+            bal.trim(), active.len(),
+            if active.is_empty() { "    (none — agents cannot move funds without one)".to_string() }
+            else { active.iter().map(|l| format!("    {l}\n")).collect::<String>() })
 }

@@ -43,24 +43,32 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
 - (`crates/flux-kyberkem/src/lib.rs:74-94` — test code, fixed for hygiene)
 - FIXED 2026-06-10: all sites now use `rand::rngs::OsRng`. flux-wireguard 8/8, flux-kyberkem 3/3.
 
-### SEC-006 ⚪ SSRF in webhook registration
+### SEC-006 ✅ SSRF in webhook registration
 - `crates/fluxc-core/src/webhook.rs:431-451` (dispatch), `:132-165` (register — no URL validation)
 - Registered webhook URLs are POSTed to unconditionally: can target 127.0.0.1:8080 (q-api-server),
   169.254.169.254, internal services.
-- Fix: reject loopback / RFC1918 / link-local / metadata hosts at registration AND at dispatch
-  (DNS-rebinding-safe = resolve then check IP). Optionally enforce https://.
+- FIXED 2026-06-10: `ssrf_check`/`ssrf_check_with(url, allow_private)` enforced at the dispatch
+  chokepoint `send_http_post` (covers all delivery paths + DNS rebinding + pre-existing entries):
+  requires http(s); resolves host and inspects EVERY resolved IP; ALWAYS blocks 169.254.169.254;
+  blocks loopback/RFC1918/link-local/unspecified/ULA unless `FLUX_WEBHOOK_ALLOW_PRIVATE=1` (the
+  documented same-host fluxc-serve webhook pattern). Strips userinfo so `pub@127.0.0.1` can't smuggle.
+  Pure inner fn keeps tests env-free. ssrf_guard test green. Enforced at dispatch (not register) so
+  registration stays offline-safe and the quarantine/health tests keep their loopback semantics.
 
 ## HIGH
 
-### SEC-007 ⚪ Path traversal in /api/proof/<crate>
+### SEC-007 ✅ Path traversal in /api/proof/<crate>
 - `crates/fluxc-core/src/serve.rs:804-827`
 - `crate_name` not sanitized; `..` escapes the proof dir.
-- Fix: reject names containing `..`, `/`, `\`.
+- FIXED 2026-06-10: `crate_name` restricted to `[A-Za-z0-9_-]` (Cargo's own crate-name charset)
+  before any path join — rejects `..`, `/`, `\`.
 
-### SEC-008 ⚪ Unbounded Content-Length → DoS on fluxc serve
+### SEC-008 ✅ Unbounded Content-Length on fluxc serve
 - `crates/fluxc-core/src/serve.rs:1141-1175`
-- Content-Length trusted without cap → OOM / slowloris.
-- Fix: cap at ~10 MB, reject larger.
+- Re-assessed: the server reads ONE ≤8 KiB buffer, so a body is already structurally capped — there
+  is no read-loop, so no OOM/slowloris-via-Content-Length. The real defect was SILENT truncation of a
+  body whose declared Content-Length exceeds 8 KiB.
+- FIXED 2026-06-10: declared Content-Length > 8 KiB now returns 413 (fail loud) instead of truncating.
 
 ### SEC-009 ✅ (injection part) molt handler: shell interpolation of method/path
 - `crates/fluxc-mcp/src/handlers/molt.rs:69-92` (DELTA const at :23)
@@ -81,8 +89,11 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
 
 ## MEDIUM
 
-### SEC-011 ⚪ CRLF header injection through flux_proxy_to
+### SEC-011 ✅ CRLF header injection through flux_proxy_to
 - `crates/fluxc-core/src/serve.rs:1223-1230` — forwarded header values not checked for `\r\n`.
+- FIXED 2026-06-10: header parse loop drops any name/value containing CR/LF (reachable via a mid-line
+  `\r` that `str::lines()` doesn't strip), AND the proxy forward loop skips them at the sink
+  (defense-in-depth). `content-length` match made case-insensitive while there.
 
 ### SEC-012 ✅ run_ssh() trusts callers to pre-quote
 - `crates/fluxc-mcp/src/handlers/sigil_ops.rs:345-360`

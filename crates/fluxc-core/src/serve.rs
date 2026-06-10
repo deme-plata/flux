@@ -95,6 +95,17 @@ impl Response {
         }
     }
 
+    /// 413 Payload Too Large — SEC-008, declared Content-Length exceeds the cap.
+    pub fn payload_too_large() -> Self {
+        Response {
+            status: 413,
+            content_type: "application/json".into(),
+            body: br#"{"status":"error","msg":"payload too large"}"#.to_vec(),
+            events: None,
+            extra_headers: Vec::new(),
+        }
+    }
+
     /// 200 OK with explicit content-type and binary body. Used by the
     /// static-file fallback to deliver arbitrary file types (wasm, css,
     /// images) without going through the text-oriented constructors.
@@ -805,6 +816,12 @@ fn handle_proof(req: &Request, _stats: &LiveStats) -> Response {
     if crate_name.is_empty() {
         return Response::ok_json(r#"{"error":"missing crate name"}"#);
     }
+    // SEC-007: crate_name is join()ed into a filesystem path below. Reject path
+    // traversal / separators so `/api/proof/../../etc/passwd` can't escape the
+    // proof dir. Crate names are `[A-Za-z0-9_-]` by Cargo's own rules.
+    if !crate_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Response::ok_json(r#"{"error":"invalid crate name"}"#);
+    }
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(env_dir) = std::env::var("FLUX_PROOF_DIR") {
@@ -1153,17 +1170,31 @@ fn handle_connection<S: Read + Write>(stream: &mut S, stats: &LiveStats, router:
     let method = parts[0].to_string();
     let path = parts[1].to_string();
 
-    // Parse headers
+    // Parse headers. SEC-011: drop any header whose name/value carries a bare
+    // CR/LF (reachable via a mid-line `\r`, which `str::lines()` does NOT strip)
+    // so it cannot be smuggled into the reverse-proxy's reconstructed header block.
     let mut headers = Vec::new();
     let mut content_length = 0usize;
     for line in lines.by_ref() {
         if line.is_empty() { break; }
         if let Some((k, v)) = line.split_once(": ") {
+            if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
             headers.push((k.to_lowercase(), v.to_string()));
-            if k.to_lowercase() == "content-length" {
-                content_length = v.parse().unwrap_or(0);
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse().unwrap_or(0);
             }
         }
+    }
+
+    // SEC-008: this server reads exactly one ≤8 KiB buffer, so a body is already
+    // structurally capped — but a client claiming a larger Content-Length would
+    // get its body SILENTLY truncated. Fail loud with 413 instead of corrupting.
+    const MAX_BODY: usize = 8192;
+    if content_length > MAX_BODY {
+        let resp = Response::payload_too_large();
+        access_log(peer_ip, &method, &path, resp.status, resp.body.len());
+        write_response(stream, &resp);
+        return;
     }
 
     // Read body if present
@@ -1224,6 +1255,9 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
     let mut head = format!("{} {} HTTP/1.1\r\n", req.method, req.path);
     for (k, v) in &req.headers {
         if k == "connection" || k == "content-length" { continue; }
+        // SEC-011: never forward a header carrying CR/LF — header-injection guard
+        // at the sink (the parser also drops these, this is defense-in-depth).
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
         head.push_str(&format!("{}: {}\r\n", k, v));
     }
     head.push_str("connection: close\r\n");

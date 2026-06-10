@@ -60,6 +60,51 @@ pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501/p2p/12D3KooWSJxrXTttxp6WVPTWxAZJG1JQ46zSRF1C6gY6LLtyVMuA"),
 ];
 
+/// v0.57 (sync): well-known path where a sigil-node PRODUCER publishes its libp2p peer-id, so a
+/// CO-LOCATED sigil-top monitor can auto-dial it over loopback. `SIGIL_PEERID_FILE` overrides;
+/// the default is a FIXED path (NOT `temp_dir()`, which honors `TMPDIR` and would differ between
+/// the producer's systemd env and an operator shell that sets `TMPDIR`) so both sides agree.
+pub fn sigil_peerid_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SIGIL_PEERID_FILE") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join("sigil-node-g0.peerid")
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("/tmp/sigil-node-g0.peerid")
+    }
+}
+
+/// Producer side: publish our peer-id to [`sigil_peerid_path`] so a co-located monitor can dial
+/// us first. Best-effort; the caller logs any error and never treats it as fatal.
+pub fn publish_sigil_peerid(peer_id: &str) -> std::io::Result<()> {
+    std::fs::write(sigil_peerid_path(), peer_id.trim())
+}
+
+/// Monitor side: if a sigil-node producer is running on THIS box — it published its peer-id AND
+/// `127.0.0.1:9501` is accepting — return its loopback multiaddr so [`NetworkManager::for_sigil`]
+/// dials it FIRST. Loopback specifically: the public-IP bootstrap entry (`89.149.241.126:9501`)
+/// is unreachable same-box on Epsilon (hairpin/firewall on `:9501`), which is WHY a monitor next
+/// to a tip-complete producer still crawled the remote fleet. `None` when absent/stale (standalone
+/// monitor, or Windows) → normal fleet bootstrap, costing only one short connect probe.
+fn detect_local_producer() -> Option<String> {
+    let pid = std::fs::read_to_string(sigil_peerid_path()).ok()?;
+    let pid = pid.trim();
+    if !pid.starts_with("12D3Koo") || pid.len() < 46 {
+        return None; // not a plausible libp2p PeerId — ignore a garbage/partial file
+    }
+    let addr: std::net::SocketAddr = "127.0.0.1:9501".parse().ok()?;
+    // Confirm the producer is LIVE before adding it, so a stale file never becomes a dead
+    // bootstrap entry. One-time 300ms probe at monitor startup.
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).ok()?;
+    Some(format!("/ip4/127.0.0.1/tcp/9501/p2p/{pid}"))
+}
+
 /// SIGIL gossipsub topics — matches sigil-net crate constants.
 pub const SIGIL_TOPICS: &[&str] = &[
     "/sigil/g0/blocks",
@@ -789,6 +834,14 @@ impl NetworkManager {
             for a in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 bootstrap.push(a.to_string());
             }
+        }
+        // v0.57 (sync): a CO-LOCATED producer (same box, tip-complete, LAN latency, 0 WAN
+        // timeouts) is the best possible peer — dial it FIRST. Proven: collapses a 1.7M-gap crawl
+        // (hours, 36-92% timeout from the remote fleet) to a ~12s full sync. Loopback only; the
+        // public-IP epsilon entry below is unreachable same-box, which had masked the producer.
+        if let Some(local) = detect_local_producer() {
+            tracing::info!(target: "sigil::identity", addr = %local, "co-located producer detected — dialing it FIRST");
+            bootstrap.insert(0, local);
         }
         bootstrap.extend(SIGIL_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
         config.bootstrap_peers = bootstrap;

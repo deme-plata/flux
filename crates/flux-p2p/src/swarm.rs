@@ -394,7 +394,8 @@ impl FluxSwarmManager {
                     match multiaddr_ip(addr) {
                         Some(ip) if own_ips.contains(&ip) => {
                             tracing::info!(%addr, "skip hairpin self-dial — bootstrap IP is our own interface");
-                            eprintln!("  [p2p] skip hairpin self-dial → {addr} (own IP)");
+                            // v0.32.5: no eprintln — the sigil-top TUI owns the terminal; this fired
+                            // every dial cycle and corrupted the ratatui screen. tracing covers it.
                             false
                         }
                         _ => true,

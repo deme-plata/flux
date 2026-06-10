@@ -741,7 +741,22 @@ impl NetworkManager {
     /// Uses port 9501, SIGIL topics, and the 4-node testnet bootstrap.
     pub fn for_sigil(node_name: &str) -> Self {
         let mut config = NetworkConfig::default();
-        config.node_id = format!("sigil-top-{node_name}-{}", std::process::id());
+        // v0.31: STABLE per-install identity. node_id used to embed `{pid}`, and the libp2p
+        // keypair is derived from node_id (`keypair_from_seed`) — so the peer-id CHANGED on
+        // EVERY restart. Peers cache the dead id, the fresh id looks like a brand-new node each
+        // launch, and the mesh kept capping at 3/4 peers (rotation never lets the pool fill).
+        // Persist a random per-install token once and reuse it → peer-id stable across restarts
+        // AND unique per install. (`SIGIL_TOP_IDENTITY` env pins it explicitly.)
+        let (id_token, minted, id_path) = sigil_install_id();
+        config.node_id = format!("sigil-top-{node_name}-{id_token}");
+        let peer_id = crate::swarm::peer_id_string(&config.node_id);
+        // ── DETAILED IDENTITY DEBUG (v0.31) ──────────────────────────────────────────────────
+        tracing::info!(target: "sigil::identity", node_id = %config.node_id, peer_id = %peer_id,
+            source = if minted { "minted-first-launch" } else { "persisted" },
+            path = %id_path.display(), "SIGIL identity resolved (stable across restarts)");
+        // v0.32.5: NO eprintln here — the sigil-top TUI owns the terminal, so raw stderr writes
+        // corrupt the ratatui display ("ui sucks in terminal linux"). The identity is logged via
+        // `tracing` above — RUST_LOG=sigil::identity=info to see it headless — never the raw screen.
         config.listen_addr = "/ip4/0.0.0.0/tcp/0".into(); // ephemeral
         config.gossipsub_topics = SIGIL_TOPICS.iter().map(|s| s.to_string()).collect();
         // SIGIL_BOOTSTRAP env override (comma-separated multiaddrs, each WITH /p2p/<PeerId>):
@@ -756,6 +771,13 @@ impl NetworkManager {
         }
         bootstrap.extend(SIGIL_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
         config.bootstrap_peers = bootstrap;
+        // ── DETAILED BOOTSTRAP DEBUG (v0.31): every bootstrap addr + whether Kademlia can seed ──
+        // from it. A bare /ip4/IP/tcp/PORT (no /p2p/<PeerId>) registers under OUR id → DHT never
+        // seeds → "0 peers". v0.32.5: logged via `tracing` ONLY (no eprintln — it corrupts the TUI).
+        for (i, b) in config.bootstrap_peers.iter().enumerate() {
+            let has_pid = b.contains("/p2p/");
+            tracing::debug!(target: "sigil::identity", idx = i, addr = %b, has_peer_id = has_pid, "bootstrap peer");
+        }
         // Disable DAGKnight/SAP/X-Algo for light clients — only need gossipsub
         config.dagknight_enabled = false;
         config.sap_enabled = false;
@@ -934,6 +956,43 @@ impl MeshHealth {
             / self.recent_latencies_ms.len() as f64;
         self.blocks_received += 1;
     }
+}
+
+/// v0.31: load (or first-launch create-and-persist) a STABLE per-install identity token so the
+/// derived libp2p peer-id stops rotating on every restart (the "caps at 3/4 peers" mesh-churn
+/// root cause). Resolution order: `SIGIL_TOP_IDENTITY` env override → `$SIGIL_TOP_HOME/identity`
+/// → `~/.sigil-top/identity` → temp dir. Returns (token, minted_this_launch, path).
+fn sigil_install_id() -> (String, bool, std::path::PathBuf) {
+    use std::path::PathBuf;
+    let dir: PathBuf = std::env::var("SIGIL_TOP_HOME").ok().map(PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".sigil-top")))
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("identity");
+    // explicit env override wins (operator pins an identity), but still report the path.
+    if let Ok(v) = std::env::var("SIGIL_TOP_IDENTITY") {
+        let v = v.trim().to_string();
+        if !v.is_empty() { return (v, false, path); }
+    }
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let t = existing.trim().to_string();
+        if !t.is_empty() { return (t, false, path); }
+    }
+    // First launch: mint a random 16-hex token from OS entropy (read_exact a FIXED 32 bytes —
+    // NEVER fs::read the infinite /dev/urandom), with pid+nanos as a portable fallback. Persist.
+    let mut rnd = [0u8; 32];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read; let _ = f.read_exact(&mut rnd);
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(&rnd);
+    h.update(&std::process::id().to_le_bytes());
+    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        h.update(&d.as_nanos().to_le_bytes());
+    }
+    let token = h.finalize().to_hex()[..16].to_string();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&path, &token);
+    (token, true, path)
 }
 
 // ── P2P multiaddr parsing helpers ──

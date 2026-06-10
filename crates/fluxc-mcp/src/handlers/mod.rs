@@ -168,6 +168,85 @@ mod parse_test_counts_tests {
     }
 }
 
+// ── Shell-safety helpers (SEC-001/002/009/012 — docs/SECURITY_AUDIT_2026-06-10.md) ──
+//
+// Any handler that builds a REMOTE shell string (ssh `host` `cmd`) MUST pass
+// every interpolated value through one of these. MCP tool args are
+// agent-controlled input (incl. non-Claude siblings) — treat them as hostile.
+
+/// POSIX single-quote `s` for safe interpolation into a shell command string.
+/// (Same pattern as `fluxc-core::distributed::shell_quote`.)
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// True when `s` is a plausible ssh host (hostname / IPv4 / IPv6): blocks both
+/// shell metacharacters and ssh option-injection (leading `-`).
+pub fn safe_host(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_'))
+}
+
+/// True when every char is in the conservative command-line-safe set
+/// (alphanumeric, space, `/ . _ - =`). Permits "bash /path/to/script.sh"
+/// while rejecting every shell metacharacter (`; | & $ > < ` ( ) { } * ? ! \n`).
+pub fn safe_cmd_charset(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '/' | '.' | '_' | '-' | '='))
+}
+
+/// True when `s` is safe to embed as a URL path fragment in a shell string:
+/// alphanumeric plus `/ . _ - ? = &`. No spaces, no quotes, no metacharacters.
+pub fn safe_url_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '?' | '=' | '&'))
+}
+
+#[cfg(test)]
+mod shell_safety_tests {
+    use super::*;
+
+    #[test]
+    fn quote_neutralizes_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("x; rm -rf /"), "'x; rm -rf /'");
+    }
+
+    #[test]
+    fn hosts() {
+        assert!(safe_host("5.79.79.158"));
+        assert!(safe_host("delta.internal"));
+        assert!(safe_host("fe80::1"));
+        assert!(!safe_host("-oProxyCommand=evil"));
+        assert!(!safe_host("host;whoami"));
+        assert!(!safe_host("host $(id)"));
+        assert!(!safe_host(""));
+    }
+
+    #[test]
+    fn cmd_charset() {
+        assert!(safe_cmd_charset("bash /home/orobit/sigil-data/launch-delta.sh"));
+        assert!(safe_cmd_charset("/usr/local/bin/sigil-node start --port=9501"));
+        assert!(!safe_cmd_charset("bash x.sh; rm -rf /"));
+        assert!(!safe_cmd_charset("bash x.sh && curl evil"));
+        assert!(!safe_cmd_charset("$(reboot)"));
+        assert!(!safe_cmd_charset("a`b`"));
+        assert!(!safe_cmd_charset("a > /etc/passwd"));
+    }
+
+    #[test]
+    fn url_paths() {
+        assert!(safe_url_path("/posts/cb2d0a6d-4352-49a1-8e07-cd988341398a/comments"));
+        assert!(safe_url_path("/verify"));
+        assert!(safe_url_path("/agents/status?full=1&n=2"));
+        assert!(!safe_url_path("/posts$(whoami)"));
+        assert!(!safe_url_path("/x;curl evil"));
+        assert!(!safe_url_path("/x'y"));
+        assert!(!safe_url_path("/x y"));
+    }
+}
+
 // ── Handler modules ──
 pub mod build;
 pub mod test_combo;

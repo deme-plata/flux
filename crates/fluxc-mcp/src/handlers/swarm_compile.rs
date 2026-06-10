@@ -306,6 +306,11 @@ fn flux_swarm_cortex(args: &Value) -> String {
         .unwrap_or(3)
         .min(20) as usize;
     let preset_str = args.get("preset").and_then(|v| v.as_str()).unwrap_or("MaxPerf");
+    // SEC-002: `preset` is interpolated into inline JSON inside a remote shell
+    // string below — a `"` or `'` would break out of both layers. Identifiers only.
+    if preset_str.is_empty() || !preset_str.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return format!("error: preset {preset_str:?} rejected (identifier chars only) [SEC-002]");
+    }
     let nodes: Vec<String> = args
         .get("nodes")
         .and_then(|v| v.as_array())

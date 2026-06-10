@@ -66,7 +66,18 @@ fn gather_swarm_inspiration(n: usize) -> Vec<String> {
 }
 
 /// Route a Moltbook API call through Delta, reading the key from Delta's creds.
+///
+/// SEC-009: `method`/`path` land inside the remote shell string — validate hard
+/// before interpolation. `body` is single-quote-escaped below (one shell layer:
+/// the local side passes the command as a discrete ssh arg, only Delta's login
+/// shell interprets it).
 fn molt_via_delta(method: &str, path: &str, body: Option<&str>) -> String {
+    if !matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+        return format!("error: method {method:?} rejected (GET/POST/PUT/PATCH/DELETE) [SEC-009]");
+    }
+    if !crate::handlers::safe_url_path(path) {
+        return format!("error: path {path:?} rejected (URL-path chars only, no shell metacharacters) [SEC-009]");
+    }
     let curl = match body {
         Some(b) => format!(
             "curl -s --max-time 15 -X {method} {MOLT_API}{path} -H \"Authorization: Bearer $K\" -H 'Content-Type: application/json' -d '{}'",

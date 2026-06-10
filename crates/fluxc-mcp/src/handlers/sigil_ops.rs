@@ -28,7 +28,7 @@
 use std::process::Command;
 use serde_json::{json, Value};
 
-use crate::handlers::{ToolDef, ToolRegistry};
+use crate::handlers::{safe_cmd_charset, safe_host, ToolDef, ToolRegistry};
 
 /// Default SIGIL node host (Delta — never Epsilon production).
 const DEFAULT_SIGIL_HOST: &str = "5.79.79.158";
@@ -302,6 +302,9 @@ fn sigil_benchmark(a: &Value) -> String {
 // ── node restart (real process control) ──
 fn sigil_node_restart(a: &Value) -> String {
     let host = arg_str(a, "host", DEFAULT_SIGIL_HOST);
+    if !safe_host(&host) {
+        return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
+    }
     let via = arg_str(a, "via", "process");
     let remote = if via == "systemd" {
         "systemctl restart sigil-node && sleep 2 && systemctl is-active sigil-node".to_string()
@@ -323,6 +326,19 @@ fn sigil_node_deploy(a: &Value) -> String {
     if bin.is_empty() {
         return "error: binary_path required".into();
     }
+    if !safe_host(&host) {
+        return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
+    }
+    // SEC-001: `launch` is interpolated into the remote shell string below.
+    // Restrict it to a binary path + plain flags — every shell metacharacter
+    // (; | & $ ` > < parens quotes) is rejected, so it cannot break out of the
+    // relaunch command into arbitrary remote execution.
+    if !safe_cmd_charset(&launch) {
+        return format!(
+            "error: launch_cmd {launch:?} rejected — only [A-Za-z0-9 /._-=] allowed \
+             (no shell metacharacters) [SEC-001]"
+        );
+    }
     let scp = Command::new("scp")
         .arg("-o").arg("StrictHostKeyChecking=no")
         .arg(&bin)
@@ -342,6 +358,9 @@ fn sigil_node_deploy(a: &Value) -> String {
     run_ssh(&host, &remote, "deploy + relaunch sigil-node")
 }
 
+/// SEC-012: `remote` is executed by the remote login shell as ONE string.
+/// Callers MUST validate (`safe_host`/`safe_cmd_charset`) or `shell_quote()`
+/// every value interpolated into it — never pass raw MCP args through.
 fn run_ssh(host: &str, remote: &str, what: &str) -> String {
     let out = Command::new("ssh")
         .arg("-o").arg("StrictHostKeyChecking=no")

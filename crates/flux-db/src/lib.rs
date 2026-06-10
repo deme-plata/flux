@@ -75,6 +75,13 @@ pub struct Database {
     /// v0.14: registry of column families. Shared across clones so
     /// `db.cf("users")` returns the same handle for every clone of `db`.
     cfs: Arc<cf::CfRegistry>,
+    /// v0.35: cache of opened SST readers, keyed by path, shared across clones.
+    /// SST files are IMMUTABLE once written (LSM: flush creates, compaction
+    /// replaces+deletes), so caching a reader per path is sound. Before this,
+    /// `get()`/`iter()` called `SstReader::open` PER CALL per SST — with the old
+    /// eager open that meant re-reading the entire store from disk on every
+    /// lookup. Pruned against the live SST list after compaction.
+    sst_readers: Arc<RwLock<std::collections::HashMap<PathBuf, Arc<SstReader>>>>,
 }
 
 struct DbInner {
@@ -159,6 +166,7 @@ impl Database {
             path: path.clone(),
             block_cache: Arc::new(cache::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES)),
             cfs: Arc::new(cf::CfRegistry::new(path)),
+            sst_readers: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
 
@@ -174,7 +182,22 @@ impl Database {
             path: self.path,
             block_cache: Arc::new(cache::BlockCache::new(bytes)),
             cfs: self.cfs,
+            sst_readers: self.sst_readers,
         }
+    }
+
+    /// v0.35: fetch (or open-and-cache) the reader for one SST. Fast path is a
+    /// read-lock map hit; misses open the reader (header+bloom only — the body
+    /// is lazy) and insert. SSTs are immutable, so entries never go stale —
+    /// deleted files simply stop being asked for (the caller iterates the live
+    /// `list_ssts` result) and are pruned after compaction.
+    fn sst_cached(&self, path: &std::path::Path) -> Result<Arc<SstReader>, String> {
+        if let Some(r) = self.sst_readers.read().get(path) {
+            return Ok(Arc::clone(r));
+        }
+        let r = Arc::new(SstReader::open(path)?);
+        self.sst_readers.write().insert(path.to_path_buf(), Arc::clone(&r));
+        Ok(r)
     }
 
     /// Cache stats as (hits, misses, current_bytes). Useful for tests and
@@ -304,8 +327,8 @@ impl Database {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         if let Ok(ssts) = list_ssts(&self.path) {
             for sst in &ssts {
-                if let Ok(table) = SstReader::open(sst) {
-                    for (k, v) in table.into_pairs() {
+                if let Ok(table) = self.sst_cached(sst) {
+                    for (k, v) in table.pairs() {
                         if v.is_empty() { merged.remove(&k); } else { merged.insert(k, v); }
                     }
                 }
@@ -361,7 +384,10 @@ impl Database {
         // the same blocks on hot keys.
         let ssts = list_ssts(&self.path)?;
         for sst in ssts.iter().rev() {
-            let table = SstReader::open(sst)?;
+            // v0.35: cached reader (header+bloom resident, body lazy). A bloom miss
+            // now costs zero disk reads; before this line the WHOLE file was read
+            // per get per SST.
+            let table = self.sst_cached(sst)?;
             if !table.bloom.may_contain(key) {
                 continue;
             }
@@ -533,6 +559,7 @@ impl Clone for Database {
             path: self.path.clone(),
             block_cache: Arc::clone(&self.block_cache),
             cfs: Arc::clone(&self.cfs),
+            sst_readers: Arc::clone(&self.sst_readers),
         }
     }
 }
@@ -836,8 +863,8 @@ impl Database {
         // Oldest-first so newer writes overwrite older ones.
         if let Ok(ssts) = list_ssts(&self.path) {
             for sst in &ssts {
-                if let Ok(table) = SstReader::open(sst) {
-                    for (k, v) in table.into_pairs() {
+                if let Ok(table) = self.sst_cached(sst) {
+                    for (k, v) in table.pairs() {
                         if v.is_empty() {
                             merged.remove(&k);
                         } else {
@@ -865,8 +892,8 @@ impl Database {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         if let Ok(ssts) = list_ssts(&self.path) {
             for sst in &ssts {
-                if let Ok(table) = SstReader::open(sst) {
-                    for (k, v) in table.into_pairs() {
+                if let Ok(table) = self.sst_cached(sst) {
+                    for (k, v) in table.pairs() {
                         if v.is_empty() { merged.remove(&k); } else { merged.insert(k, v); }
                     }
                 }
@@ -893,8 +920,8 @@ impl Database {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         if let Ok(ssts) = list_ssts(&self.path) {
             for sst in &ssts {
-                if let Ok(table) = SstReader::open(sst) {
-                    for (k, v) in table.into_pairs() {
+                if let Ok(table) = self.sst_cached(sst) {
+                    for (k, v) in table.pairs() {
                         if v.is_empty() { merged.remove(&k); } else { merged.insert(k, v); }
                     }
                 }
@@ -1029,63 +1056,101 @@ fn sst_name(level: u8, sequence: u64) -> String {
 ///   * version 2 — v0.12 block-based (data blocks + index + footer).
 pub struct SstReader {
     pub bloom: BloomFilter,
-    /// For v1: the LZ4-compressed payload. For v2: the raw block-body
-    /// bytes that BlockSstReader will parse.
-    payload_compressed: Vec<u8>,
     version: u8,
     legacy: bool,
-    /// Path of the SST on disk — required as the block-cache key prefix.
-    /// Empty when the reader was built from in-memory bytes (compaction).
+    /// Path of the SST on disk — required as the block-cache key prefix AND,
+    /// since v0.35, to lazily read the payload on first access.
     path: PathBuf,
+    /// v0.35 LAZY PAYLOAD: byte range of the body within the file. `open()` now
+    /// reads ONLY the 22-byte header + bloom filter (a few KB); the body is read
+    /// on first [`Self::payload`] access. Before this, `open()` `fs::read` the
+    /// WHOLE file — and `Database::get` opens every SST per lookup, so a single
+    /// point-read on a multi-GB store re-read gigabytes (measured: 78 s "open",
+    /// ms-class gets). Bloom-misses now never touch the body at all.
+    payload_off: u64,
+    payload_len: usize,
+    payload: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl SstReader {
     pub fn open(path: &std::path::Path) -> Result<Self, String> {
-        let raw = fs::read(path).map_err(|e| format!("read sst {}: {}", path.display(), e))?;
-        if raw.len() < 4 || raw[0..4] != SST_MAGIC {
+        use std::io::Read;
+        let mut f = fs::File::open(path).map_err(|e| format!("read sst {}: {}", path.display(), e))?;
+        let flen = f.metadata().map_err(|e| format!("stat sst {}: {}", path.display(), e))?.len();
+        // Legacy (no FXDB magic / file shorter than the magic): whole file is the payload.
+        let mut magic = [0u8; 4];
+        let is_versioned = flen >= 4 && f.read_exact(&mut magic).is_ok() && magic == SST_MAGIC;
+        if !is_versioned {
             return Ok(SstReader {
                 bloom: BloomFilter::passthrough(),
-                payload_compressed: raw,
                 version: 0,
                 legacy: true,
                 path: path.to_path_buf(),
+                payload_off: 0,
+                payload_len: flen as usize,
+                payload: std::sync::OnceLock::new(),
             });
         }
-        let version = raw[4];
+        // Bytes 4..22 of the header (we already consumed the 4-byte magic).
+        let mut rest = [0u8; 18];
+        f.read_exact(&mut rest).map_err(|_| "SST truncated in header".to_string())?;
+        let version = rest[0]; // raw[4]
         if version != 1 && version != 2 {
             return Err(format!("unsupported SST version {} (supported: 1, 2)", version));
         }
-        let bloom_num_hashes = u32::from_le_bytes([raw[14], raw[15], raw[16], raw[17]]) as usize;
-        let bloom_len = u32::from_le_bytes([raw[18], raw[19], raw[20], raw[21]]) as usize;
-        let bloom_start = 22;
-        let bloom_end = bloom_start + bloom_len;
-        if raw.len() < bloom_end + 4 {
-            return Err("SST truncated in bloom".into());
-        }
+        let bloom_num_hashes = u32::from_le_bytes([rest[10], rest[11], rest[12], rest[13]]) as usize; // raw[14..18]
+        let bloom_len = u32::from_le_bytes([rest[14], rest[15], rest[16], rest[17]]) as usize;        // raw[18..22]
+        let mut bloom_bytes = vec![0u8; bloom_len];
+        f.read_exact(&mut bloom_bytes).map_err(|_| "SST truncated in bloom".to_string())?;
         let mut bits: Vec<u64> = Vec::with_capacity(bloom_len / 8);
-        let mut i = bloom_start;
-        while i + 8 <= bloom_end {
+        let mut i = 0;
+        while i + 8 <= bloom_len {
             bits.push(u64::from_le_bytes([
-                raw[i], raw[i+1], raw[i+2], raw[i+3],
-                raw[i+4], raw[i+5], raw[i+6], raw[i+7],
+                bloom_bytes[i], bloom_bytes[i+1], bloom_bytes[i+2], bloom_bytes[i+3],
+                bloom_bytes[i+4], bloom_bytes[i+5], bloom_bytes[i+6], bloom_bytes[i+7],
             ]));
             i += 8;
         }
         let bloom = BloomFilter { bits, num_hashes: bloom_num_hashes.max(1) };
-        let payload_len = u32::from_le_bytes([
-            raw[bloom_end], raw[bloom_end+1], raw[bloom_end+2], raw[bloom_end+3],
-        ]) as usize;
-        let payload_start = bloom_end + 4;
-        let payload_end = payload_start + payload_len;
-        if raw.len() < payload_end {
+        let mut plen = [0u8; 4];
+        f.read_exact(&mut plen).map_err(|_| "SST truncated in bloom".to_string())?;
+        let payload_len = u32::from_le_bytes(plen) as usize;
+        let payload_off = (22 + bloom_len + 4) as u64;
+        if flen < payload_off + payload_len as u64 {
             return Err("SST truncated in payload".into());
         }
         Ok(SstReader {
             bloom,
-            payload_compressed: raw[payload_start..payload_end].to_vec(),
             version,
             legacy: false,
             path: path.to_path_buf(),
+            payload_off,
+            payload_len,
+            payload: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// v0.35: the SST body, read from disk ON FIRST ACCESS (and kept). A read
+    /// failure (file vanished mid-run, truncation) logs and yields an empty
+    /// body — lookups then find nothing, the same observable behavior as a
+    /// torn SST today, never a panic.
+    fn payload(&self) -> &[u8] {
+        self.payload.get_or_init(|| {
+            use std::io::{Read, Seek, SeekFrom};
+            let read = (|| -> std::io::Result<Vec<u8>> {
+                let mut f = fs::File::open(&self.path)?;
+                f.seek(SeekFrom::Start(self.payload_off))?;
+                let mut buf = vec![0u8; self.payload_len];
+                f.read_exact(&mut buf)?;
+                Ok(buf)
+            })();
+            match read {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[flux-db] lazy SST payload read failed {}: {e}", self.path.display());
+                    Vec::new()
+                }
+            }
         })
     }
 
@@ -1097,7 +1162,7 @@ impl SstReader {
     /// If `cache` is provided, v2 reads consult and populate it.
     pub fn lookup_cached(&self, key: &[u8], cache: Option<&cache::BlockCache>) -> Option<Vec<u8>> {
         if self.version == 2 {
-            let body = self.payload_compressed.as_slice();
+            let body = self.payload(); // v0.35: lazy — first access reads the file body
             let reader = match block::BlockSstReader::new(body) {
                 Ok(r) => r,
                 Err(_) => return None,
@@ -1122,7 +1187,7 @@ impl SstReader {
         }
 
         // v1 / legacy path — whole-payload decompress + linear scan.
-        let data = decompress(&self.payload_compressed);
+        let data = decompress(self.payload());
         let mut pos = 0;
         while pos + 8 <= data.len() {
             let kl = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
@@ -1145,9 +1210,15 @@ impl SstReader {
     }
 
     pub fn into_pairs(self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.pairs()
+    }
+
+    /// v0.35: borrowing variant of [`Self::into_pairs`] so cached `Arc<SstReader>`s
+    /// (the Database reader cache) can be drained without cloning the reader.
+    pub fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let _ = self.legacy;
         if self.version == 2 {
-            if let Ok(r) = block::BlockSstReader::new(&self.payload_compressed) {
+            if let Ok(r) = block::BlockSstReader::new(self.payload()) {
                 if let Ok(p) = r.pairs() {
                     return p;
                 }
@@ -1155,7 +1226,7 @@ impl SstReader {
             return Vec::new();
         }
         // v1 / legacy.
-        let data = decompress(&self.payload_compressed);
+        let data = decompress(self.payload());
         let mut out = Vec::new();
         let mut pos = 0;
         while pos + 8 <= data.len() {
@@ -1345,6 +1416,9 @@ impl Database {
                 // Drop cached blocks for the file we're about to remove —
                 // otherwise they sit as zombies until evicted by capacity.
                 self.block_cache.invalidate_sst(&h.path);
+                // v0.35: drop the cached reader too (frees its lazily-loaded body;
+                // the path will never be listed again).
+                self.sst_readers.write().remove(&h.path);
                 let _ = fs::remove_file(&h.path);
             }
             if current_level == 0 {

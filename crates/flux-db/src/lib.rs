@@ -794,34 +794,32 @@ impl Database {
     /// before. The memtable is cleared on success; auto-compaction triggers
     /// when the SST count crosses AUTO_COMPACT_THRESHOLD.
     pub fn flush(&self) -> Result<(), String> {
-        let (sst_path, payload, bloom) = {
-            let inner = self.inner.read();
-            if inner.memtable.is_empty() {
-                return Ok(());
-            }
-            // v0.15: flushes always land at L0; the leveled compactor pushes
-            // them deeper as L0 fills up.
-            let sst_path = self.path.join(sst_name(0, inner.sequence));
-            let mut bloom = BloomFilter::new(inner.memtable.len().max(16), 0.01);
-            let mut raw = Vec::new();
-            for (k, v) in &inner.memtable {
-                raw.extend_from_slice(&(k.len() as u32).to_le_bytes());
-                raw.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                raw.extend_from_slice(k);
-                raw.extend_from_slice(v);
-                bloom.insert(k);
-            }
-            (sst_path, raw, bloom)
-        };
-
-        // v0.12: payload is a block-based SST body (data blocks + index +
-        // footer) rather than a single LZ4 buffer. SstReader auto-detects
-        // by inspecting the SST_VERSION byte.
-        let key_count = self.inner.read().memtable.len() as u64;
-        let _ = payload; // payload was constructed above for bloom-fill side effect
+        // v0.35 WAL-TRUNCATE: hold ONE write lock across snapshot → SST write+fsync
+        // → memtable.clear → WAL truncate. Three reasons it must be atomic:
+        //   1. Correctness — `put()` also takes this write lock, so no concurrent
+        //      write can be lost in the gap between clearing the memtable and
+        //      truncating the WAL (the reader thread shares this Database via Arc,
+        //      so put-vs-flush across threads is real).
+        //   2. Consistency — the pre-v0.35 code snapshotted the memtable under TWO
+        //      separate read locks (bloom from one, SST body from another); a put
+        //      between them could desync bloom vs body. One lock = one snapshot.
+        //   3. The WAL truncate is only crash-safe once the SST is fsync'd; doing
+        //      it under the lock keeps the ordering (sync_all → clear → truncate).
+        let mut inner = self.inner.write();
+        if inner.memtable.is_empty() {
+            return Ok(());
+        }
+        // v0.15: flushes always land at L0; the leveled compactor pushes them deeper.
+        let sst_path = self.path.join(sst_name(0, inner.sequence));
+        let key_count = inner.memtable.len() as u64;
+        let mut bloom = BloomFilter::new(inner.memtable.len().max(16), 0.01);
+        // v0.12: block-based SST body (data blocks + index + footer); SstReader
+        // auto-detects by the SST_VERSION byte. Build bloom + body from the SAME
+        // snapshot so they can never disagree.
         let mut builder = block::SstBuilder::new();
-        for (k, v) in self.inner.read().memtable.iter() {
+        for (k, v) in inner.memtable.iter() {
             builder.add(k, v);
+            bloom.insert(k);
         }
         let block_body = builder.finish();
 
@@ -837,15 +835,26 @@ impl Database {
         out.extend_from_slice(&(block_body.len() as u32).to_le_bytes());
         out.extend_from_slice(&block_body);
 
+        // Write the SST and FSYNC it. sync_all (not the old buffer-only flush) is
+        // MANDATORY before truncating the WAL — otherwise a crash between SST write
+        // and WAL truncate would lose the memtable's data entirely.
         let mut f = fs::File::create(&sst_path).map_err(|e| format!("create sst: {}", e))?;
         f.write_all(&out).map_err(|e| format!("sst write: {}", e))?;
-        f.flush().map_err(|e| format!("sst flush: {}", e))?;
+        f.sync_all().map_err(|e| format!("sst sync: {}", e))?;
 
-        // Clear memtable — its content is now durable in the SST.
-        {
-            let mut inner = self.inner.write();
-            inner.memtable.clear();
+        // The memtable is now durable in the SST. Clear it AND truncate the WAL —
+        // the WAL only ever needs to cover the (now-empty) memtable. Without this
+        // the WAL grew unbounded (1.5 GB observed on the live sigil-top store) and
+        // every open() re-read + replayed the entire history into RAM (the real
+        // ~78s cold-open cost — the SSTs were never the bottleneck).
+        inner.memtable.clear();
+        if let Some(w) = inner.wal_file.as_mut() {
+            let _ = w.flush();
+            w.set_len(0).map_err(|e| format!("wal truncate: {}", e))?;
+            // wal_file is O_APPEND, so the next write goes to the new EOF (0) — no
+            // seek needed. inner.sequence is intentionally NOT reset (monotonic).
         }
+        drop(inner);
 
         // Auto-compact if we've accumulated too many SSTs.
         let sst_count = list_ssts(&self.path)?.len();

@@ -277,6 +277,33 @@ impl SearchEngine {
         self.cache.clear();
     }
 
+    /// Bulk-load many documents, then build the runtime indexes ONCE — O(n) total.
+    ///
+    /// `index_document` does a full O(n) `rebuild_runtime_indexes()` every time it
+    /// sees a url it already holds (`replacing == true`). When the source stream
+    /// has many duplicate urls (e.g. millions of mining events keyed by the same
+    /// wallet/tag in the explorer history), feeding them one-at-a-time degrades to
+    /// O(n²) and a restart never finishes. This collapses that to O(n): dedup into
+    /// the document map (last write wins, same as `insert`), then rebuild once.
+    pub fn bulk_load(&mut self, docs: impl IntoIterator<Item = Document>) {
+        for mut doc in docs {
+            if doc.word_count == 0 {
+                doc.word_count = tokenize(&doc.content).len();
+            }
+            if doc.content_hash.is_empty() {
+                doc.content_hash = blake3::hash(doc.content.as_bytes())
+                    .to_hex()
+                    .as_str()
+                    .chars()
+                    .take(32)
+                    .collect();
+            }
+            self.documents.insert(doc.url.clone(), doc);
+        }
+        self.rebuild_runtime_indexes();
+        self.cache.clear();
+    }
+
     pub fn add_link(&mut self, from_url: &str, to_url: &str, weight: f64) {
         self.pagerank.add_link(from_url, to_url, weight);
         self.link_graph.entry(from_url.to_string()).or_default().push((to_url.to_string(), weight));

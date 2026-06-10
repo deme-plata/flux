@@ -182,18 +182,62 @@ impl HistoryStore {
         Ok(store)
     }
 
+    /// Open WITHOUT building the search index — returns instantly, search starts
+    /// empty. The caller is expected to build the index off the hot path (e.g. a
+    /// background thread via `build_detached_index` + `install_index`) so a
+    /// service can bind its port immediately instead of blocking on a large
+    /// re-tokenize. flux-db is still fully open: append/get/by_tag work at once;
+    /// only full-text `search` is empty until the index is installed.
+    pub fn open_fast(path: impl AsRef<Path>) -> Result<Self, HistoryError> {
+        let db = Database::open(path.as_ref().to_path_buf()).map_err(HistoryError::Db)?;
+        let next_seq = match db.get(K_SEQ).map_err(HistoryError::Db)? {
+            Some(v) if v.len() == 8 => u64::from_be_bytes(v.try_into().unwrap()),
+            _ => 0,
+        };
+        Ok(HistoryStore { db, search: SearchEngine::new(), next_seq })
+    }
+
+    /// Build a fresh search index from the persisted entries WITHOUT mutating
+    /// self — takes `&self`, so it can run while readers hold a shared lock on
+    /// the store (only writers are blocked). Pair with `install_index` to swap
+    /// the result in under a brief exclusive lock. O(n) (bulk_load).
+    pub fn build_detached_index(&self) -> Result<SearchEngine, HistoryError> {
+        let mut engine = SearchEngine::new();
+        let mut docs = Vec::new();
+        for (_k, v) in self.db.iter_from(P_PRIMARY) {
+            if !_k.starts_with(P_PRIMARY) {
+                break;
+            }
+            let stored: Stored = serde_json::from_slice(&v).map_err(|e| HistoryError::Codec(e.to_string()))?;
+            docs.push(to_document(&stored.entry));
+        }
+        engine.bulk_load(docs);
+        Ok(engine)
+    }
+
+    /// Swap in a pre-built search index (from `build_detached_index`).
+    pub fn install_index(&mut self, engine: SearchEngine) {
+        self.search = engine;
+    }
+
     /// Rebuild the flux-search index from every persisted primary entry. Called
     /// on `open`; also exposed for explicit re-index. O(n) over stored entries.
     pub fn rebuild_search_index(&mut self) -> Result<(), HistoryError> {
         let mut engine = SearchEngine::new();
+        // Collect first, then bulk_load — per-doc index_document() degrades to
+        // O(n²) when many stored entries share a url (e.g. millions of mining
+        // events keyed by the same wallet/tag), which on a large store makes a
+        // restart never finish. bulk_load dedups + rebuilds the index once = O(n).
+        let mut docs = Vec::new();
         for (_k, v) in self.db.iter_from(P_PRIMARY) {
             // stop once we leave the primary keyspace
             if !_k.starts_with(P_PRIMARY) {
                 break;
             }
             let stored: Stored = serde_json::from_slice(&v).map_err(|e| HistoryError::Codec(e.to_string()))?;
-            engine.index_document(to_document(&stored.entry));
+            docs.push(to_document(&stored.entry));
         }
+        engine.bulk_load(docs);
         self.search = engine;
         Ok(())
     }

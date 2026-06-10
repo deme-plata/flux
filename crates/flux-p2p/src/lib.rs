@@ -290,6 +290,27 @@ impl NetworkManager {
             }
             swarm.started = true;
 
+            // v0.35 (sync-earlier #2): EAGER one-shot dial of every bootstrap
+            // endpoint at startup. kademlia.bootstrap() above only schedules a
+            // DHT lookup; without this, the first PeerConnected waits either on
+            // that lookup OR on the 5s mesh-maintenance timer's first tick — so
+            // time-to-first-peer carried an avoidable 1-5s gap even when the
+            // bootstrap ip:ports are up and reachable right now. Dial them
+            // immediately using the SAME bare-endpoint path the retry arm uses
+            // (strip /p2p/ → id-rotation-immune; Identify learns the real id
+            // post-handshake). No-op once connected; the retry timer still
+            // self-heals drops. This is the single cheapest first-peer win.
+            for addr in &swarm.bootstrap_peers_cache.clone() {
+                let target = ip_tcp_endpoint(&addr.to_string())
+                    .unwrap_or_else(|| addr.to_string());
+                match target.parse::<libp2p::Multiaddr>() {
+                    Ok(ma) => if let Err(e) = swarm.swarm.dial(ma) {
+                        tracing::debug!(%target, %e, "eager bootstrap dial failed (retry timer will catch it)");
+                    },
+                    Err(e) => tracing::debug!(%target, %e, "bad bootstrap endpoint (eager dial)"),
+                }
+            }
+
             // Batch flush timer
             let mut flush_interval = tokio::time::interval(
                 std::time::Duration::from_millis(swarm.batch_config.flush_interval_ms)

@@ -14,6 +14,11 @@ pub fn keygen() -> (Vec<u8>, Vec<u8>) {
 }
 
 pub fn sign(msg: &[u8], sk_bytes: &[u8], pk_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    // SEC-010: enforce the Level-5 public-key length before from_bytes so a
+    // shorter (downgraded-level) key can't slip through.
+    if pk_bytes.len() != public_key_size() {
+        return Err(format!("SQIsign: pk must be {} bytes (Level 5), got {}", public_key_size(), pk_bytes.len()));
+    }
     let sk: SigningKey<Level5> = SigningKey::<Level5>::from_bytes(sk_bytes)
         .map_err(|e| format!("SQIsign: invalid sk: {:?}", e))?;
     let pk: PublicKey<Level5> = PublicKey::<Level5>::from_bytes(pk_bytes)
@@ -27,6 +32,16 @@ pub fn sign(msg: &[u8], sk_bytes: &[u8], pk_bytes: &[u8]) -> Result<Vec<u8>, Str
 }
 
 pub fn verify(msg: &[u8], sig_bytes: &[u8], pk_bytes: &[u8]) -> Result<bool, String> {
+    // SEC-010: enforce the exact Level-5 sizes BEFORE from_bytes. Without this a
+    // 148-byte Level-1 signature (or a short pk) could be accepted as Level 5 —
+    // a signature-strength downgrade. signature_size()/public_key_size() are the
+    // canonical L5 wire lengths (292 / 129).
+    if sig_bytes.len() != signature_size() {
+        return Err(format!("SQIsign: sig must be {} bytes (Level 5), got {}", signature_size(), sig_bytes.len()));
+    }
+    if pk_bytes.len() != public_key_size() {
+        return Err(format!("SQIsign: pk must be {} bytes (Level 5), got {}", public_key_size(), pk_bytes.len()));
+    }
     let pk: PublicKey<Level5> = PublicKey::<Level5>::from_bytes(pk_bytes)
         .map_err(|e| format!("SQIsign: invalid pk: {:?}", e))?;
     let sig: sqisign_rs::Signature<Level5> = sqisign_rs::Signature::<Level5>::from_bytes(sig_bytes)
@@ -144,4 +159,20 @@ mod tests {
     #[test] fn test_sig_size() { let (sk,pk)=keygen(); assert_eq!(sign(b"x",&sk,&pk).unwrap().len(), 292); }
     #[test] fn test_bench() { let r=benchmark(3); assert!(r.keygen_avg_us>0.0); assert_eq!(r.sig_size,292); }
     #[test] fn test_tiers() { assert_eq!(recommend_for_medium("dns_txt",20),SigTier::SqiOnly); assert_eq!(recommend_for_medium("auth_session",0),SigTier::DilithiumPreferred); }
+
+    #[test]
+    fn test_rejects_wrong_length_sig_and_pk() {
+        // SEC-010: a downgraded-length (e.g. Level-1 148-byte) sig must be a hard
+        // error, never silently accepted; likewise a short public key.
+        let (sk, pk) = keygen();
+        let sig = sign(b"x", &sk, &pk).unwrap();
+        assert_eq!(sig.len(), signature_size());
+        // truncated sig → Err, not Ok(false)
+        assert!(verify(b"x", &sig[..148], &pk).is_err());
+        assert!(verify(b"x", &[], &pk).is_err());
+        // short pk → Err
+        assert!(verify(b"x", &sig, &pk[..64]).is_err());
+        // correct lengths still verify
+        assert!(verify(b"x", &sig, &pk).unwrap());
+    }
 }

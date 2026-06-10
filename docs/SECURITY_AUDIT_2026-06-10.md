@@ -81,11 +81,13 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
   env / history) replaced — jq now emits a curl-config `header` line piped to `curl -K -`, so the
   Moltbook key never lands in any argv or shell variable on Delta. fluxc-mcp 63/63.
 
-### SEC-010 ⚪ SQIsign verify does not enforce Level-5 signature length
+### SEC-010 ✅ SQIsign verify does not enforce Level-5 signature length
 - `crates/flux-sqisign/src/lib.rs:29-38`
 - `Signature::<Level5>::from_bytes(sig_bytes)` never checks `sig_bytes.len() == 292`; a Level-1
   (148B) sig may deserialize → downgrade risk. `signature_size()` exists but is never consulted.
-- Fix: explicit length check before `from_bytes` in both sig and pk paths.
+- FIXED 2026-06-10: `verify` rejects any sig != 292 or pk != 129 with a hard Err BEFORE from_bytes;
+  `sign` rejects a non-129 pk too. New `test_rejects_wrong_length_sig_and_pk` (148-byte/empty/short-pk
+  → Err, correct lengths still verify). Test green.
 
 ## MEDIUM
 
@@ -103,13 +105,20 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
   value. Remote ssh commands are inherently one shell string, so the helper-based
   contract is the structural fix; new SSH-touching handlers must use the helpers.
 
-### SEC-013 ⚪ bincode deserialization of peer blobs without size limit
+### SEC-013 ✅ bincode deserialization of peer blobs without size limit
 - `crates/flux-sync/src/lib.rs:144` — malicious peer blob can pre-allocate huge Vec before error.
-- Fix: `bincode` options `.with_limit(1_000_000)`.
+- FIXED 2026-06-10: outer input cap (reject blob > 16 MiB) + `bincode::config().limit(16 MiB).deserialize`
+  so a forged length prefix in a SMALL blob can't drive a huge pre-allocation. `bincode::config()` is
+  fixint/LE — wire-compatible with the `bincode::serialize` used by `blob()`. flux-sync 3/3.
 
-### SEC-014 ⚪ WASM miner FFI bounds
-- `crates/quillonos-q-miner/src/lib.rs:87-88,152-155` — `from_raw_parts(ptr, 32)` with no host length
-  param; `:41-44` scratch allocator uses unchecked `+` (use `checked_add`).
+### SEC-014 ✅ (allocator) / ⚪ (FFI readers, accepted) WASM miner bounds
+- `crates/quillonos-q-miner/src/lib.rs:41-44` scratch allocator used unchecked `+`.
+- FIXED 2026-06-10: `alloc` now uses `checked_add` — overflow OR over-capacity → null, so a
+  near-usize::MAX `n` can't wrap past the bounds check.
+- ACCEPTED (not changed): the fixed-32 `from_raw_parts(ptr, 32)` readers (mine_batch, hash_meets_target,
+  blake3_oneshot). Under wasm32 sandboxing an out-of-bounds linear-memory read TRAPS (contained), not a
+  segfault; the host is the trusted QuillonOS tab glue. Adding a host-supplied length would change the
+  exported ABI — deferred unless an untrusted-host scenario appears.
 
 ### SEC-015 ⚪ Unauthenticated internal-state read endpoints
 - `crates/fluxc-core/src/serve.rs:620-633` — /api/stats, /api/xray, /api/goal/current leak workspace/

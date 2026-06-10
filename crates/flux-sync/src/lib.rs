@@ -141,7 +141,19 @@ impl BlockStore {
     /// Retrieve + BLAKE3-verify a block by content_root. None if absent/corrupt.
     pub fn retrieve(&self, root_hex: &str) -> Option<Vec<u8>> {
         let blob = std::fs::read(self.path(root_hex)).ok()?;
-        let (fb, shards): (FileBlock, Vec<Shard>) = bincode::deserialize(&blob).ok()?;
+        // SEC-013: blobs are peer-supplied (import_blob). Reject oversized inputs,
+        // and deserialize under a size limit so a FORGED length prefix in a small
+        // blob can't drive bincode into a huge pre-allocation (OOM). The limit is
+        // enforced as bytes are read — `bincode::config()` matches the fixint/LE
+        // encoding of `bincode::serialize`, so it's wire-compatible with `blob()`.
+        const MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024; // a block is small; 16 MiB is generous
+        if blob.len() as u64 > MAX_BLOB_BYTES {
+            return None;
+        }
+        let (fb, shards): (FileBlock, Vec<Shard>) = bincode::config()
+            .limit(MAX_BLOB_BYTES)
+            .deserialize(&blob)
+            .ok()?;
         // reassemble() re-hashes the output and checks it == fb.content_root.
         let out = reassemble(&fb, &shards, &self.key).ok()?;
         // Belt-and-suspenders: the FILE name must match the verified content too.

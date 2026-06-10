@@ -38,12 +38,17 @@ static mut SCRATCH_HEAD: usize = 0;
 #[no_mangle]
 pub extern "C" fn alloc(n: usize) -> *mut u8 {
     unsafe {
-        if SCRATCH_HEAD + n > SCRATCH_LEN {
-            return core::ptr::null_mut();
+        // SEC-014: checked_add so a pathological `n` near usize::MAX can't wrap
+        // `SCRATCH_HEAD + n` past the bounds check and hand out an in-bounds
+        // pointer with a bogus head. Overflow OR over-capacity → null.
+        match SCRATCH_HEAD.checked_add(n) {
+            Some(end) if end <= SCRATCH_LEN => {
+                let p = SCRATCH.as_mut_ptr().add(SCRATCH_HEAD);
+                SCRATCH_HEAD = end;
+                p
+            }
+            _ => core::ptr::null_mut(),
         }
-        let p = SCRATCH.as_mut_ptr().add(SCRATCH_HEAD);
-        SCRATCH_HEAD += n;
-        p
     }
 }
 

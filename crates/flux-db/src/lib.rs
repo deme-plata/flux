@@ -162,10 +162,17 @@ impl Database {
             }
         }
 
-        let wal_file = fs::OpenOptions::new()
-            .create(true).write(true).append(true)
+        let mut wal_file = fs::OpenOptions::new()
+            .create(true).read(true).write(true)
             .open(&wal_path)
             .map_err(|e| format!("create wal: {}", e))?;
+        // v0.36.1: NOT append-mode. Windows strips FILE_WRITE_DATA from append
+        // handles, so set_len(0) (WAL truncate after flush) is denied (os err 5,
+        // "Adgang naegtet"). A plain write handle seeked to EOF appends
+        // identically AND can truncate. write_wal_entry only write_all's, so the
+        // position advances naturally; truncate seeks back to 0.
+        std::io::Seek::seek(&mut wal_file, std::io::SeekFrom::End(0))
+            .map_err(|e| format!("wal seek end: {}", e))?;
 
         // v0.36: seed the auto-flush counter from the WAL bytes already on
         // disk, so a store reopened with a fat WAL flushes on its first write
@@ -944,8 +951,9 @@ impl Database {
         if let Some(w) = inner.wal_file.as_mut() {
             let _ = w.flush();
             w.set_len(0).map_err(|e| format!("wal truncate: {}", e))?;
-            // wal_file is O_APPEND, so the next write goes to the new EOF (0) — no
-            // seek needed. inner.sequence is intentionally NOT reset (monotonic).
+            // v0.36.1: plain write handle (not O_APPEND) → seek to 0 so the next
+            // write goes to the new EOF. inner.sequence stays monotonic.
+            let _ = std::io::Seek::seek(w, std::io::SeekFrom::Start(0));
         }
         // v0.36: the WAL is empty again — reset the auto-flush counter.
         inner.wal_bytes = 0;

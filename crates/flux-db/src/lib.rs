@@ -118,6 +118,99 @@ pub struct Snapshot {
     seq: u64,
 }
 
+/// v0.50 (LANE-A): sliding-window size for streaming WAL replay. The replay holds at
+/// most ~one window (plus a single oversized entry, if one exceeds it) in RAM at a time,
+/// so ANY WAL size replays in bounded memory — the 1.6 GB WAL that ate 3 GB RSS via the
+/// old `read_to_end` slurp now costs ~8 MiB for the reader. 8 MiB matches the chunk size
+/// used elsewhere in the stack and amortizes syscalls without bloating the resident set.
+const WAL_REPLAY_WINDOW: usize = 8 * 1024 * 1024;
+
+/// Streaming WAL replay into `memtable`. Replaces the former whole-file `read_to_end`
+/// slurp (which ballooned RAM to ~2× the WAL size — the OOM the 256 MiB quarantine guard
+/// only papers over). Reads the WAL through a fixed sliding window so peak RSS is bounded
+/// by `WAL_REPLAY_WINDOW` regardless of file size.
+///
+/// Wire format, CRC coverage, tombstone, and torn-write STOP semantics are BYTE-IDENTICAL
+/// to the slurp it replaces:
+///   entry = `[crc32: u32 LE][key_len: u32 LE][val_len: u32 LE][key][val]`
+///   the CRC covers `key_len ++ val_len ++ key ++ val`; replay stops at the FIRST bad CRC
+///   or truncated tail (pre-crash entries are kept, the partial post-crash entry dropped).
+fn replay_wal_streaming(
+    wal_path: &std::path::Path,
+    memtable: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+) -> Result<(), String> {
+    let mut f = fs::File::open(wal_path).map_err(|e| format!("open wal: {}", e))?;
+    // `buf` is the live window; `pos` is the parse cursor — bytes [pos..buf.len()) are
+    // unparsed. `pos` advances entry-by-entry WITHOUT copying; the window is only compacted
+    // (the consumed prefix dropped) and refilled when the tail can't satisfy the next read.
+    // `eof` latches once the file is drained so we stop refilling.
+    let mut buf: Vec<u8> = Vec::with_capacity(WAL_REPLAY_WINDOW + 4096);
+    let mut pos = 0usize;
+    let mut eof = false;
+
+    // Ensure at least `need` unparsed bytes are available at `buf[pos..]`, reading more from
+    // the file as required. FAST PATH: when the tail already satisfies `need`, return without
+    // copying or a syscall — this is the per-entry common case, so total memmove cost is
+    // ~O(file), not O(file × window). Only when the tail is too short do we compact the
+    // consumed prefix ONCE and refill a full window. Returns the unparsed-byte count from
+    // `pos` (>= `need` unless EOF was hit first).
+    fn ensure(
+        f: &mut fs::File,
+        buf: &mut Vec<u8>,
+        pos: &mut usize,
+        eof: &mut bool,
+        need: usize,
+    ) -> Result<usize, String> {
+        if buf.len() - *pos >= need {
+            return Ok(buf.len() - *pos); // fast path: nothing to do
+        }
+        if *pos > 0 {
+            buf.drain(0..*pos); // slide the small leftover tail to the front (≈once per window)
+            *pos = 0;
+        }
+        while buf.len() < need && !*eof {
+            let old = buf.len();
+            // Read at least a full window; grow to fit a single entry larger than the
+            // window (rare but must be CRC-checked whole, so it can't be streamed in halves).
+            let want = WAL_REPLAY_WINDOW.max(need - old);
+            buf.resize(old + want, 0);
+            let n = f.read(&mut buf[old..]).map_err(|e| format!("read wal: {}", e))?;
+            buf.truncate(old + n);
+            if n == 0 {
+                *eof = true;
+            }
+        }
+        Ok(buf.len() - *pos)
+    }
+
+    loop {
+        // 12-byte header: crc + key_len + val_len.
+        if ensure(&mut f, &mut buf, &mut pos, &mut eof, 12)? < 12 {
+            break; // clean end (no more entries) or a header-sized torn tail — drop & stop
+        }
+        let crc = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
+        let key_len = u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]) as usize;
+        let val_len = u32::from_le_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]) as usize;
+        let total = 12 + key_len + val_len;
+        if ensure(&mut f, &mut buf, &mut pos, &mut eof, total)? < total {
+            break; // torn write: the entry body is truncated — drop & stop
+        }
+        let body = &buf[pos + 4..pos + total]; // key_len ++ val_len ++ key ++ val (CRC coverage)
+        if crc32fast::hash(body) != crc {
+            break; // torn write / corruption: stop at the first bad CRC
+        }
+        let key = buf[pos + 12..pos + 12 + key_len].to_vec();
+        let val = buf[pos + 12 + key_len..pos + total].to_vec();
+        if val_len == 0 {
+            memtable.remove(&key); // tombstone
+        } else {
+            memtable.insert(key, val);
+        }
+        pos += total; // advance the cursor; the window slides only when the tail runs short
+    }
+    Ok(())
+}
+
 impl Database {
     /// Open or create a database at the given path.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
@@ -149,33 +242,11 @@ impl Database {
         // or truncated tail we stop — pre-crash entries are safe; the partial
         // post-crash entry is discarded.
         if wal_path.exists() {
-            let mut f = fs::File::open(&wal_path).map_err(|e| format!("open wal: {}", e))?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| format!("read wal: {}", e))?;
-            let mut pos = 0;
-            while pos + 12 <= buf.len() {
-                let crc = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]);
-                let key_len = u32::from_le_bytes([buf[pos+4], buf[pos+5], buf[pos+6], buf[pos+7]]) as usize;
-                let val_len = u32::from_le_bytes([buf[pos+8], buf[pos+9], buf[pos+10], buf[pos+11]]) as usize;
-                let body_start = pos + 12;
-                let body_end = body_start + key_len + val_len;
-                if body_end > buf.len() {
-                    break; // torn write: drop and stop
-                }
-                let body = &buf[pos+4..body_end];
-                let computed = crc32fast::hash(body);
-                if computed != crc {
-                    break; // torn write: drop and stop
-                }
-                let key = buf[body_start..body_start+key_len].to_vec();
-                let val = buf[body_start+key_len..body_end].to_vec();
-                if val_len == 0 {
-                    memtable.remove(&key); // tombstone
-                } else {
-                    memtable.insert(key, val);
-                }
-                pos = body_end;
-            }
+            // v0.50 (LANE-A): STREAMING replay — bounded RAM regardless of WAL size. The old
+            // read_to_end slurp held the whole WAL (+ a ~equal-size memtable) resident, which
+            // is the OOM the 256 MiB quarantine above only papers over. Semantics (CRC, torn
+            // write, tombstone) are byte-identical; see `replay_wal_streaming`.
+            replay_wal_streaming(&wal_path, &mut memtable)?;
         }
 
         let mut wal_file = fs::OpenOptions::new()
@@ -2866,6 +2937,142 @@ mod tests {
         let wal_len = tmp.join("flux.wal").metadata().unwrap().len();
         assert!(wal_len > 4096, "WAL should grow unbounded when disabled");
         assert_eq!(count_ssts(&tmp), 0);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── v0.50 (LANE-A): streaming WAL replay ────────────────────────────────────────────
+    /// Encode one WAL entry exactly as the writer does:
+    /// `[crc32 LE][key_len LE][val_len LE][key][val]`, CRC over `key_len++val_len++key++val`.
+    fn encode_wal_entry(key: &[u8], val: &[u8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(8 + key.len() + val.len());
+        body.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(val.len() as u32).to_le_bytes());
+        body.extend_from_slice(key);
+        body.extend_from_slice(val);
+        let crc = crc32fast::hash(&body);
+        let mut out = Vec::with_capacity(4 + body.len());
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn streaming_replay_matches_semantics_and_stops_on_torn_tail() {
+        // last-write-wins, tombstones, an entry that straddles the 8 MiB window boundary,
+        // and a torn (truncated) final entry that MUST be dropped — all byte-identical to
+        // the former read_to_end slurp.
+        let tmp = std::env::temp_dir().join("flux-db-test-stream-replay-semantics");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let wal = tmp.join("flux.wal");
+        let mut bytes = Vec::new();
+        bytes.extend(encode_wal_entry(b"a", b"1"));
+        bytes.extend(encode_wal_entry(b"b", b"22"));
+        bytes.extend(encode_wal_entry(b"a", b"333")); // overwrite a
+        // a value that forces the window to grow past WAL_REPLAY_WINDOW for one entry.
+        let big = vec![0x5Au8; WAL_REPLAY_WINDOW + 1024];
+        bytes.extend(encode_wal_entry(b"big", &big));
+        bytes.extend(encode_wal_entry(b"b", b"")); // tombstone b
+        bytes.extend(encode_wal_entry(b"c", b"keep"));
+        // torn tail: a header that claims a body longer than what follows.
+        let mut torn = encode_wal_entry(b"torn", b"xxxxxxxx");
+        torn.truncate(torn.len() - 4); // chop the last 4 bytes of val → truncated body
+        bytes.extend(torn);
+        fs::write(&wal, &bytes).unwrap();
+
+        let mut mt: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        replay_wal_streaming(&wal, &mut mt).unwrap();
+
+        assert_eq!(mt.get(b"a".as_slice()).map(|v| v.as_slice()), Some(b"333".as_slice()));
+        assert_eq!(mt.get(b"big".as_slice()).map(|v| v.len()), Some(big.len()));
+        assert!(!mt.contains_key(b"b".as_slice()), "b tombstoned");
+        assert_eq!(mt.get(b"c".as_slice()).map(|v| v.as_slice()), Some(b"keep".as_slice()));
+        assert!(!mt.contains_key(b"torn".as_slice()), "torn tail dropped");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn vm_rss_kb() -> u64 {
+        let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                return rest.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    /// ACCEPTANCE GATE (LANE-A.2): a synthetic ~1 GB WAL replays in bounded memory. Keys
+    /// cycle over a small space so the memtable stays tiny — this isolates the READER's
+    /// memory (the slurp was the OOM: it held the whole file + a ~equal memtable). A
+    /// sampler thread polls VmRSS during replay; the resident GROWTH must stay < 64 MiB.
+    /// The old read_to_end would have grown RSS by ~1 GB here. `#[ignore]` because it
+    /// writes 1 GB to TMPDIR (set SIGIL_WAL_TEST_GB to scale); run with `--ignored`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "writes ~1GB to TMPDIR; run explicitly with --ignored"]
+    fn streaming_replay_1gb_bounded_rss() {
+        use std::io::{BufWriter, Write as _};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let gb: u64 = std::env::var("SIGIL_WAL_TEST_GB").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let target_bytes: u64 = gb * 1024 * 1024 * 1024;
+        let tmp = std::env::temp_dir().join("flux-db-test-stream-replay-1gb");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let wal = tmp.join("flux.wal");
+
+        // ~1 KB values, keys cycling over 256 slots (last-write-wins keeps the memtable ~256 entries).
+        let val = vec![0xA5u8; 1024];
+        {
+            let f = fs::File::create(&wal).unwrap();
+            let mut w = BufWriter::with_capacity(8 * 1024 * 1024, f);
+            let mut written: u64 = 0;
+            let mut i: u64 = 0;
+            while written < target_bytes {
+                let key = format!("k{:03}", i % 256);
+                let entry = encode_wal_entry(key.as_bytes(), &val);
+                w.write_all(&entry).unwrap();
+                written += entry.len() as u64;
+                i += 1;
+            }
+            w.flush().unwrap();
+        }
+        let file_len = wal.metadata().unwrap().len();
+        assert!(file_len >= target_bytes, "synthetic WAL is {} bytes", file_len);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let sampler = {
+            let stop = stop.clone();
+            let peak = peak.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak.fetch_max(vm_rss_kb(), Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+        };
+
+        let rss_before = vm_rss_kb();
+        peak.fetch_max(rss_before, Ordering::Relaxed);
+        let mut mt: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        replay_wal_streaming(&wal, &mut mt).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+
+        let peak_delta_kb = peak.load(Ordering::Relaxed).saturating_sub(rss_before);
+        eprintln!(
+            "[1gb-wal] file={} MiB  rss_before={} MiB  peak_delta={} MiB  memtable={} keys",
+            file_len / 1048576, rss_before / 1024, peak_delta_kb / 1024, mt.len()
+        );
+        assert_eq!(mt.len(), 256, "cycling keys collapse to 256 live entries");
+        assert!(
+            peak_delta_kb < 64 * 1024,
+            "streaming replay of a {} MiB WAL grew RSS by {} MiB (budget 64 MiB) — slurp regressed?",
+            file_len / 1048576, peak_delta_kb / 1024
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

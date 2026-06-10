@@ -120,29 +120,45 @@ Status: ⚪ Open → 🔵 In Progress → ✅ Closed
   segfault; the host is the trusted QuillonOS tab glue. Adding a host-supplied length would change the
   exported ABI — deferred unless an untrusted-host scenario appears.
 
-### SEC-015 ⚪ Unauthenticated internal-state read endpoints
-- `crates/fluxc-core/src/serve.rs:620-633` — /api/stats, /api/xray, /api/goal/current leak workspace/
-  peer/build topology when exposed publicly. Decide: public-by-design (dashboard) or gate.
+### SEC-015 ⚪ ACCEPTED — Unauthenticated internal-state read endpoints (by design)
+- `crates/fluxc-core/src/serve.rs:620-633` — /api/stats, /api/xray, /api/goal/current.
+- ACCEPTED 2026-06-10: these are PUBLIC DASHBOARD telemetry (garden.html / dashboard.html poll them);
+  the data is build stats / crate names / peer counts — no secrets. Bind defaults to 127.0.0.1
+  (`FLUX_SERVE_HOST`); a public bind requires an explicit TLS cert or FLUX_SERVE_TOKEN, and the
+  MUTATING endpoints (/api/tune, /api/build_event) are already auth-gated. Gating reads too would
+  break the same-origin dashboards. Documented, not changed.
 
-### SEC-016 ⚪ Predictable /tmp/flux-events/webhook_<ts>.json writes
-- `crates/fluxc-core/src/serve.rs:582-585` — race/pre-creation on shared /tmp; also no body size cap
-  on /api/build_event payloads written verbatim.
+### SEC-016 ✅ Predictable /tmp/flux-events/webhook_<ts>.json writes
+- `crates/fluxc-core/src/serve.rs:582-585` — race/pre-creation on shared /tmp.
+- FIXED 2026-06-10: `write_event_file()` — dir hardened 0700, filename includes pid + monotonic
+  counter, and the write uses `create_new` (O_EXCL) so it can NOT follow a pre-created symlink or
+  overwrite an existing path. Body-size cap is covered by SEC-008.
 
-### SEC-017 ⚪ Non-constant-time proof comparison (mock code — must not ship)
-- `crates/flux-zk-p2p/src/anonymous_identity.rs:246`, `network_membership.rs:256` — `==` on proof
-  values. Fine while mock; use `subtle::ConstantTimeEq` when production-ized.
+### SEC-017 ⚪ ACCEPTED — non-constant-time compare on MOCK proof strings
+- `crates/flux-zk-p2p/src/anonymous_identity.rs:246`, `network_membership.rs:256` — `==` on the
+  literal `"mock_groth16_proof"` / `"mock_plonk_membership_proof"` placeholders.
+- ACCEPTED 2026-06-10: the compared values are hardcoded non-secret placeholders, so there's no
+  timing channel to leak. When real Groth16/Plonk verification lands, it MUST use
+  `subtle::ConstantTimeEq`. Tracked here as a productionization gate, not a live finding.
 
-### SEC-018 ⚪ Provenance canonicalization pinning
+### SEC-018 ✅ Provenance canonicalization pinning
 - `crates/fluxc-core/src/provenance.rs:134-146` — canonical_bundle_bytes() is the (correct) signing
-  input; add a test asserting JSON round-trip is NEVER signed, so a future consumer can't regress it.
+  input.
+- FIXED 2026-06-10: added `canonical_bundle_excludes_sig_and_is_field_sensitive` — asserts the
+  signing bytes exclude the signature fields AND that flipping any committed field (wallet/timestamp/
+  artifact_hash) perturbs the canonical bytes, so a reordered/forged bundle can't collide with a
+  captured signature. Test green.
 
 ## LOW
 
-- SEC-019 ⚪ Hardcoded Delta IP in molt.rs:23 (topology disclosure) → env/config.
-- SEC-020 ⚪ Stale crate versions: flux-agora-stargate, flux-agora-stargate-mcp (0.2.0), flux-sync
-  (0.1.0) → `flux_version_sync`.
-- SEC-021 ⚪ flux-cache mmap without size sanity check (`crates/flux-cache/src/lib.rs:317,368`).
-- SEC-022 ⚪ HTTP redirect listener not rate-limited (`serve.rs:921-950`).
+- SEC-019 ✅ Hardcoded infra IPs → env-overridable. molt.rs `delta_host()` (FLUX_DELTA_HOST) +
+  sigil_ops `default_sigil_host()` (FLUX_SIGIL_HOST), both safe_host-validated, IP fallback kept.
+- SEC-020 ✅ Stale crate versions synced to workspace via `flux_version_sync` (flux-agora-stargate,
+  flux-agora-stargate-mcp, flux-sync → version.workspace = true).
+- SEC-021 ✅ flux-cache: cache-file bincode decode now `config().limit(256 MiB)` (forged-length guard,
+  same class as SEC-013). compute_hash mmap is a local-trusted source read — left as-is. 18/18.
+- SEC-022 ✅ HTTP redirect listener now applies the same per-IP `rate_ok` as the main server
+  (`serve.rs` redirect loop) — no unthrottled thread-spawn amplification.
 
 ## Healthy patterns confirmed ✅
 

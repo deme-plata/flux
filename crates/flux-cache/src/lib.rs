@@ -366,7 +366,11 @@ pub fn lookup(key: &str) -> Option<CacheEntry> {
     if bin_path.exists() {
         if let Ok(file) = fs::File::open(&bin_path) {
             if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
-                if let Ok(entry) = bincode::deserialize::<CacheEntry>(&mmap[..]) {
+                // SEC-021: bound the decode so a forged length prefix in a cache
+                // .bin (writable by anything with cache-dir access) can't drive a
+                // huge pre-allocation. 256 MiB is well above any real cache entry.
+                const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+                if let Ok(entry) = bincode::config().limit(MAX_ENTRY_BYTES).deserialize::<CacheEntry>(&mmap[..]) {
                     DISK_HITS.fetch_add(1, Ordering::Relaxed);
                     lru_put(key.to_string(), entry.clone());
                     return Some(entry);

@@ -575,6 +575,36 @@ fn handle_tune_post(req: &Request, _stats: &LiveStats) -> Response {
     Response::ok_json(r#"{"status":"error","msg":"invalid request"}"#)
 }
 
+/// SEC-016: write a build-event file to the shared /tmp dir SAFELY.
+/// `webhook_<ms>.json` in world-writable /tmp is predictable — an attacker on
+/// the box could pre-create the path as a symlink and redirect our write, or
+/// race the SSE reader. Defenses: a per-process subdir created 0700, a name that
+/// includes pid + a monotonic counter, and `create_new` (O_EXCL) so we never
+/// write THROUGH a pre-existing file or symlink.
+fn write_event_file(body_str: &str) {
+    use std::io::Write;
+    static EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis()).unwrap_or(0);
+    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    // Canonical dir (the feed/garden readers expect it); FLUX_EVENTS_DIR overrides.
+    let dir = std::env::var("FLUX_EVENTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/flux-events"));
+    if std::fs::create_dir_all(&dir).is_err() { return; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join(format!("webhook_{}_{}_{}.json", std::process::id(), now_ms, seq));
+    // create_new fails (instead of following) if the path already exists / is a symlink.
+    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        let _ = f.write_all(body_str.as_bytes());
+    }
+}
+
 fn handle_build_event(req: &Request, stats: &LiveStats) -> Response {
     if let Ok(body_str) = String::from_utf8(req.body.clone()) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_str) {
@@ -587,13 +617,7 @@ fn handle_build_event(req: &Request, stats: &LiveStats) -> Response {
             // Persist the raw webhook event for build_garden_snapshot to pick up.
             // Shape: {event, t, data:{package, total_ms, ...}, source, ...}
             if parsed.get("event").is_some() {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis()).unwrap_or(0);
-                let dir = std::path::PathBuf::from("/tmp/flux-events");
-                let _ = std::fs::create_dir_all(&dir);
-                let path = dir.join(format!("webhook_{}.json", now_ms));
-                let _ = std::fs::write(&path, &body_str);
+                write_event_file(&body_str);
             }
             if let Some(b) = parsed.get("builds").and_then(|v| v.as_u64()) {
                 stats.builds_completed.store(b, Ordering::Relaxed);
@@ -947,6 +971,10 @@ fn spawn_http_redirect(bind_host: String) {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
                 let mut tcp = stream;
+                // SEC-022: same per-IP rate limit as the main server, so the
+                // redirect port can't be used as an unthrottled thread-spawn amplifier.
+                let peer_ip = tcp.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+                if !rate_ok(&peer_ip) { return; }
                 let mut buf = [0u8; 4096];
                 let n = match tcp.read(&mut buf) { Ok(n) if n > 0 => n, _ => return };
                 let raw = String::from_utf8_lossy(&buf[..n]);

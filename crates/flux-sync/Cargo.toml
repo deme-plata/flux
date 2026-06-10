@@ -1,6 +1,6 @@
 [package]
 name = "flux-sync"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Content-addressed block backfill for flux + sigil chains. Closes the flux-p2p gap (gossip-only, no range request/response) by storing every block in flux-aether (BLAKE3, K-of-N, verify-on-retrieve). Nodes exchange a compact SyncManifest (height→content_root) and fetch exactly the blocks they're MISSING — verify-don't-trust history backfill, shared by flux-p2p and sigil-net/sigil-top."
 

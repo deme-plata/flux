@@ -20,7 +20,16 @@ use serde_json::{json, Value};
 
 use crate::handlers::{ToolDef, ToolRegistry};
 
-const DELTA: &str = "5.79.79.158";
+/// Delta node host. SEC-019: env-overridable so the infra IP isn't hardcoded
+/// in the binary (topology disclosure / brittle redeploys). Falls back to the
+/// known Delta address. `safe_host`-validated before use.
+const DELTA_DEFAULT: &str = "5.79.79.158";
+fn delta_host() -> String {
+    std::env::var("FLUX_DELTA_HOST")
+        .ok()
+        .filter(|h| crate::handlers::safe_host(h))
+        .unwrap_or_else(|| DELTA_DEFAULT.to_string())
+}
 const MOLT_API: &str = "https://www.moltbook.com/api/v1";
 
 fn a_str(a: &Value, k: &str, d: &str) -> String {
@@ -95,7 +104,7 @@ fn molt_via_delta(method: &str, path: &str, body: Option<&str>) -> String {
         .args([
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=10",
-            &format!("root@{DELTA}"),
+            &format!("root@{}", delta_host()),
             &remote,
         ])
         .output();

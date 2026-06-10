@@ -1,6 +1,6 @@
 [package]
 name = "flux-agora-stargate-mcp"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]

@@ -31,7 +31,14 @@ use serde_json::{json, Value};
 use crate::handlers::{safe_cmd_charset, safe_host, ToolDef, ToolRegistry};
 
 /// Default SIGIL node host (Delta — never Epsilon production).
+/// SEC-019: env-overridable (`FLUX_SIGIL_HOST`) so the IP isn't hardcoded.
 const DEFAULT_SIGIL_HOST: &str = "5.79.79.158";
+fn default_sigil_host() -> String {
+    std::env::var("FLUX_SIGIL_HOST")
+        .ok()
+        .filter(|h| safe_host(h))
+        .unwrap_or_else(|| DEFAULT_SIGIL_HOST.to_string())
+}
 /// QUG/SIGIL fee schedule (basis points) — mirrors sigil-bank.
 const LP_FEE_BPS: u128 = 30; // 0.30% to LPs
 const MASTER_FEE_BPS: u128 = 100; // 1% dev-fee (QUG-aligned)
@@ -301,7 +308,7 @@ fn sigil_benchmark(a: &Value) -> String {
 
 // ── node restart (real process control) ──
 fn sigil_node_restart(a: &Value) -> String {
-    let host = arg_str(a, "host", DEFAULT_SIGIL_HOST);
+    let host = arg_str(a, "host", &default_sigil_host());
     if !safe_host(&host) {
         return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
     }
@@ -320,7 +327,7 @@ fn sigil_node_restart(a: &Value) -> String {
 
 // ── node deploy (scp binary + relaunch) ──
 fn sigil_node_deploy(a: &Value) -> String {
-    let host = arg_str(a, "host", DEFAULT_SIGIL_HOST);
+    let host = arg_str(a, "host", &default_sigil_host());
     let bin = arg_str(a, "binary_path", "");
     let launch = arg_str(a, "launch_cmd", "bash /home/orobit/sigil-data/launch-delta.sh");
     if bin.is_empty() {

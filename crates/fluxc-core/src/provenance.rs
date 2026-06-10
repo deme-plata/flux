@@ -319,6 +319,52 @@ mod tests {
     }
 
     #[test]
+    fn canonical_bundle_excludes_sig_and_is_field_sensitive() {
+        // SEC-018: the SIGNING INPUT is canonical_bundle_bytes(), NOT the JSON
+        // serialization — so JSON field reordering can never produce a different
+        // message that verifies against the same signature. Pin two properties:
+        //   (1) the canonical bytes do NOT contain the signature fields, and
+        //   (2) flipping ANY committed field changes the canonical bytes (so a
+        //       forged bundle can't collide with a captured signature).
+        let ctx = ProvenanceContext {
+            artifact_bytes: b"artifact".to_vec(),
+            source_bytes: b"source".to_vec(),
+            agent_wallet: [0x11; 32],
+            swarm_task_id: [0x22; 16],
+            settle_tx: Some([0x33; 32]),
+            fluxc_git: [0x44; 20],
+            fluxc_version: 7,
+        };
+        let signed = emit_with_keys(&ctx, Some(b"x"), Some(b"y")); // see helper below
+        let proof = signed;
+        let canon = canonical_bundle_bytes(&proof);
+        // (1) signature bytes must not leak into the signing input
+        if !proof.sqisign_sig.is_empty() {
+            assert!(!canon.windows(proof.sqisign_sig.len().max(1)).any(|w| w == proof.sqisign_sig.as_slice()));
+        }
+        // (2) any committed-field change perturbs the canonical bytes
+        let mut p2 = proof.clone();
+        p2.agent_wallet[0] ^= 0xff;
+        assert_ne!(canon, canonical_bundle_bytes(&p2), "wallet change must alter canonical bytes");
+        let mut p3 = proof.clone();
+        p3.timestamp_us = p3.timestamp_us.wrapping_add(1);
+        assert_ne!(canon, canonical_bundle_bytes(&p3), "timestamp change must alter canonical bytes");
+        let mut p4 = proof.clone();
+        p4.artifact_hash[31] ^= 0x01;
+        assert_ne!(canon, canonical_bundle_bytes(&p4), "artifact_hash change must alter canonical bytes");
+    }
+
+    // Build a proof without keys, then fill placeholder sig/pubkey for the
+    // canonicalization test (we only assert about canonical_bundle_bytes, which
+    // excludes those fields, so placeholder values are fine).
+    fn emit_with_keys(ctx: &ProvenanceContext, sig: Option<&[u8]>, pk: Option<&[u8]>) -> ProvenanceProof {
+        let mut p = emit(ctx).unwrap();
+        if let Some(s) = sig { p.sqisign_sig = s.to_vec(); }
+        if let Some(k) = pk { p.sqisign_pubkey = k.to_vec(); }
+        p
+    }
+
+    #[test]
     fn verify_detects_artifact_tampering() {
         let ctx = ProvenanceContext {
             artifact_bytes: b"original".to_vec(),

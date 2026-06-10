@@ -37,6 +37,13 @@ const SST_MAGIC: [u8; 4] = *b"FXDB";
 /// output rather than a single compressed buffer.
 const SST_VERSION: u8 = 2;
 const AUTO_COMPACT_THRESHOLD: usize = 4;
+/// v0.36: default WAL auto-flush threshold. Once the approximate number of
+/// bytes appended to the WAL since the last truncation exceeds this, the next
+/// write triggers an automatic `flush()` (which persists the memtable to an
+/// SST and truncates the WAL). Keeps WALs bounded for applications that never
+/// call `flush()` themselves — a real store once reached a 689 MB WAL and a
+/// 20.7 s replay at open. Configurable via `with_max_wal_bytes`; 0 disables.
+const DEFAULT_MAX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 /// Default block cache size — small enough to be safe in a unit test,
 /// configurable via `Database::with_block_cache_capacity`.
 const DEFAULT_BLOCK_CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -87,6 +94,13 @@ pub struct Database {
 struct DbInner {
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
     wal_file: Option<fs::File>,
+    /// v0.36: approximate bytes appended to the WAL since the last truncation.
+    /// Initialized from the WAL file length at `open()`, incremented by entry
+    /// size on every WAL write, reset to 0 when `flush()` truncates the WAL.
+    wal_bytes: u64,
+    /// v0.36: auto-flush threshold (see `DEFAULT_MAX_WAL_BYTES`). 0 = disabled.
+    /// Lives in DbInner so every clone of this `Database` shares the setting.
+    max_wal_bytes: u64,
     sequence: u64,
     mod_history: std::collections::HashMap<Vec<u8>, u64>,
     /// Active range tombstones (v0.13). Each masks any key in `[start, end)`
@@ -149,14 +163,21 @@ impl Database {
         }
 
         let wal_file = fs::OpenOptions::new()
-            .create(true).append(true)
+            .create(true).write(true).append(true)
             .open(&wal_path)
             .map_err(|e| format!("create wal: {}", e))?;
+
+        // v0.36: seed the auto-flush counter from the WAL bytes already on
+        // disk, so a store reopened with a fat WAL flushes on its first write
+        // instead of growing the backlog by another `max_wal_bytes`.
+        let wal_bytes = wal_file.metadata().map(|m| m.len()).unwrap_or(0);
 
         Ok(Database {
             inner: Arc::new(RwLock::new(DbInner {
                 memtable,
                 wal_file: Some(wal_file),
+                wal_bytes,
+                max_wal_bytes: DEFAULT_MAX_WAL_BYTES,
                 sequence: 0,
                 mod_history: std::collections::HashMap::new(),
                 range_tombs: Vec::new(),
@@ -183,6 +204,44 @@ impl Database {
             block_cache: Arc::new(cache::BlockCache::new(bytes)),
             cfs: self.cfs,
             sst_readers: self.sst_readers,
+        }
+    }
+
+    /// v0.36: configure the WAL auto-flush threshold. When the approximate
+    /// bytes appended to the WAL since the last truncation exceed this, the
+    /// write that crossed the line triggers an automatic `flush()` (memtable →
+    /// SST, then WAL truncate). Default is 64 MiB; `0` disables auto-flush
+    /// entirely (the pre-v0.36 behavior — only explicit `flush()` truncates).
+    /// Builder-style, for chaining at open time:
+    ///
+    /// ```text
+    /// let db = Database::open(p)?.with_max_wal_bytes(8 * 1024 * 1024);
+    /// ```
+    pub fn with_max_wal_bytes(self, bytes: u64) -> Self {
+        self.inner.write().max_wal_bytes = bytes;
+        self
+    }
+
+    /// v0.36: if the WAL has outgrown `max_wal_bytes`, flush. MUST be called
+    /// only when the caller holds NO lock on `self.inner` — `flush()` takes
+    /// the inner write lock and parking_lot locks are not reentrant, so
+    /// calling this under a `put()`/`batch_put()` guard would deadlock.
+    /// Auto-flush failure never fails the triggering write: the data is
+    /// already durable in WAL + memtable, so we log and move on.
+    fn auto_flush_if_needed(&self) {
+        let (wal_bytes, max) = {
+            let inner = self.inner.read();
+            (inner.wal_bytes, inner.max_wal_bytes)
+        };
+        if max == 0 || wal_bytes <= max {
+            return;
+        }
+        if let Err(e) = self.flush() {
+            eprintln!(
+                "flux-db: auto-flush at {} WAL bytes (threshold {}) failed: {} — \
+                 continuing; data is safe in WAL+memtable",
+                wal_bytes, max, e
+            );
         }
     }
 
@@ -355,12 +414,22 @@ impl Database {
 
     /// Insert a key-value pair.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
-        let mut inner = self.inner.write();
-        inner.sequence += 1;
-        let seq = inner.sequence;
-        write_wal_entry(inner.wal_file.as_mut(), key, value)?;
-        inner.memtable.insert(key.to_vec(), value.to_vec());
-        inner.mod_history.insert(key.to_vec(), seq);
+        // v0.36: the auto-flush check-and-call lives AFTER this lock scope —
+        // flush() takes the same (non-reentrant) write lock, so calling it
+        // while holding the guard would deadlock.
+        let need_flush = {
+            let mut inner = self.inner.write();
+            inner.sequence += 1;
+            let seq = inner.sequence;
+            let n = write_wal_entry(inner.wal_file.as_mut(), key, value)?;
+            inner.wal_bytes += n;
+            inner.memtable.insert(key.to_vec(), value.to_vec());
+            inner.mod_history.insert(key.to_vec(), seq);
+            inner.max_wal_bytes > 0 && inner.wal_bytes > inner.max_wal_bytes
+        };
+        if need_flush {
+            self.auto_flush_if_needed();
+        }
         Ok(())
     }
 
@@ -401,12 +470,20 @@ impl Database {
     /// Delete a key. Writes a tombstone (empty value) to both WAL and memtable
     /// so the deletion shadows any older copy persisted in an SST.
     pub fn delete(&self, key: &[u8]) -> Result<(), String> {
-        let mut inner = self.inner.write();
-        inner.sequence += 1;
-        let seq = inner.sequence;
-        write_wal_entry(inner.wal_file.as_mut(), key, &[])?;
-        inner.memtable.insert(key.to_vec(), Vec::new()); // tombstone
-        inner.mod_history.insert(key.to_vec(), seq);
+        // v0.36: auto-flush check after the lock scope (see put()).
+        let need_flush = {
+            let mut inner = self.inner.write();
+            inner.sequence += 1;
+            let seq = inner.sequence;
+            let n = write_wal_entry(inner.wal_file.as_mut(), key, &[])?;
+            inner.wal_bytes += n;
+            inner.memtable.insert(key.to_vec(), Vec::new()); // tombstone
+            inner.mod_history.insert(key.to_vec(), seq);
+            inner.max_wal_bytes > 0 && inner.wal_bytes > inner.max_wal_bytes
+        };
+        if need_flush {
+            self.auto_flush_if_needed();
+        }
         Ok(())
     }
 
@@ -466,12 +543,14 @@ impl Database {
                 let seq = guard.sequence;
                 match &ops[k].kind {
                     BatchOpKind::Put { key, value } => {
-                        write_wal_entry(guard.wal_file.as_mut(), key, value)?;
+                        let n = write_wal_entry(guard.wal_file.as_mut(), key, value)?;
+                        guard.wal_bytes += n;
                         guard.memtable.insert(key.clone(), value.clone());
                         guard.mod_history.insert(key.clone(), seq);
                     }
                     BatchOpKind::Delete { key } => {
-                        write_wal_entry(guard.wal_file.as_mut(), key, &[])?;
+                        let n = write_wal_entry(guard.wal_file.as_mut(), key, &[])?;
+                        guard.wal_bytes += n;
                         guard.memtable.insert(key.clone(), Vec::new());
                         guard.mod_history.insert(key.clone(), seq);
                     }
@@ -479,6 +558,11 @@ impl Database {
                 if seq > max_seq { max_seq = seq; }
             }
             drop(guard);
+            // v0.36 note: no inline auto-flush here — a BatchOp only carries the
+            // target CF's `inner` Arc, not a full `Database` handle, and flush()
+            // needs the handle (path + caches). The counter still accumulates,
+            // so the next put()/delete()/batch_put()/commit() or explicit
+            // flush() on that CF triggers/performs the truncation.
             i = j;
         }
         Ok(max_seq)
@@ -703,20 +787,29 @@ impl Transaction {
             let seq = inner.sequence;
             match value {
                 Some(v) => {
-                    write_wal_entry(inner.wal_file.as_mut(), key, v)
+                    let n = write_wal_entry(inner.wal_file.as_mut(), key, v)
                         .map_err(TxError::Io)?;
+                    inner.wal_bytes += n;
                     inner.memtable.insert(key.clone(), v.clone());
                 }
                 None => {
-                    write_wal_entry(inner.wal_file.as_mut(), key, &[])
+                    let n = write_wal_entry(inner.wal_file.as_mut(), key, &[])
                         .map_err(TxError::Io)?;
+                    inner.wal_bytes += n;
                     inner.memtable.insert(key.clone(), Vec::new());
                 }
             }
             inner.mod_history.insert(key.clone(), seq);
         }
         let commit_seq = inner.sequence;
+        let need_flush = inner.max_wal_bytes > 0 && inner.wal_bytes > inner.max_wal_bytes;
         self.finished = true;
+        // v0.36: release the write guard BEFORE the auto-flush check-and-call —
+        // flush() re-takes this same non-reentrant lock.
+        drop(inner);
+        if need_flush {
+            self.db.auto_flush_if_needed();
+        }
         Ok(commit_seq)
     }
 
@@ -854,6 +947,8 @@ impl Database {
             // wal_file is O_APPEND, so the next write goes to the new EOF (0) — no
             // seek needed. inner.sequence is intentionally NOT reset (monotonic).
         }
+        // v0.36: the WAL is empty again — reset the auto-flush counter.
+        inner.wal_bytes = 0;
         drop(inner);
 
         // Auto-compact if we've accumulated too many SSTs.
@@ -981,8 +1076,11 @@ impl DoubleEndedIterator for DbIterator {
 
 /// Write a single WAL entry framed as
 /// `[crc32(body) | key_len | val_len | key | val]` (all u32 LE).
-fn write_wal_entry(wal: Option<&mut fs::File>, key: &[u8], value: &[u8]) -> Result<(), String> {
-    let Some(wal) = wal else { return Ok(()) };
+/// Append one entry to the WAL. Returns the number of bytes written (0 when
+/// there is no WAL file), so callers can maintain `DbInner::wal_bytes` for
+/// the v0.36 auto-flush trigger.
+fn write_wal_entry(wal: Option<&mut fs::File>, key: &[u8], value: &[u8]) -> Result<u64, String> {
+    let Some(wal) = wal else { return Ok(0) };
     let mut body = Vec::with_capacity(8 + key.len() + value.len());
     body.extend_from_slice(&(key.len() as u32).to_le_bytes());
     body.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -992,7 +1090,7 @@ fn write_wal_entry(wal: Option<&mut fs::File>, key: &[u8], value: &[u8]) -> Resu
     wal.write_all(&crc.to_le_bytes()).map_err(|e| format!("wal write crc: {}", e))?;
     wal.write_all(&body).map_err(|e| format!("wal write body: {}", e))?;
     wal.flush().map_err(|e| format!("wal flush: {}", e))?;
-    Ok(())
+    Ok((4 + body.len()) as u64)
 }
 
 /// v0.15: a discovered SST file with its level. Legacy files (no
@@ -1293,13 +1391,23 @@ impl Database {
     }
 
     pub fn batch_put(&self, entries: &[(&[u8], &[u8])]) -> Result<(), String> {
-        let mut inner = self.inner.write();
-        for (k, v) in entries {
-            inner.sequence += 1;
-            let seq = inner.sequence;
-            write_wal_entry(inner.wal_file.as_mut(), k, v)?;
-            inner.memtable.insert(k.to_vec(), v.to_vec());
-            inner.mod_history.insert(k.to_vec(), seq);
+        // v0.36: the whole batch lands under ONE guard (atomic to readers);
+        // the auto-flush check-and-call happens once, after the guard scope —
+        // never mid-batch, never while holding the lock (flush() re-takes it).
+        let need_flush = {
+            let mut inner = self.inner.write();
+            for (k, v) in entries {
+                inner.sequence += 1;
+                let seq = inner.sequence;
+                let n = write_wal_entry(inner.wal_file.as_mut(), k, v)?;
+                inner.wal_bytes += n;
+                inner.memtable.insert(k.to_vec(), v.to_vec());
+                inner.mod_history.insert(k.to_vec(), seq);
+            }
+            inner.max_wal_bytes > 0 && inner.wal_bytes > inner.max_wal_bytes
+        };
+        if need_flush {
+            self.auto_flush_if_needed();
         }
         Ok(())
     }
@@ -2650,6 +2758,90 @@ mod tests {
         let zeta_count  = (0u32..1050).filter(|i| cf_b.get(&i.to_be_bytes()).unwrap().is_some()).count();
         assert_eq!(alpha_count, 100);
         assert_eq!(zeta_count, 100);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── v0.36: WAL auto-flush ──
+
+    fn count_ssts(dir: &std::path::Path) -> usize {
+        fs::read_dir(dir).map(|d| {
+            d.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.starts_with("flux_") && n.ends_with(".sst")
+                })
+                .count()
+        }).unwrap_or(0)
+    }
+
+    #[test]
+    fn test_auto_flush_truncates_wal() {
+        let tmp = std::env::temp_dir().join("flux-db-test-auto-flush");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap().with_max_wal_bytes(4096);
+        // 100 entries × (12B header + ~7B key + 128B value) ≈ 14.7 KB —
+        // crosses the 4 KB threshold several times. Each crossing must
+        // auto-flush (memtable → SST) and truncate the WAL.
+        let value = [0xABu8; 128];
+        for i in 0u32..100 {
+            db.put(format!("key{:04}", i).as_bytes(), &value).unwrap();
+        }
+        let wal_len = tmp.join("flux.wal").metadata().unwrap().len();
+        assert!(
+            wal_len < 4096,
+            "WAL should have been auto-truncated, but is {} bytes",
+            wal_len
+        );
+        assert!(
+            count_ssts(&tmp) >= 1,
+            "auto-flush should have produced at least one SST"
+        );
+        // Every key must still be readable (memtable + SST read-through).
+        for i in 0u32..100 {
+            assert_eq!(
+                db.get(format!("key{:04}", i).as_bytes()).unwrap(),
+                Some(value.to_vec()),
+                "key{:04} lost after auto-flush",
+                i
+            );
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_default_threshold_no_spurious_flush() {
+        // With the 64 MB default, a few KB of writes must NOT trigger any
+        // auto-flush: the WAL keeps growing and no SST appears.
+        let tmp = std::env::temp_dir().join("flux-db-test-no-spurious-flush");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        let value = [0xCDu8; 128];
+        for i in 0u32..100 {
+            db.put(format!("key{:04}", i).as_bytes(), &value).unwrap();
+        }
+        let wal_len = tmp.join("flux.wal").metadata().unwrap().len();
+        assert!(
+            wal_len > 4096,
+            "WAL should have grown past 4 KB without flushing (got {})",
+            wal_len
+        );
+        assert_eq!(count_ssts(&tmp), 0, "no SST expected below the 64 MB default");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_auto_flush_disabled_with_zero() {
+        // max_wal_bytes = 0 disables auto-flush entirely (pre-v0.36 behavior).
+        let tmp = std::env::temp_dir().join("flux-db-test-auto-flush-off");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap().with_max_wal_bytes(0);
+        let value = [0xEFu8; 128];
+        for i in 0u32..100 {
+            db.put(format!("key{:04}", i).as_bytes(), &value).unwrap();
+        }
+        let wal_len = tmp.join("flux.wal").metadata().unwrap().len();
+        assert!(wal_len > 4096, "WAL should grow unbounded when disabled");
+        assert_eq!(count_ssts(&tmp), 0);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -372,10 +372,36 @@ pub struct PeerInfo {
 impl FluxSwarmManager {
     /// Create a new swarm manager and start listening.
     /// Returns the manager + an mpsc receiver for application-level events.
-    pub fn new(config: FluxSwarmConfig) -> Result<(Self, std::sync::Arc<parking_lot::RwLock<Vec<SwarmAppEvent>>>), String> {
+    pub fn new(mut config: FluxSwarmConfig) -> Result<(Self, std::sync::Arc<parking_lot::RwLock<Vec<SwarmAppEvent>>>), String> {
         // Generate Ed25519 keypair from node_id (deterministic, for reproducible PeerIds)
         let keypair = keypair_from_seed(&config.node_id);
         let local_peer_id = PeerId::from(keypair.public());
+
+        // v0.32: SKIP HAIRPIN SELF-DIALS. When this node runs ON a box whose own public IP is
+        // also a bootstrap peer (e.g. sigil-top co-located on Epsilon, with 89.149.241.126 in
+        // the bootstrap list), dialing that public IP hairpins back to the local box — NAT
+        // routing drops the loop, so the peer connects then FLAPS (observed 3↔4 on-box; an
+        // off-box node held a clean stable 4). Drop any bootstrap whose IP is one of OUR OWN
+        // non-loopback interface IPs so we never hairpin. Filtering config.bootstrap_peers here
+        // covers BOTH the Kademlia seed below AND the bootstrap_peers_cache the mesh-maintenance
+        // re-dials. (Loopback 127.0.0.1 is kept — an intentional same-box mesh is fine.)
+        {
+            let own_ips: std::collections::HashSet<std::net::IpAddr> = if_addrs::get_if_addrs()
+                .map(|ifs| ifs.into_iter().map(|i| i.ip()).filter(|ip| !ip.is_loopback()).collect())
+                .unwrap_or_default();
+            if !own_ips.is_empty() {
+                config.bootstrap_peers.retain(|addr| {
+                    match multiaddr_ip(addr) {
+                        Some(ip) if own_ips.contains(&ip) => {
+                            tracing::info!(%addr, "skip hairpin self-dial — bootstrap IP is our own interface");
+                            eprintln!("  [p2p] skip hairpin self-dial → {addr} (own IP)");
+                            false
+                        }
+                        _ => true,
+                    }
+                });
+            }
+        }
         let peer_id_str = local_peer_id.to_string();
 
         tracing::info!(
@@ -890,8 +916,8 @@ impl FluxSwarmManager {
                     rx.write().push(SwarmAppEvent::PeerConnected { peer_id, addr });
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
-                tracing::info!(%peer_id, "Peer disconnected");
+            SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
+                tracing::warn!(%peer_id, num_established, cause = ?cause, "P2P-DBG Peer DISCONNECTED — cause shown (why peers drop)");
                 // Only drop from the connected set when the LAST connection closes.
                 if num_established == 0 {
                     self.connected.write().remove(&peer_id);
@@ -900,6 +926,17 @@ impl FluxSwarmManager {
                 if let Some(ref rx) = self.event_rx {
                     rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
                 }
+            }
+            // P2P-DBG: surface the events that were previously swallowed — these explain
+            // 0-peers / intermittent peers (dial failures, handshake/transport errors).
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                tracing::warn!(peer_id = ?peer_id, error = %error, "P2P-DBG OUTGOING DIAL/HANDSHAKE FAILED");
+            }
+            SwarmEvent::IncomingConnectionError { error, send_back_addr, .. } => {
+                tracing::warn!(error = %error, addr = %send_back_addr, "P2P-DBG INCOMING CONNECTION FAILED");
+            }
+            SwarmEvent::Dialing { peer_id, .. } => {
+                tracing::info!(peer_id = ?peer_id, "P2P-DBG dialing peer");
             }
             _ => {}
         }
@@ -935,6 +972,17 @@ fn extract_peer_id_from_addr(addr: &Multiaddr) -> Option<PeerId> {
         }
     }
     None
+}
+
+/// Extract the IP (v4/v6) from a Multiaddr's /ip4 or /ip6 component. Used to detect
+/// hairpin self-dials (bootstrap IP == one of our own interface IPs).
+fn multiaddr_ip(addr: &Multiaddr) -> Option<std::net::IpAddr> {
+    use libp2p::multiaddr::Protocol;
+    addr.iter().find_map(|proto| match proto {
+        Protocol::Ip4(ip) => Some(std::net::IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(std::net::IpAddr::V6(ip)),
+        _ => None,
+    })
 }
 
 /// Build the standard Quillon/Flux gossipsub topic string.

@@ -44,6 +44,8 @@ flux-sync = { path = "../flux-sync" }
 
 # Utils
 parking_lot = "0.12"
+# v0.32: enumerate local interface IPs to skip hairpin self-dials (own public IP as bootstrap).
+if-addrs = "0.15"
 tracing = "0.1"
 hex = "0.4"
 async-trait = "0.1"

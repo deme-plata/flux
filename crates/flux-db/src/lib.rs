@@ -125,6 +125,22 @@ impl Database {
         fs::create_dir_all(&path).map_err(|e| format!("create dir: {}", e))?;
 
         let wal_path = path.join("flux.wal");
+        // WAL-bomb guard: a WAL beyond this cap is evidence of a broken truncation
+        // epoch (the Windows append-mode bug let WALs grow to GBs); replaying one
+        // slurps the whole file AND duplicates every entry into the memtable —
+        // ballooning RAM by ~2x the file size in under a second and freezing the
+        // host (proven on a real machine: a 1.6 GB WAL ate 3 GB RSS; a 4.1 GB one
+        // ate 4 GB). Quarantine instead of replay: the bytes stay on disk for
+        // manual recovery and the store resumes from its last checkpointed SSTs.
+        const WAL_QUARANTINE_BYTES: u64 = 256 * 1024 * 1024;
+        if let Ok(m) = fs::metadata(&wal_path) {
+            if m.len() > WAL_QUARANTINE_BYTES {
+                let q = path.join(format!("flux.wal.quarantined-{}", m.len()));
+                eprintln!("[flux-db] WAL is {} bytes (cap {}) — quarantining to {:?}; resuming from last checkpoint",
+                    m.len(), WAL_QUARANTINE_BYTES, q);
+                let _ = fs::rename(&wal_path, &q);
+            }
+        }
         let mut memtable = BTreeMap::new();
 
         // Replay WAL if it exists. Each entry is:

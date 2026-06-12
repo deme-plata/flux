@@ -439,15 +439,24 @@ impl LiveStats {
         let avg_time = if builds > 0 { build_time / builds } else { 0 };
         let uptime = (now_ms() - self.start_time_ms) / 1000;
 
+        // Dynamic workspace version, computed once. The previous hardcoded
+        // "v0.9.9-beta1" survived ~18 releases and misled every /api/stats
+        // consumer (dashboard, garden, monitors) about what was deployed.
+        static SERVE_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            crate::version::VersionInfo::load(&crate::version::workspace_root())
+                .map(|v| v.display())
+                .unwrap_or_else(|_: String| "unknown".into())
+        });
+
         let sap_json = r#"{"contrib":0.87,"latency":0.91,"stake":0.72,"accuracy":0.98,"uptime":0.94,"total":0.884,"peers":8}"#;
-        format!(r#"{{"builds":{},"cache_hits":{},"cache_misses":{},"cache_rate":{:.1},"avg_build_ms":{},"total_build_ms":{},"tests_passed":{},"tests_failed":{},"p2p_peers":{},"dagknight_round":{},"mempool_txs":{},"uptime_secs":{},"timestamp":{},"mcp_tools":44,"version":"v0.9.9-beta1","sap":{},"xalgo":{{"temporal_trust":0.87,"consensus_align":0.94,"tx_quality":0.91,"topology_rank":0.78,"econ_efficiency":0.83,"total":0.866,"peers_scored":12}}}}"#,
+        format!(r#"{{"builds":{},"cache_hits":{},"cache_misses":{},"cache_rate":{:.1},"avg_build_ms":{},"total_build_ms":{},"tests_passed":{},"tests_failed":{},"p2p_peers":{},"dagknight_round":{},"mempool_txs":{},"uptime_secs":{},"timestamp":{},"mcp_tools":44,"version":"{}","sap":{},"xalgo":{{"temporal_trust":0.87,"consensus_align":0.94,"tx_quality":0.91,"topology_rank":0.78,"econ_efficiency":0.83,"total":0.866,"peers_scored":12}}}}"#,
             builds, hits, misses, rate, avg_time, build_time,
             self.tests_passed.load(Ordering::Relaxed),
             self.tests_failed.load(Ordering::Relaxed),
             self.p2p_peers.load(Ordering::Relaxed),
             self.dagknight_round.load(Ordering::Relaxed),
             self.mempool_txs.load(Ordering::Relaxed),
-            uptime, now_ms(), sap_json
+            uptime, now_ms(), &**SERVE_VERSION, sap_json
         )
     }
 }
@@ -1461,6 +1470,10 @@ mod tests {
         let json = stats.to_json();
         assert!(json.contains("xalgo"));
         assert!(json.contains("temporal_trust"));
-        assert!(json.contains("v0.9.9-beta1"));
+        // Version must be DYNAMIC (workspace Cargo.toml), never the old
+        // hardcoded literal that survived ~18 releases.
+        assert!(!json.contains("v0.9.9-beta1"), "hardcoded version is back: {json}");
+        assert!(json.contains(r#""version":"v"#) || json.contains(r#""version":"unknown""#),
+            "version field missing or malformed: {json}");
     }
 }

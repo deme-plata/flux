@@ -35,31 +35,43 @@ the public path requires a token or TLS material.
 
 ## Restart / rollback procedure (OPERATOR APPROVAL REQUIRED)
 
-The running process holds a deleted inode. The moment it exits, the Jun-8
-binary is gone forever — so **step 1 is not optional**:
+**CORRECTION (2026-06-12 restart, executed by rocky):** the service IS
+systemd-managed — `fluxc-serve.service` (enabled, `Restart=always`,
+`MemoryMax=256M`, `CPUQuota=50%`, `ProtectSystem=strict`, journald logging
+under `SyslogIdentifier=fluxc-serve`). The first draft of this doc assumed
+hand-launched; it wasn't. Never kill+nohup it — `Restart=always` would
+respawn it and you'd have two opinions about who owns the port.
 
 ```bash
-# 1. PRESERVE the exact running binary BEFORE any restart
-cp /proc/736911/exe /home/storage/tmp/fluxc-serve-rollback-jun08
+# 1. PRESERVE the exact running binary BEFORE any restart, if /proc/<pid>/exe
+#    shows (deleted) — on exit that inode is gone forever:
+PID=$(systemctl show -p MainPID --value fluxc-serve)
+ls -la /proc/$PID/exe                          # "(deleted)"? then:
+cp /proc/$PID/exe /home/storage/tmp/fluxc-serve-rollback-$(date +%Y%m%d)
 
-# 2. Verify it is NOT systemd-managed before kill (it appears hand-launched):
-systemctl status fluxc-serve 2>&1 | head -3   # expect "could not be found"
+# 2. Restart (picks up whatever is at target/debug/fluxc per ExecStart)
+systemctl restart fluxc-serve
 
-# 3. Restart onto the new binary (kill -9 — killall is unreliable on this box)
-kill -9 736911
-cd /home/storage/deepseek-codewhale/flux
-nohup ./target/debug/fluxc serve > /home/storage/logs/fluxc-serve.log 2>&1 &
+# 3. Post-restart verification (all four must pass)
+systemctl status fluxc-serve --no-pager | head -6   # active (running)
+ss -ltnp | grep 8084                # must show 127.0.0.1:8084 ONLY
+curl -s http://127.0.0.1:8084/api/health           # must be: OK
+curl -s http://127.0.0.1:8084/api/stats | head -c 300
+#   ^ check the "version" field matches the intended deploy (dynamic since
+#     the v0.27 fix; before that it lied with a hardcoded "v0.9.9-beta1")
 
-# 4. Post-restart verification (all three must pass)
-ss -ltnp | grep 8084            # must show 127.0.0.1:8084 ONLY
-curl -s http://127.0.0.1:8084/api/health    # must be: OK
-curl -s http://127.0.0.1:8084/api/stats | head -c 200   # JSON, sane fields
-
-# 5. ROLLBACK if anything is wrong
-kill -9 <new pid>
-nohup /home/storage/tmp/fluxc-serve-rollback-jun08 serve > /home/storage/logs/fluxc-serve.log 2>&1 &
-# then re-run step 4
+# 4. ROLLBACK if anything is wrong
+systemctl stop fluxc-serve
+cp /home/storage/tmp/fluxc-serve-rollback-<date> \
+   /home/storage/deepseek-codewhale/flux/target/debug/fluxc
+systemctl start fluxc-serve
+# then re-run step 3 (note: the next `fluxc build` overwrites the rollback
+# binary on disk again — rollback is a stopgap, fix forward promptly)
 ```
+
+Executed 2026-06-12 13:42: Jun-8 binary preserved at
+`/home/storage/tmp/fluxc-serve-rollback-jun08` (445M), restarted onto the
+v0.27.0 build (PID 3023866), all verification points green.
 
 Known consumers of :8084 that a restart briefly interrupts: garden-state.json
 snapshot writer (quillon.xyz/garden.html), `/api/build_event` webhook feed,

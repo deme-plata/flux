@@ -1,0 +1,12 @@
+[package]
+name = "flux-narwhal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Narwhal Knight Core — parallel block production engine for SIGIL. Sharded validators, batch Ed25519 verification (10^6/s hot path), adaptive block sizing, turbo sync integration. Targets 500M TPS with 345+ shards."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+rayon = "1.10"

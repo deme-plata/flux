@@ -60,6 +60,13 @@ pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501/p2p/12D3KooWSJxrXTttxp6WVPTWxAZJG1JQ46zSRF1C6gY6LLtyVMuA"),
 ];
 
+/// Firewall-friendly relay bootstrap for networks where tcp/9501 is reachable
+/// from the fleet but blocked or slow from an operator desktop. This is a
+/// socat-fronted Epsilon path that speaks to the same SIGIL node identity.
+pub const SIGIL_RELAY853_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
+    ("epsilon-relay853", "/ip4/89.149.241.126/tcp/853/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
+];
+
 /// v0.57 (sync): well-known path where a sigil-node PRODUCER publishes its libp2p peer-id, so a
 /// CO-LOCATED sigil-top monitor can auto-dial it over loopback. `SIGIL_PEERID_FILE` overrides;
 /// the default is a FIXED path (NOT `temp_dir()`, which honors `TMPDIR` and would differ between
@@ -126,6 +133,69 @@ fn ip_tcp_endpoint(ma: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Split comma/semicolon/whitespace-separated bootstrap multiaddrs.
+fn split_bootstrap_env(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn bootstrap_env(name: &str) -> Option<Vec<String>> {
+    let value = std::env::var(name).ok()?;
+    let peers = split_bootstrap_env(&value);
+    if peers.is_empty() {
+        tracing::warn!(%name, "bootstrap env var was set but empty after parsing; ignoring");
+        None
+    } else {
+        Some(peers)
+    }
+}
+
+fn dedupe_bootstrap_peers(peers: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for peer in peers {
+        if seen.insert(peer.clone()) {
+            out.push(peer);
+        }
+    }
+    out
+}
+
+fn sigil_bootstrap_peers() -> Vec<String> {
+    // Full override: when set, this is the entire bootstrap set. This is the
+    // escape hatch for private fleets, Windows desktops behind restrictive
+    // firewalls, or emergency peer-id rotation before a release can be cut.
+    if let Some(peers) = bootstrap_env("SIGIL_BOOTSTRAP_PEERS") {
+        tracing::info!(count = peers.len(), "using SIGIL_BOOTSTRAP_PEERS full override");
+        return dedupe_bootstrap_peers(peers);
+    }
+
+    let mut bootstrap = Vec::new();
+
+    // A co-located producer is the fastest and most reliable peer; only add it
+    // when the full override above is absent, so SIGIL_BOOTSTRAP_PEERS remains
+    // exact.
+    if let Some(local) = detect_local_producer() {
+        tracing::info!(target: "sigil::identity", addr = %local, "co-located producer detected — dialing it FIRST");
+        bootstrap.push(local);
+    }
+
+    // Back-compat: SIGIL_BOOTSTRAP is additive. Prefer SIGIL_BOOTSTRAP_PEERS for
+    // exact replacement semantics.
+    if let Some(extra) = bootstrap_env("SIGIL_BOOTSTRAP") {
+        tracing::info!(count = extra.len(), "using legacy SIGIL_BOOTSTRAP additive peers");
+        bootstrap.extend(extra);
+    }
+
+    bootstrap.extend(SIGIL_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
+    bootstrap.extend(SIGIL_RELAY853_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
+    dedupe_bootstrap_peers(bootstrap)
 }
 
 /// Global P2P network manager — thread-safe, cloneable.
@@ -364,8 +434,10 @@ impl NetworkManager {
             // v0.28: bootstrap MESH-MAINTENANCE timer — steady 5s; re-dials MISSING peers
             // (not only when the pool is empty). See the retry arm below.
             let mut retry_interval = tokio::time::interval(
-                std::time::Duration::from_secs(5)
+                std::time::Duration::from_secs(1)
             );
+            let mut bootstrap_retry: std::collections::HashMap<String, (u8, std::time::Instant)> =
+                std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -374,7 +446,7 @@ impl NetworkManager {
                         swarm.flush_all();
                     }
 
-                    // Connection retry — exponential backoff
+                    // Connection retry — per-endpoint backoff.
                     _ = retry_interval.tick() => {
                         // v0.28 MESH-MAINTENANCE FIX (connections issue): re-dial any bootstrap
                         // peer that ISN'T currently connected — every tick, not only when
@@ -397,21 +469,41 @@ impl NetworkManager {
                             let connected_eps: std::collections::HashSet<String> =
                                 swarm.connected_peers().into_iter()
                                     .filter_map(|pi| ip_tcp_endpoint(&pi.multiaddr)).collect();
+                            let pool_empty = connected_eps.is_empty();
+                            let now = std::time::Instant::now();
                             for addr in &swarm.bootstrap_peers_cache.clone() {
                                 let ep = ip_tcp_endpoint(&addr.to_string());
                                 if let Some(ref e) = ep {
-                                    if connected_eps.contains(e) { continue; } // already connected here
+                                    if connected_eps.contains(e) {
+                                        bootstrap_retry.remove(e);
+                                        continue; // already connected here
+                                    }
                                 }
                                 let target = ep.clone().unwrap_or_else(|| addr.to_string());
+                                let retry = bootstrap_retry.entry(target.clone()).or_insert((0, now));
+                                if now < retry.1 {
+                                    continue;
+                                }
+                                let delay_secs = match retry.0 {
+                                    0 => 3,
+                                    1 => 6,
+                                    _ => 12,
+                                };
+                                retry.0 = retry.0.saturating_add(1);
+                                retry.1 = now + std::time::Duration::from_secs(delay_secs);
                                 match target.parse::<libp2p::Multiaddr>() {
                                     Ok(ma) => if let Err(e) = swarm.swarm.dial(ma) {
-                                        tracing::debug!(%target, %e, "bootstrap bare re-dial failed (will retry)");
+                                        if pool_empty {
+                                            tracing::warn!(%target, %e, next_retry_secs = delay_secs, "bootstrap dial failed while peer pool is empty");
+                                        } else {
+                                            tracing::debug!(%target, %e, next_retry_secs = delay_secs, "bootstrap bare re-dial failed");
+                                        }
                                     },
                                     Err(e) => tracing::debug!(%target, %e, "bad bootstrap endpoint"),
                                 }
                             }
-                            if swarm.connected_peers().is_empty() {
-                                tracing::warn!("no connected peers — re-dialing all bootstrap (bare)");
+                            if pool_empty {
+                                tracing::warn!(bootstrap_count = swarm.bootstrap_peers_cache.len(), "no connected peers — retrying bootstrap set with 3/6/12s backoff");
                             }
                         }
                     }
@@ -825,26 +917,10 @@ impl NetworkManager {
         // `tracing` above — RUST_LOG=sigil::identity=info to see it headless — never the raw screen.
         config.listen_addr = "/ip4/0.0.0.0/tcp/0".into(); // ephemeral
         config.gossipsub_topics = SIGIL_TOPICS.iter().map(|s| s.to_string()).collect();
-        // SIGIL_BOOTSTRAP env override (comma-separated multiaddrs, each WITH /p2p/<PeerId>):
-        // user-supplied peers are tried FIRST, then the built-in fleet. Lets an operator whose
-        // network can't reach the default nodes (firewall/NAT on tcp/9501, or a private fleet)
-        // point at a reachable bootstrap and escape "0 peers" without a rebuild.
-        let mut bootstrap: Vec<String> = Vec::new();
-        if let Ok(extra) = std::env::var("SIGIL_BOOTSTRAP") {
-            for a in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                bootstrap.push(a.to_string());
-            }
-        }
-        // v0.57 (sync): a CO-LOCATED producer (same box, tip-complete, LAN latency, 0 WAN
-        // timeouts) is the best possible peer — dial it FIRST. Proven: collapses a 1.7M-gap crawl
-        // (hours, 36-92% timeout from the remote fleet) to a ~12s full sync. Loopback only; the
-        // public-IP epsilon entry below is unreachable same-box, which had masked the producer.
-        if let Some(local) = detect_local_producer() {
-            tracing::info!(target: "sigil::identity", addr = %local, "co-located producer detected — dialing it FIRST");
-            bootstrap.insert(0, local);
-        }
-        bootstrap.extend(SIGIL_BOOTSTRAP_PEERS.iter().map(|(_, addr)| addr.to_string()));
-        config.bootstrap_peers = bootstrap;
+        // SIGIL_BOOTSTRAP_PEERS is a FULL env override; legacy SIGIL_BOOTSTRAP
+        // is additive. Built-ins include the 4 fleet nodes plus the Epsilon
+        // relay853 fallback for restrictive networks.
+        config.bootstrap_peers = sigil_bootstrap_peers();
         // ── DETAILED BOOTSTRAP DEBUG (v0.31): every bootstrap addr + whether Kademlia can seed ──
         // from it. A bare /ip4/IP/tcp/PORT (no /p2p/<PeerId>) registers under OUR id → DHT never
         // seeds → "0 peers". v0.32.5: logged via `tracing` ONLY (no eprintln — it corrupts the TUI).
@@ -1141,5 +1217,33 @@ mod tests {
         let has_delta = config.bootstrap_peers.iter()
             .any(|a| a.contains("5.79.79.158"));
         assert!(has_delta, "Default bootstrap must include Delta (5.79.79.158)");
+    }
+
+    #[test]
+    fn test_split_bootstrap_env_accepts_common_separators() {
+        let peers = split_bootstrap_env(" /ip4/1.1.1.1/tcp/1/p2p/a, /ip4/2.2.2.2/tcp/2/p2p/b\n/ip4/3.3.3.3/tcp/3/p2p/c ");
+        assert_eq!(peers.len(), 3);
+        assert_eq!(peers[0], "/ip4/1.1.1.1/tcp/1/p2p/a");
+        assert_eq!(peers[2], "/ip4/3.3.3.3/tcp/3/p2p/c");
+    }
+
+    #[test]
+    fn test_dedupe_bootstrap_peers_keeps_first_occurrence() {
+        let peers = dedupe_bootstrap_peers(vec![
+            "/ip4/1.1.1.1/tcp/1/p2p/a".into(),
+            "/ip4/2.2.2.2/tcp/2/p2p/b".into(),
+            "/ip4/1.1.1.1/tcp/1/p2p/a".into(),
+        ]);
+        assert_eq!(peers, vec![
+            "/ip4/1.1.1.1/tcp/1/p2p/a".to_string(),
+            "/ip4/2.2.2.2/tcp/2/p2p/b".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_sigil_relay853_fallback_is_configured() {
+        assert!(SIGIL_RELAY853_BOOTSTRAP_PEERS
+            .iter()
+            .any(|(_, addr)| addr.contains("/tcp/853/") && addr.contains("/p2p/")));
     }
 }

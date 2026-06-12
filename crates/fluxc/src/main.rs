@@ -202,7 +202,84 @@ fn main() {
             }
             fluxc_core::p2p_worker::run_auto_updater_with(interval, apply)
         }
-        Some("swarm") => { let sub = subcommand_args.get(1).map(|s|s.as_str()).unwrap_or(""); match sub { "register" => println!("{}", fluxc_core::swarm::swarm_register_cli(subcommand_args.get(2).map(|s|s.as_str()).unwrap_or("agent1"), subcommand_args.get(3).map(|s|s.as_str()).unwrap_or("qnk..."))), "claim" => println!("{}", fluxc_core::swarm::swarm_claim_cli(subcommand_args.get(2).map(|s|s.as_str()).unwrap_or("agent1"), subcommand_args.get(3).map(|s|s.as_str()).unwrap_or("flux-graph"))), _ => println!("{}", fluxc_core::swarm::swarm_status().summary()), } }
+        Some("swarm") | Some("sw") => {
+            let op = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("status");
+            match op {
+                "register" => println!("{}", fluxc_core::swarm::swarm_register_cli(
+                    subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("agent1"),
+                    subcommand_args.get(3).map(|s| s.as_str()).unwrap_or("qnk..."),
+                )),
+                "status" | "st" => {
+                    println!("⬡ Flux Swarm Status");
+                    let s = fluxc_core::swarm::swarm_status();
+                    println!("  agents: {}  claims: {}  completed: {}", s.agents, s.active_claims, s.completed_tasks);
+                    println!("  QUG paid: {:.1}", s.qug_paid);
+                    if !s.agents_list.is_empty() {
+                        println!("  agents:");
+                        for a in &s.agents_list {
+                            let status = format!("{:?}", a.status).to_lowercase();
+                            println!("    {}  {}  {} QUG  on {:?}", a.id, status, a.total_earned_qug, a.current_crates);
+                        }
+                    }
+                }
+                "claim" | "cl" => {
+                    let (agent_id, crates): (String, Vec<String>) = if subcommand_args.len() >= 4 {
+                        (
+                            subcommand_args[2].clone(),
+                            subcommand_args[3..].iter().map(|s| s.to_string()).collect(),
+                        )
+                    } else {
+                        (
+                            env::var("FLUX_AGENT_ID").unwrap_or_else(|_| "cli-agent".into()),
+                            subcommand_args[2..].iter().map(|s| s.to_string()).collect(),
+                        )
+                    };
+                    if crates.is_empty() {
+                        eprintln!("usage: fluxc swarm claim [agent_id] <crate> [crates...]");
+                    } else {
+                        match fluxc_core::swarm::claim_work(&agent_id, &crates, 10) {
+                            Ok(claim) => println!("⬡ Claimed: {} by {} on {:?}", claim.task_id, claim.agent, claim.crates),
+                            Err(e) if e.starts_with("self-owned:") => println!("ℹ {}", &e["self-owned: ".len()..]),
+                            Err(e) => eprintln!("  claim failed: {e}"),
+                        }
+                    }
+                }
+                "complete" | "co" => {
+                    let task_id = subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        eprintln!("usage: fluxc swarm complete <task_id> [--fail]");
+                    } else {
+                        let agent_id = env::var("FLUX_AGENT_ID").unwrap_or_else(|_| "cli-agent".into());
+                        let success = !subcommand_args.iter().any(|a| a == "--fail");
+                        match fluxc_core::swarm::complete_work(&agent_id, task_id, success) {
+                            Some(t) => println!("⬡ Completed: {} ({}) — {} QUG", t.task_id, if success { "✓" } else { "✗" }, t.qug_earned),
+                            None => eprintln!("  complete failed (no such claim or not yours)"),
+                        }
+                    }
+                }
+                "release" | "rl" => {
+                    let task_id = subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        eprintln!("usage: fluxc swarm release <task_id>");
+                    } else {
+                        let agent_id = env::var("FLUX_AGENT_ID").unwrap_or_else(|_| "cli-agent".into());
+                        if fluxc_core::swarm::release_claim(&agent_id, task_id) {
+                            println!("⬡ Released: {task_id}");
+                        } else {
+                            eprintln!("  release failed");
+                        }
+                    }
+                }
+                _ => {
+                    println!("⬡ fluxc swarm — Swarm coordination");
+                    println!("  fluxc swarm status                 Show live swarm state");
+                    println!("  fluxc swarm register <agent> <qnk> Register or refresh an agent");
+                    println!("  fluxc swarm claim [agent] <crate>  Claim one or more crates");
+                    println!("  fluxc swarm complete <task_id>     Complete claimed work");
+                    println!("  fluxc swarm release <task_id>      Release a claim");
+                }
+            }
+        }
         Some("os-stage") => {
             // `fluxc os-stage --packages NAME1 NAME2 [--output-dir PATH]`
             let mut packages: Vec<String> = Vec::new();
@@ -434,6 +511,53 @@ fn main() {
                     Err(e) => eprintln!("  flux-graph: {}", e),
                 }
             }
+        }
+        // ── v0.9: Fleet + Mesh + Wallet CLI tools ──
+        Some("fleet") | Some("fl") => {
+            println!("⬡ Flux Fleet Status");
+            match fluxc_core::flux_net::fleet_status() {
+                Ok(nodes) => {
+                    for n in &nodes {
+                        let dot = if n.online { "●" } else { "○" };
+                        println!("  {} {}  h{}  v{}  {}s up",
+                            dot, n.name, n.height, n.version, n.uptime_secs);
+                    }
+                    let online = nodes.iter().filter(|n| n.online).count();
+                    println!("  fleet: {}/{} online", online, nodes.len());
+                }
+                Err(e) => eprintln!("  fleet: {e}"),
+            }
+        }
+        Some("mesh") | Some("mh") => {
+            println!("⬡ Flux P2P Mesh Health");
+            match fluxc_core::flux_net::mesh_health() {
+                Ok(h) => {
+                    println!("  peers: {}  quality: {}  fan-out: {}",
+                        h.connected_peers, h.quality, h.fan_out);
+                    println!("  blocks received: {}  avg latency: {:.1}ms",
+                        h.blocks_received, h.avg_block_latency_ms);
+                    println!("  messages processed: {}  drop rate: {:.2}",
+                        h.messages_processed, h.estimated_drop_rate);
+                    if !h.peer_heights.is_empty() {
+                        println!("  peer heights:");
+                        for (peer, height) in &h.peer_heights {
+                            println!("    {} → {}", peer, height);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("  mesh: {e}"),
+            }
+        }
+        Some("wallet") | Some("wal") => {
+            let url = std::env::var("FLUX_WALLET_URL")
+                .unwrap_or_else(|_| "http://localhost:9800/sigil-wallet-tron.html".into());
+            println!("⬡ Opening wallet → {url}");
+            #[cfg(target_os = "linux")]
+            { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }
+            #[cfg(target_os = "macos")]
+            { let _ = std::process::Command::new("open").arg(&url).spawn(); }
+            #[cfg(windows)]
+            { let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn(); }
         }
         _ => fluxc_core::print_usage(),
     }

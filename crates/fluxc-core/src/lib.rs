@@ -28,6 +28,7 @@ pub mod swarm;
 pub mod provenance;
 pub mod xray;
 pub mod fix;
+pub mod release_audit;
 
 use std::env;
 use std::path::PathBuf;
@@ -978,6 +979,7 @@ pub fn print_usage() {
     println!("  fluxc clean           Clear all caches");
     println!("  fluxc stats           Show build statistics and cache info");
     println!("  fluxc status [--json] Show workspace status (crates, agility)");
+    println!("  fluxc release-audit   Show release-lane split and hold status");
     println!("  fluxc plan            AI-optimized build plan (batches, est. time)");
     println!("  fluxc explain CRATE   Explain a crate (path, deps, type)");
     println!("  fluxc version         Print version\n");

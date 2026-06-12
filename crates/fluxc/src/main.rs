@@ -349,6 +349,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("release-audit") | Some("rel-audit") => fluxc_core::release_audit::print_release_audit(),
         Some("mcp") => fluxc_mcp::run_mcp_server(),
         Some("version") | Some("-V") => println!("{}", fluxc_core::version()),
         Some("api") => {

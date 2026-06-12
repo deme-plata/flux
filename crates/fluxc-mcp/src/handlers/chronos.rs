@@ -276,6 +276,31 @@ mod tests {
 
 // ── SIGIL Chronos CI/CD Handler ──
 
+/// Resolve which sibling Cargo workspace owns `crate_name`.
+/// SIGIL / quillonos crates live in sibling workspaces NEXT TO flux/, not inside it,
+/// so `fluxc build -p <crate>` only resolves when run with the owning workspace as
+/// current_dir. Without this, every sigil-* CI run failed `build` with
+/// "package ID specification did not match any packages" (wrong-workspace lookup).
+fn resolve_ci_workspace(crate_name: &str) -> std::path::PathBuf {
+    let flux_root = fluxc_core::version::workspace_root();
+    let base = flux_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| flux_root.clone());
+    for ws in ["flux", "sigil", "quillonos", "quillon"] {
+        if base
+            .join(ws)
+            .join("crates")
+            .join(crate_name)
+            .join("Cargo.toml")
+            .exists()
+        {
+            return base.join(ws);
+        }
+    }
+    flux_root
+}
+
 fn flux_sigil_chronos_ci(args: &Value) -> String {
     let crate_name = args.get("crate").and_then(|v| v.as_str()).unwrap_or("sigil-chronos");
     let nodes = args.get("nodes").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
@@ -291,9 +316,15 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
     let mut steps = Vec::new();
     let start = std::time::Instant::now();
 
-    // 1. Build
-    let build = std::process::Command::new("fluxc")
-        .args(["build", "-p", crate_name]).output();
+    // 1. Build (resolve the owning workspace so sigil-* crates build, not just flux/ crates).
+    // Use fluxc_cmd() — absolute target/debug/fluxc — NOT bare "fluxc": the MCP server's
+    // cwd/PATH is the agent runner's, so a bare name fails to spawn and the build step
+    // silently reports ok:false. current_dir is then overridden to the OWNING workspace.
+    let workspace = resolve_ci_workspace(crate_name);
+    let build = crate::handlers::fluxc_cmd()
+        .args(["build", "-p", crate_name])
+        .current_dir(&workspace)
+        .output();
     let build_ok = build.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "build", "ok": build_ok}));
 
@@ -308,16 +339,26 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
 
     // 3. AI heal on failure
     if !chronos_ok && heal_on_failure {
-        let target = format!("crates/{}/src/lib.rs", crate_name);
-        let heal = std::process::Command::new("fluxc")
-            .args(["heal", &target, "-n", "3"]).output();
+        let target = workspace
+            .join("crates")
+            .join(crate_name)
+            .join("src")
+            .join("lib.rs");
+        let heal = crate::handlers::fluxc_cmd()
+            .arg("heal")
+            .arg(&target)
+            .args(["-n", "3"])
+            .current_dir(&workspace)
+            .output();
         steps.push(json!({"step": "heal", "ok": heal.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
 
     // 4. Deploy on success
     if deploy_on_success && build_ok && chronos_ok {
-        let deploy = std::process::Command::new("fluxc")
-            .args(["release", crate_name]).output();
+        let deploy = crate::handlers::fluxc_cmd()
+            .args(["release", crate_name])
+            .current_dir(&workspace)
+            .output();
         steps.push(json!({"step": "deploy", "ok": deploy.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
 
@@ -340,4 +381,41 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
         "elapsed_secs": format!("{:.1}", elapsed), "steps": steps,
         "next": if status == "FAILED" { "Run with heal_on_failure=true" } else { "All checks passed" },
     }).to_string()
+}
+
+#[cfg(test)]
+mod ci_workspace_tests {
+    use super::*;
+
+    #[test]
+    fn flux_crate_resolves_to_flux_root() {
+        // fluxc-core always lives in the flux workspace itself.
+        let ws = resolve_ci_workspace("fluxc-core");
+        assert!(
+            ws.join("crates").join("fluxc-core").join("Cargo.toml").exists(),
+            "resolved workspace must actually own the crate: {}",
+            ws.display()
+        );
+        assert_eq!(ws, fluxc_core::version::workspace_root());
+    }
+
+    #[test]
+    fn unknown_crate_falls_back_to_flux_root() {
+        let ws = resolve_ci_workspace("definitely-not-a-crate-xyz");
+        assert_eq!(ws, fluxc_core::version::workspace_root());
+    }
+
+    #[test]
+    fn sigil_crate_resolves_to_sibling_when_present() {
+        // Environment-tolerant: only assert the sibling mapping when the
+        // sibling workspace exists on this box (it does on Epsilon).
+        let flux_root = fluxc_core::version::workspace_root();
+        let sibling = flux_root.parent().map(|p| p.join("sigil"));
+        if let Some(sigil_ws) = sibling {
+            if sigil_ws.join("crates").join("sigil-chronos").join("Cargo.toml").exists() {
+                assert_eq!(resolve_ci_workspace("sigil-chronos"), sigil_ws,
+                    "sigil-chronos must resolve to the sigil sibling, not flux");
+            }
+        }
+    }
 }

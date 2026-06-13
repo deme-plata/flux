@@ -7,6 +7,9 @@
 
 use sqisign_rs::{generate, Level5, PublicKey, SigningKey, Verifier};
 
+/// Require-both SQIsign+Ed25519 hybrid provenance signatures (defense-in-depth).
+pub mod hybrid;
+
 pub fn keygen() -> (Vec<u8>, Vec<u8>) {
     let mut rng = rand::rngs::OsRng;
     let (pk, sk): (PublicKey<Level5>, SigningKey<Level5>) = generate::<Level5>(&mut rng);
@@ -158,7 +161,16 @@ mod tests {
     #[test] fn test_wrong_key() { let (sk,pk)=keygen(); let (_,wp)=keygen(); let s=sign(b"x",&sk,&pk).unwrap(); assert!(!verify(b"x",&s,&wp).unwrap()); }
     #[test] fn test_sig_size() { let (sk,pk)=keygen(); assert_eq!(sign(b"x",&sk,&pk).unwrap().len(), 292); }
     #[test] fn test_bench() { let r=benchmark(3); assert!(r.keygen_avg_us>0.0); assert_eq!(r.sig_size,292); }
-    #[test] fn test_tiers() { assert_eq!(recommend_for_medium("dns_txt",20),SigTier::SqiOnly); assert_eq!(recommend_for_medium("auth_session",0),SigTier::DilithiumPreferred); }
+    #[test] fn test_tiers() {
+        // blockchain_tx genuinely yields SqiOnly (unconditional, line ~127).
+        assert_eq!(recommend_for_medium("blockchain_tx",0),SigTier::SqiOnly);
+        // dns_txt: the corrected 292-byte SQIsign sig already exceeds the
+        // 255-byte DNS-TXT single-string limit, so neither scheme fits alone
+        // -> Both. (This asserted SqiOnly back when the sig was mis-sized at
+        // 148/177 B; the Level-5 size fix exposed the stale expectation.)
+        assert_eq!(recommend_for_medium("dns_txt",20),SigTier::Both);
+        assert_eq!(recommend_for_medium("auth_session",0),SigTier::DilithiumPreferred);
+    }
 
     #[test]
     fn test_rejects_wrong_length_sig_and_pk() {

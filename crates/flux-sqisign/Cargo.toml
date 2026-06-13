@@ -3,7 +3,7 @@ name = "flux-sqisign"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SQIsign post-quantum isogeny signatures — 177-byte sigs, flux-db key integration"
+description = "SQIsign post-quantum isogeny signatures (NIST L5, 292-byte sigs) + require-both SQIsign/Ed25519 hybrid provenance, flux-db key integration"
 
 [dependencies]
 sqisign-rs = "0.3"
@@ -11,3 +11,5 @@ flux-cache = { path = "../flux-cache" }
 flux-db = { path = "../flux-db" }
 serde = { version = "1", features = ["derive"] }
 rand = "0.8"
+ed25519-dalek = "2"
+blake3 = "1"

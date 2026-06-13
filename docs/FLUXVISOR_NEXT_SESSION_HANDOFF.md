@@ -51,11 +51,27 @@ rescues it when the operator wants it committed.
   intentionally a separate, operator-gated boundary (future `HostExecutor` trait
   + privilege token), not in this crate.
 
-`flux_combo flux-visor` → **green, 28/28**.
+- **Board T2 DONE — capacity-heartbeat daemon:** new
+  `crates/flux-visor/src/heartbeat.rs`. `HeartbeatDaemon::tick(ledger, uptime,
+  healthy)` returns a `HostHeartbeat` (on `/fluxvisor/1/host-heartbeat`) + a
+  `CapacityHeartbeat` (on `/fluxvisor/1/capacity`, carrying total/used/remaining
+  `ResourceSet`s from the ledger). Pure: monotonic `seq`, `uptime_secs` passed in
+  — no wall clock. Publishing is the injected `HeartbeatSink` boundary; the only
+  sink shipped is the inert `RecordingSink` (no network). **No transport is
+  started** — the live flux-p2p sink is the operator-gated step. Test
+  `heartbeat_topics_present_in_generated_network_config` proves the daemon's
+  topics are in the `NetworkConfig` a worker gets from
+  `FluxP2pCluster::network_config_for` (the "NetworkConfig fit" gate). Added
+  `serde_json` dep + `FluxVisorError::Serialization`.
 
-Remaining board: **T2** P2P capacity-heartbeat daemon, **T3** security runbook,
-billing/abuse `WebhookGen`. Suggested still-unbuilt nicety: a read-only Cortex
-*preview* routing each `PlatformTaskPlan`'s modes through `AiCortex::route_task`.
+`flux_combo flux-visor` → **green, 35/35**.
+
+Remaining board: **T3** security runbook (`docs/FLUXHOST_ALPHA_SECURITY.md`),
+billing/abuse `WebhookGen`. Plus two still-unbuilt niceties: a read-only Cortex
+*preview* routing each `PlatformTaskPlan`'s modes through `AiCortex::route_task`,
+and a fleet-side `CapacityHeartbeat` aggregator that picks the worker with the
+most `remaining` for a given plan (the publish side now exists; the consume/route
+side is the natural next step).
 
 Next after this (pre-T1, now also done): wire dry-run plans into a Cortex
 *preview* (route each plan's modes through `AiCortex::route_task` to show which

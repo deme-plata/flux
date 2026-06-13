@@ -10,6 +10,7 @@
 
 pub mod cortex_bridge;
 pub mod executor;
+pub mod heartbeat;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1073,6 +1074,9 @@ pub enum FluxVisorError {
         /// Available amount.
         available: u64,
     },
+    /// A heartbeat payload could not be serialized for the wire.
+    #[error("heartbeat serialization failed: {0}")]
+    Serialization(String),
 }
 
 #[cfg(test)]

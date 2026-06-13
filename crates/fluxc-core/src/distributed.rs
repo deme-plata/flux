@@ -592,3 +592,50 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod shell_safety_tests {
+    //! shell_quote is the RCE boundary for remote `bash -lc '...'` (Tier 3). A
+    //! regression here is a fleet-wide command-injection vector — so we pin the
+    //! exact POSIX single-quote escaping, including adversarial inputs.
+    use super::{parse_target_dir, shell_quote};
+
+    #[test]
+    fn shell_quote_wraps_and_escapes_single_quotes() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("abc"), "'abc'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        // a single quote becomes the 4-char POSIX sequence '\'' — never bare.
+        assert_eq!(shell_quote("'"), r"''\'''");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn shell_quote_neutralizes_injection() {
+        // The classic break-out attempt: the embedded `'; rm -rf /` must end up
+        // INSIDE the quoting, with every quote escaped — not a command separator.
+        let evil = "a'; rm -rf /";
+        assert_eq!(shell_quote(evil), r"'a'\''; rm -rf /'");
+        let q = shell_quote(evil);
+        assert!(q.starts_with('\'') && q.ends_with('\''), "always fully single-quoted");
+        // No bare single-quote survives: every ' is part of the '\'' escape.
+        assert!(!q.contains("' '"), "no unescaped quote-space-quote breakout");
+    }
+
+    #[test]
+    fn parse_target_dir_reads_build_table_only() {
+        assert_eq!(parse_target_dir("[build]\ntarget-dir = \"/tmp/x\""), Some("/tmp/x".into()));
+        assert_eq!(parse_target_dir("[build]\ntarget-dir=unquoted"), Some("unquoted".into()));
+        // first match wins, even with a later section redefining it.
+        assert_eq!(
+            parse_target_dir("[build]\ntarget-dir=\"a\"\n[other]\ntarget-dir=\"b\""),
+            Some("a".into())
+        );
+        // target-dir outside [build] is ignored.
+        assert_eq!(parse_target_dir("[other]\ntarget-dir=\"z\""), None);
+        // [build] present but no target-dir, and empty value → None.
+        assert_eq!(parse_target_dir("[build]\njobs = 4"), None);
+        assert_eq!(parse_target_dir("[build]\ntarget-dir = \"\""), None);
+        assert_eq!(parse_target_dir(""), None);
+    }
+}

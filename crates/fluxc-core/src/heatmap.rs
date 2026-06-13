@@ -522,3 +522,25 @@ mod tests {
         assert_eq!(json["status"], "OOM_RISK");
     }
 }
+
+#[cfg(test)]
+mod uptime_factor_tests {
+    //! uptime_factor normalizes uptime → a 0..=1 stability score (Tier 3).
+    use super::uptime_factor;
+
+    #[test]
+    fn uptime_factor_is_clamped_and_linear() {
+        assert_eq!(uptime_factor(0), 0.0);
+        assert_eq!(uptime_factor(43_200), 0.5, "12h = half a day");
+        assert_eq!(uptime_factor(86_400), 1.0, "24h saturates");
+        assert_eq!(uptime_factor(86_401), 1.0, "beyond 24h stays clamped");
+        assert_eq!(uptime_factor(u64::MAX), 1.0, "no overflow / never exceeds 1.0");
+        // monotonic non-decreasing across the ramp.
+        let mut prev = 0.0;
+        for s in (0..=90_000).step_by(10_000) {
+            let f = uptime_factor(s);
+            assert!(f >= prev && (0.0..=1.0).contains(&f));
+            prev = f;
+        }
+    }
+}

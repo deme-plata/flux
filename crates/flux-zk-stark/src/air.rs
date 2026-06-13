@@ -427,3 +427,145 @@ impl AirConstraintBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod air_constraint_tests {
+    //! Soundness coverage for the AIR constraint system (Tier 3 — air.rs had NO
+    //! tests). These pin the core property a STARK depends on: `verify_constraints`
+    //! ACCEPTS a trace that satisfies every constraint and REJECTS any violation.
+    //! A regression here would let an invalid execution trace prove valid.
+    use super::*;
+
+    fn trace(rows: Vec<Vec<u64>>) -> ExecutionTrace {
+        ExecutionTrace::new(rows, vec![])
+    }
+
+    #[test]
+    fn arithmetic_sequence_accepts_increment_rejects_break() {
+        let mut air = AirConstraints::new();
+        air.add_transition_constraint(AirConstraintBuilder::arithmetic_sequence(0));
+        // 0,1,2,3 increments by 1 each step → satisfied.
+        assert!(air.verify_constraints(&trace(vec![vec![0], vec![1], vec![2], vec![3]])));
+        // one step breaks the +1 rule → rejected.
+        assert!(!air.verify_constraints(&trace(vec![vec![0], vec![1], vec![2], vec![5]])));
+        // a backwards step (wrapping_sub) is still non-zero → rejected.
+        assert!(!air.verify_constraints(&trace(vec![vec![0], vec![1], vec![0], vec![1]])));
+    }
+
+    #[test]
+    fn multiplication_constraint_checks_each_row() {
+        let mut air = AirConstraints::new();
+        air.add_transition_constraint(AirConstraintBuilder::multiplication(0, 1, 2)); // c = a*b
+        assert!(air.verify_constraints(&trace(vec![vec![3, 4, 12], vec![5, 6, 30]])));
+        assert!(!air.verify_constraints(&trace(vec![vec![3, 4, 11], vec![5, 6, 30]])), "11 != 3*4");
+        // degree of a multiplication constraint propagates to the system.
+        assert_eq!(air.constraint_degree, 2);
+    }
+
+    #[test]
+    fn boundary_initial_and_final_values() {
+        let mut air = AirConstraints::new();
+        air.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 7));
+        air.add_boundary_constraint(AirConstraintBuilder::final_value(0, 9));
+        assert!(air.verify_constraints(&trace(vec![vec![7], vec![8], vec![9]])));
+        assert!(!air.verify_constraints(&trace(vec![vec![6], vec![8], vec![9]])), "wrong initial");
+        assert!(!air.verify_constraints(&trace(vec![vec![7], vec![8], vec![0]])), "wrong final");
+    }
+
+    #[test]
+    fn boundary_out_of_range_register_is_a_violation() {
+        let c = AirConstraintBuilder::initial_value(9, 0); // register 9 doesn't exist
+        // get_value → None → evaluate returns 1 (non-zero = violated), never panics.
+        assert_eq!(c.evaluate(&trace(vec![vec![0, 1]])), 1);
+    }
+
+    #[test]
+    fn boundary_specific_step() {
+        let c = BoundaryConstraint {
+            register: 0,
+            step: BoundaryStep::Step(1),
+            value: 42,
+            description: String::new(),
+        };
+        assert_eq!(c.evaluate(&trace(vec![vec![0], vec![42], vec![0]])), 0, "step 1 matches");
+        assert_ne!(c.evaluate(&trace(vec![vec![0], vec![41], vec![0]])), 0, "step 1 mismatch");
+    }
+
+    #[test]
+    fn global_monotonic_register() {
+        let air = {
+            let mut a = AirConstraints::new();
+            a.global_constraints.push(GlobalConstraint {
+                property: GlobalProperty::MonotonicRegister(0),
+                description: String::new(),
+            });
+            a
+        };
+        assert!(air.verify_constraints(&trace(vec![vec![1], vec![1], vec![2], vec![5]])), "non-decreasing ok");
+        assert!(!air.verify_constraints(&trace(vec![vec![1], vec![3], vec![2]])), "a dip violates monotonicity");
+    }
+
+    #[test]
+    fn global_register_sum() {
+        let air = {
+            let mut a = AirConstraints::new();
+            a.global_constraints.push(GlobalConstraint {
+                property: GlobalProperty::RegisterSum(0, 6),
+                description: String::new(),
+            });
+            a
+        };
+        assert!(air.verify_constraints(&trace(vec![vec![1], vec![2], vec![3]])), "1+2+3 == 6");
+        assert!(!air.verify_constraints(&trace(vec![vec![1], vec![2], vec![2]])), "sum 5 != 6");
+    }
+
+    #[test]
+    fn evaluation_aggregates_counts_and_rate() {
+        let mut air = AirConstraints::new();
+        air.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 0)); // satisfied
+        air.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 99)); // violated
+        let ev = air.evaluate_constraints(&trace(vec![vec![0], vec![1]]));
+        assert_eq!(ev.violation_count(), 1);
+        assert!(!ev.all_satisfied());
+        assert_eq!(ev.satisfaction_rate(), 50.0, "1 of 2 constraints satisfied");
+    }
+
+    #[test]
+    fn empty_constraint_set_is_vacuously_satisfied() {
+        let air = AirConstraints::new();
+        let ev = air.evaluate_constraints(&trace(vec![vec![1], vec![2]]));
+        assert!(ev.all_satisfied());
+        assert_eq!(ev.satisfaction_rate(), 100.0, "no constraints → fully satisfied");
+        assert!(air.verify_constraints(&trace(vec![vec![1], vec![2]])));
+    }
+
+    #[test]
+    fn transition_constraint_evaluated_at_every_step() {
+        // arithmetic_sequence over a 4-row trace → exactly 3 transition results.
+        let mut air = AirConstraints::new();
+        air.add_transition_constraint(AirConstraintBuilder::arithmetic_sequence(0));
+        let ev = air.evaluate_constraints(&trace(vec![vec![0], vec![1], vec![2], vec![3]]));
+        assert_eq!(ev.transition_results.len(), 3, "trace_length - 1 evaluations");
+    }
+
+    #[test]
+    fn execution_trace_validate_structure() {
+        // power-of-2 length, uniform width → Ok.
+        assert!(trace(vec![vec![1, 2], vec![3, 4]]).validate().is_ok());
+        // empty → Err.
+        assert!(trace(vec![]).validate().is_err());
+        // ragged rows → Err.
+        assert!(ExecutionTrace::new(vec![vec![1, 2], vec![3]], vec![]).validate().is_err());
+        // non-power-of-2 length → Err (FFT requirement).
+        assert!(trace(vec![vec![1], vec![2], vec![3]]).validate().is_err());
+    }
+
+    #[test]
+    fn pad_to_power_of_two_repeats_last_row() {
+        let mut t = trace(vec![vec![1], vec![2], vec![3]]); // length 3
+        t.pad_to_power_of_two();
+        assert_eq!(t.trace_length, 4);
+        assert_eq!(t.trace_matrix.last(), Some(&vec![3]), "padding repeats the last row");
+        assert!(t.validate().is_ok(), "padded trace is now valid");
+    }
+}

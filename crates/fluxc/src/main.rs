@@ -418,12 +418,17 @@ fn main() {
             }
         }
         Some("agent-keygen") => {
-            match fluxc_core::provenance::ensure_agent_key(None) {
-                Ok((_sk, pk)) => {
-                    let pk_hex: String = pk.iter().map(|b| format!("{:02x}", b)).collect();
-                    println!("  ✓ Agent SQIsign Level 5 key ensured");
-                    println!("    pubkey: {} ({} bytes)", &pk_hex[..pk_hex.len().min(64)], pk.len());
-                    println!("    sk stored in $FLUX_AGENT_KEY_PATH (default ~/.flux-agent-key.json)");
+            // Provision BOTH legs of the require-both hybrid (SQIsign + Ed25519).
+            // Idempotent: an agent created before the hybrid upgrade keeps its
+            // SQIsign identity and gains an Ed25519 leg.
+            match fluxc_core::provenance::ensure_agent_keys_hybrid(None) {
+                Ok((_ssk, spk, _esk, epk)) => {
+                    let spk_hex: String = spk.iter().map(|b| format!("{:02x}", b)).collect();
+                    let epk_hex: String = epk.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("  ✓ Agent hybrid provenance keys ensured (require-both)");
+                    println!("    SQIsign-L5 pubkey: {} ({} bytes)", &spk_hex[..spk_hex.len().min(64)], spk.len());
+                    println!("    Ed25519    pubkey: {} ({} bytes)", &epk_hex[..epk_hex.len().min(64)], epk.len());
+                    println!("    keys stored in $FLUX_AGENT_KEY_PATH (default ~/.flux-agent-key.json)");
                 }
                 Err(e) => eprintln!("  agent-keygen failed: {}", e),
             }

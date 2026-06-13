@@ -674,10 +674,15 @@ fn emit_provenance_proof(artifact_path: &std::path::Path, source_path: &std::pat
         fluxc_git: [0u8; 20],
         fluxc_version: 0x0a01_0001,
     };
-    let keys = crate::provenance::load_agent_keys();
-    let result = match &keys {
-        Some((sk, pk)) => crate::provenance::emit_signed(&ctx, sk, pk),
-        None => crate::provenance::emit(&ctx),
+    // Prefer the require-both SQIsign+Ed25519 hybrid; fall back to single-leg
+    // SQIsign if the agent has no Ed25519 leg yet; fall back to unsigned scaffold
+    // if no agent key is configured at all.
+    let result = if let Some((ssk, spk, esk, epk)) = crate::provenance::load_agent_keys_hybrid() {
+        crate::provenance::emit_signed_hybrid(&ctx, &ssk, &spk, &esk, &epk)
+    } else if let Some((sk, pk)) = crate::provenance::load_agent_keys() {
+        crate::provenance::emit_signed(&ctx, &sk, &pk)
+    } else {
+        crate::provenance::emit(&ctx)
     };
     match result {
         Ok(proof) => {
@@ -689,7 +694,13 @@ fn emit_provenance_proof(artifact_path: &std::path::Path, source_path: &std::pat
             match crate::provenance::to_json_bytes(&proof) {
                 Ok(bytes) => match std::fs::write(&proof_path, bytes) {
                     Ok(()) => {
-                        let mode = if proof.sqisign_sig.is_empty() { "unsigned scaffold" } else { "SQIsign L5 signed" };
+                        let mode = if !proof.ed25519_sig.is_empty() {
+                            "SQIsign-L5 + Ed25519 hybrid signed"
+                        } else if !proof.sqisign_sig.is_empty() {
+                            "SQIsign L5 signed"
+                        } else {
+                            "unsigned scaffold"
+                        };
                         println!("  Provenance: ✓ {} ({})", proof_path.display(), mode);
                     }
                     Err(e) => eprintln!("  Provenance write error: {}", e),

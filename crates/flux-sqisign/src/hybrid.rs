@@ -103,7 +103,8 @@ pub struct HybridResult {
 
 // ── ed25519 leg (the classical hedge) ──
 
-fn ed25519_keygen() -> (Vec<u8>, Vec<u8>) {
+/// Generate an Ed25519 keypair `(sk_32, pk_32)` for the classical hybrid leg.
+pub fn ed25519_keygen() -> (Vec<u8>, Vec<u8>) {
     // 32 random seed bytes ARE the ed25519 secret key; from_bytes avoids the
     // optional `rand_core` feature on ed25519-dalek.
     let mut seed = [0u8; ED25519_SK_LEN];

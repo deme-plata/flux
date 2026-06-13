@@ -803,3 +803,41 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod fleet_helpers_tests {
+    //! Tier 4 — flux-fleet had no tests. Covers the content-address URI and the
+    //! idempotent cache gate: is_read_only MUST reject anything with side
+    //! effects, or a mutating command could be flux://-cached/speculated.
+    use super::{flux_uri, flux_uri_str, is_read_only};
+
+    #[test]
+    fn flux_uri_is_a_deterministic_blake3_content_address() {
+        let u = flux_uri(b"hello");
+        assert_eq!(u, format!("flux://b3/{}", blake3::hash(b"hello").to_hex()));
+        assert!(u.starts_with("flux://b3/"));
+        assert_eq!(u.len(), "flux://b3/".len() + 64, "blake3 hex is 64 chars");
+        assert_eq!(flux_uri(b"hello"), u, "same bytes → same uri");
+        assert_ne!(flux_uri(b"hellp"), u, "different bytes → different uri");
+        assert_eq!(flux_uri_str("hello"), u, "str form addresses the utf-8 bytes");
+    }
+
+    #[test]
+    fn is_read_only_allows_safe_commands_including_path_prefixed() {
+        for cmd in ["ls -la", "cat /etc/hosts", "uname -a", "  echo hi", "grep x f", "df -h", "nproc"] {
+            assert!(is_read_only(cmd), "{cmd:?} should be cacheable");
+        }
+        // a path-qualified binary is stripped to its base name before matching.
+        assert!(is_read_only("/usr/bin/ls -la"));
+        assert!(is_read_only("/bin/hostname"));
+    }
+
+    #[test]
+    fn is_read_only_rejects_anything_with_side_effects() {
+        for cmd in ["rm -rf /", "mv a b", "dd if=/dev/zero of=x", "systemctl restart q", "", "  ", "mkfs.ext4 /dev/sda"] {
+            assert!(!is_read_only(cmd), "{cmd:?} mutates — must NOT be cached");
+        }
+        // even a path-qualified mutator is rejected (base-name stripped, then matched).
+        assert!(!is_read_only("/bin/rm somefile"));
+    }
+}

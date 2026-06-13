@@ -441,6 +441,65 @@ fn main() {
                 Err(e) => eprintln!("  agent-keygen failed: {}", e),
             }
         }
+        Some("sign-artifact") => {
+            // Emit a require-both hybrid provenance .proof over an EXISTING binary
+            // (binds the real artifact's BLAKE3, not a re-compiled object).
+            //   fluxc sign-artifact <artifact> [--source <src>] [--wallet <64hex>] [-o <proof>]
+            let artifact = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            if artifact.is_empty() {
+                eprintln!("usage: fluxc sign-artifact <artifact> [--source <src>] [--wallet <64hex>] [-o <proof>]");
+            } else {
+                let (mut source_path, mut out_path, mut wallet_hex) = (None::<String>, None::<String>, None::<String>);
+                let mut i = 2;
+                while i < subcommand_args.len() {
+                    match subcommand_args[i].as_str() {
+                        "--source" => { source_path = subcommand_args.get(i+1).cloned(); i += 2; }
+                        "-o" | "--out" => { out_path = subcommand_args.get(i+1).cloned(); i += 2; }
+                        "--wallet" => { wallet_hex = subcommand_args.get(i+1).cloned(); i += 2; }
+                        _ => { i += 1; }
+                    }
+                }
+                let out = out_path.unwrap_or_else(|| format!("{}.proof", artifact));
+                match (fluxc_core::provenance::load_agent_keys_hybrid(), std::fs::read(artifact)) {
+                    (None, _) => { eprintln!("✗ no hybrid agent key — run `fluxc agent-keygen` first"); std::process::exit(1); }
+                    (Some((ssk, spk, esk, epk)), Ok(art_bytes)) => {
+                        let source_bytes = source_path.as_deref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+                        let mut agent_wallet = [0u8; 32];
+                        if let Some(h) = wallet_hex.as_deref() {
+                            let h = h.trim().trim_start_matches("qnk").trim_start_matches("0x");
+                            for (n, b) in agent_wallet.iter_mut().enumerate() {
+                                if let Some(s) = h.get(n*2..n*2+2) { *b = u8::from_str_radix(s, 16).unwrap_or(0); }
+                            }
+                        }
+                        let ctx = fluxc_core::provenance::ProvenanceContext {
+                            artifact_bytes: art_bytes.clone(),
+                            source_bytes,
+                            agent_wallet,
+                            swarm_task_id: [0u8; 16],
+                            settle_tx: None,
+                            fluxc_git: [0u8; 20],
+                            fluxc_version: 0x0a01_0001,
+                        };
+                        match fluxc_core::provenance::emit_signed_hybrid(&ctx, &ssk, &spk, &esk, &epk) {
+                            Ok(proof) => match fluxc_core::provenance::to_json_bytes(&proof) {
+                                Ok(bytes) => match std::fs::write(&out, &bytes) {
+                                    Ok(()) => {
+                                        println!("✓ Hybrid provenance proof written");
+                                        println!("  artifact: {} ({} bytes)", artifact, art_bytes.len());
+                                        println!("  proof:    {} ({} bytes)", out, bytes.len());
+                                        println!("  legs:     SQIsign-L5 ({}B) + Ed25519 ({}B) — require-both", proof.sqisign_sig.len(), proof.ed25519_sig.len());
+                                    }
+                                    Err(e) => { eprintln!("✗ write {}: {}", out, e); std::process::exit(1); }
+                                },
+                                Err(e) => { eprintln!("✗ serialize: {}", e); std::process::exit(1); }
+                            },
+                            Err(e) => { eprintln!("✗ sign: {}", e); std::process::exit(1); }
+                        }
+                    }
+                    (_, Err(e)) => { eprintln!("✗ read artifact {}: {}", artifact, e); std::process::exit(1); }
+                }
+            }
+        }
         Some("xray") => {
             let want_json = subcommand_args.iter().any(|a| a == "--json");
             match fluxc_core::xray::xray() {

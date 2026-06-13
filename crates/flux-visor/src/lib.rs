@@ -11,6 +11,7 @@
 pub mod cortex_bridge;
 pub mod executor;
 pub mod heartbeat;
+pub mod security;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

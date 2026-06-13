@@ -64,14 +64,28 @@ rescues it when the operator wants it committed.
   `FluxP2pCluster::network_config_for` (the "NetworkConfig fit" gate). Added
   `serde_json` dep + `FluxVisorError::Serialization`.
 
-`flux_combo flux-visor` → **green, 35/35**.
+- **Board T3 DONE — security runbook:** `docs/FLUXHOST_ALPHA_SECURITY.md` (threat
+  model) backed by `crates/flux-visor/src/security.rs` — a go-live checklist of
+  21 `SecurityControl`s each `EnforcedInCode | PolicyRequired | NotYetImplemented`.
+  `ready_for_paid_customers()` is **false** while any blocker stands (it does);
+  test `current_alpha_is_not_ready` asserts we may not sell. Sharpened by a
+  DeepSeek-V4-pro consult (folded in: reservation-lock TOCTOU, CPU side-channels,
+  disk encryption, IMDS SSRF, noisy-neighbor QoS, live-migration trust, patch
+  cadence, cloud-init secrets, audit trail). Headline blocker: `host-residency` —
+  Epsilon runs the prod node + is OOM-cycling, so it's seed/control only, never a
+  paid host.
 
-Remaining board: **T3** security runbook (`docs/FLUXHOST_ALPHA_SECURITY.md`),
-billing/abuse `WebhookGen`. Plus two still-unbuilt niceties: a read-only Cortex
-*preview* routing each `PlatformTaskPlan`'s modes through `AiCortex::route_task`,
-and a fleet-side `CapacityHeartbeat` aggregator that picks the worker with the
-most `remaining` for a given plan (the publish side now exists; the consume/route
-side is the natural next step).
+`flux_combo flux-visor` → **green, 40/40**.
+
+Remaining board: billing/abuse `WebhookGen`. Open design decision from the
+consult: **the cortex_bridge `AiTaskKind` reuse is a "category error"** per
+DeepSeek — works today (dry-run + approval gate already in place) but the better
+shape is a distinct `OpsWorkflow{Draft,Review,Approval,ShadowTest,Deploy}` with
+AiTaskKind only as the drafting tool. NOT refactored — operator's call. Plus two
+niceties: a read-only Cortex `route_task` preview, and a fleet-side
+`CapacityHeartbeat` aggregator (the consume/route side of T2) — which must close
+the staleness/forgery/double-book/partition gaps in FLUXHOST_ALPHA_SECURITY.md
+before it can safely route.
 
 Next after this (pre-T1, now also done): wire dry-run plans into a Cortex
 *preview* (route each plan's modes through `AiCortex::route_task` to show which

@@ -1009,3 +1009,51 @@ pub fn sigil_topic(network: &str, kind: &str) -> String {
 
 /// The canonical SIGIL block sync topic for network g0.
 pub const SIGIL_G0_BLOCKS_TOPIC: &str = "/sigil/g0/blocks";
+#[cfg(test)]
+mod swarm_addr_tests {
+    //! Address/topic helpers in swarm.rs (Tier 3 — swarm.rs had NO tests).
+    //! `extract_peer_id_from_addr` returning None on a BARE multiaddr was the
+    //! root cause of a real SIGIL sync outage (bare /ip4/.../tcp/9501 bootstrap
+    //! addrs got registered under the local peer id → DHT never seeded). These
+    //! lock that behavior plus the gossip-topic strings (a wrong topic silently
+    //! partitions the network).
+    use super::*;
+    use libp2p::identity::Keypair;
+    use libp2p::multiaddr::Protocol;
+
+    fn a(s: &str) -> Multiaddr {
+        s.parse().expect("valid multiaddr")
+    }
+
+    #[test]
+    fn extract_peer_id_roundtrips_from_full_addr() {
+        let pid = Keypair::generate_ed25519().public().to_peer_id();
+        let addr = a("/ip4/89.149.241.126/tcp/9501").with(Protocol::P2p(pid));
+        assert_eq!(extract_peer_id_from_addr(&addr), Some(pid));
+    }
+
+    #[test]
+    fn extract_peer_id_from_bare_addr_is_none() {
+        // The incident: a bootstrap addr WITHOUT a /p2p/<id> component yields no
+        // peer id. Callers must NOT substitute the local id (that mis-seeds the
+        // DHT) — they must supply the /p2p component.
+        assert_eq!(extract_peer_id_from_addr(&a("/ip4/89.149.241.126/tcp/9501")), None);
+        assert_eq!(extract_peer_id_from_addr(&a("/dns4/sigilgraph.fluxapp.xyz/tcp/9501")), None);
+    }
+
+    #[test]
+    fn multiaddr_ip_extracts_v4_v6_and_skips_non_ip() {
+        assert_eq!(multiaddr_ip(&a("/ip4/1.2.3.4/tcp/9001")), Some("1.2.3.4".parse().unwrap()));
+        assert_eq!(multiaddr_ip(&a("/ip6/::1/tcp/9001")), Some("::1".parse().unwrap()));
+        // a /p2p component is still found by ip-scan? no — dns addrs have no IP.
+        assert_eq!(multiaddr_ip(&a("/dns4/example.com/tcp/9001")), None);
+    }
+
+    #[test]
+    fn gossip_topic_strings_are_stable() {
+        // A drift in any of these silently splits nodes onto different topics.
+        assert_eq!(quillon_topic("mainnet-genesis", "blocks"), "/qnk/mainnet-genesis/blocks");
+        assert_eq!(flux_topic(1, "blocks"), "/flux/1/blocks");
+        assert_eq!(dagknight_topic(2, "vertices"), "/dagknight/2/vertices");
+    }
+}

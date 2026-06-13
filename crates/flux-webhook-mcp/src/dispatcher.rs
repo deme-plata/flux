@@ -56,9 +56,9 @@ impl McpDispatcher {
                         self.dispatch_mcp_tool(tool, &event.payload).await;
                     } else {
                         let routes = self.routes.read().await;
-                        if let Some(tool) = routes.get(&event.event_type) {
+                        if let Some(tool) = routes.get(&event.event_type).cloned() {
                             drop(routes);
-                            self.dispatch_mcp_tool(tool, &event.payload).await;
+                            self.dispatch_mcp_tool(&tool, &event.payload).await;
                         }
                     }
 

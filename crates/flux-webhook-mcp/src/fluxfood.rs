@@ -7,6 +7,7 @@
 //! the watcher + dispatcher combo handles it automatically within ~150ms.
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -45,19 +46,27 @@ fn path_to_package(path: &str) -> Option<&'static str> {
 }
 
 /// The fluxfood auto-trigger.
-pub struct FluxfoodTrigger;
+pub struct FluxfoodTrigger {
+    event_tx: broadcast::Sender<WebhookEvent>,
+}
 
 impl FluxfoodTrigger {
-    /// Run the fluxfood trigger event loop.
+    /// Construct a trigger bound to the event bus.
+    pub fn new(event_tx: broadcast::Sender<WebhookEvent>) -> Self {
+        Self { event_tx }
+    }
+
+    /// Run the fluxfood trigger event loop on the bound event bus.
     pub async fn run(&self) {
-        let mut guard = crate::search::SearchReIndexer::init;
-        info!("🍽️ Fluxfood auto-trigger running");
+        Self::run_loop(self.event_tx.clone()).await;
     }
 
     /// Run the trigger loop.
     pub async fn run_loop(event_tx: broadcast::Sender<WebhookEvent>) {
         let mut rx = event_tx.subscribe();
-        let mut recent_triggers: HashSet<String> = HashSet::new();
+        // Shared so the per-key 5s expiry task can clear its entry without
+        // moving the set out of the loop.
+        let recent_triggers: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         info!("🍽️ Fluxfood auto-trigger running");
 
         loop {
@@ -74,10 +83,13 @@ impl FluxfoodTrigger {
                         .unwrap_or("auto");
 
                     let key = format!("{}:{}", pkg, event.event_type);
-                    if recent_triggers.contains(&key) {
-                        continue; // rate-limited
+                    {
+                        let mut seen = recent_triggers.lock().unwrap();
+                        if seen.contains(&key) {
+                            continue; // rate-limited
+                        }
+                        seen.insert(key.clone());
                     }
-                    recent_triggers.insert(key.clone());
 
                     // Determine which package to iterate
                     let target_pkg = if event.event_type == crate::types::event_types::FILE_EDITED {
@@ -108,11 +120,12 @@ impl FluxfoodTrigger {
                         warn!("Fluxfood iterate dispatch lost");
                     }
 
-                    // Clear rate-limit entry after 5 seconds
+                    // Clear rate-limit entry after 5 seconds (shared handle).
                     let clear_key = key.clone();
+                    let triggers = Arc::clone(&recent_triggers);
                     tokio::spawn(async move {
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        let _ = recent_triggers.remove(&clear_key);
+                        triggers.lock().unwrap().remove(&clear_key);
                     });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -121,5 +134,30 @@ impl FluxfoodTrigger {
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod path_to_package_tests {
+    //! fluxfood path→package routing. A misroute fires flux_iterate against the
+    //! wrong crate (or none). flux-webhook-mcp's first tests, added alongside the
+    //! 2026-06-13 compile-breakage rescue.
+    use super::path_to_package;
+
+    #[test]
+    fn maps_known_crate_paths() {
+        assert_eq!(path_to_package("/x/flux/crates/flux-p2p/src/swarm.rs"), Some("flux-p2p"));
+        assert_eq!(path_to_package("/x/flux/crates/flux-aether/src/lib.rs"), Some("flux-aether"));
+        assert_eq!(path_to_package("/x/sigil/crates/sigil-state/src/lib.rs"), Some("sigil-state"));
+        assert_eq!(path_to_package("/x/sigil/crates/sigil-node/src/main.rs"), Some("sigil-node"));
+        assert_eq!(path_to_package("/x/sigil/gui/sigil-wallet/src/App.tsx"), Some("sigil-wallet"));
+    }
+
+    #[test]
+    fn unknown_source_files_fall_back_to_auto_then_none() {
+        assert_eq!(path_to_package("/tmp/scratch.rs"), Some("auto"));
+        assert_eq!(path_to_package("/x/some/Cargo.toml"), Some("auto"));
+        assert_eq!(path_to_package("/tmp/notes.txt"), None);
+        assert_eq!(path_to_package("/var/log/syslog"), None);
     }
 }

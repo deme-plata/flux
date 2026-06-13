@@ -46,6 +46,10 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.5", features = ["cors"] }
 
+# CLI + logging (flux-webhookd binary)
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [dev-dependencies]
 tempfile = "3"
 

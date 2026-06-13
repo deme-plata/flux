@@ -109,6 +109,9 @@ async fn webhook_handler_typed(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // Compute the trigger flags BEFORE moving `event_type` into the struct.
+    let trigger_fluxfood = event_type.starts_with("build") || event_type.starts_with("file");
+    let trigger_search = event_type.starts_with("file");
     let event = WebhookEvent {
         id: format!("wh-{}", uuid::Uuid::new_v4()),
         event_type,
@@ -116,8 +119,8 @@ async fn webhook_handler_typed(
         timestamp_ms: now_ms(),
         payload,
         signature,
-        trigger_fluxfood: event_type.starts_with("build") || event_type.starts_with("file"),
-        trigger_search: event_type.starts_with("file"),
+        trigger_fluxfood,
+        trigger_search,
         target_mcp_tool: None,
         priority: 5,
     };
@@ -151,13 +154,15 @@ async fn mcp_webhook_handler(
         priority: 8,
     };
 
+    // Capture the tool name for the response before `event` is moved into send().
+    let resp_tool = event.target_mcp_tool.clone();
     if state.event_tx.send(event).is_err() {
         warn!("No subscribers for MCP webhook call");
     }
 
     Ok(Json(serde_json::json!({
         "status": "dispatched",
-        "tool": event.target_mcp_tool,
+        "tool": resp_tool,
         "message": "MCP tool call dispatched"
     })))
 }

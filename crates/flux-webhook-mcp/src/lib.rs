@@ -51,7 +51,6 @@ pub mod watcher;
 pub mod search;
 pub mod types;
 pub mod fluxfood;
-pub mod mcp_tools;
 
 pub use server::WebhookServer;
 pub use dispatcher::McpDispatcher;

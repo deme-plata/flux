@@ -53,8 +53,11 @@ impl SearchReIndexer {
             }),
         );
 
-        if event_tx.send(reindex_event).is_err() {
-            warn!("Search re-index confirmation lost");
+        // Emit through the process-wide event bus installed by `init`.
+        match event_tx().lock().await.as_ref() {
+            Some(tx) if tx.send(reindex_event).is_ok() => {}
+            Some(_) => warn!("Search re-index confirmation lost"),
+            None => warn!("Search re-indexer event bus not initialized (call SearchReIndexer::init)"),
         }
     }
 }

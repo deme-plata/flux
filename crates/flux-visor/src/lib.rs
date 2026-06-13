@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod cortex_bridge;
+pub mod executor;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

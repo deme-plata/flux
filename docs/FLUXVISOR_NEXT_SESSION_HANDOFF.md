@@ -35,9 +35,31 @@ Swarm: `rocky-289` settled 0.50 QUG.
 path-scoped `git add crates/flux-visor docs/FLUXVISOR_NEXT_SESSION_HANDOFF.md`
 rescues it when the operator wants it committed.
 
-Next after this: actually wire the dry-run plans into a Cortex *preview* (route
-each plan's modes through `AiCortex::route_task` to show which agent *would*
-take it — read-only, still no dispatch), then design `DryRunExecutor` (board T1).
+### Update 2026-06-13 (rocky) — cold-storage + Epsilon profile + T1 executor
+
+- **Cold-storage plan + Epsilon cost model:** added a disk-dense `cold-storage`
+  plan, `HostProfile::max_units`/`max_monthly_revenue_cents`, and
+  `epsilon_host_profile()`. Test `epsilon_cold_storage_clears_the_lease` proves
+  9×€30=€270 (disk-bound) clears the €220 lease while the storage VPS (€98,
+  traffic-bound) does not. Commit `de098992`.
+- **Board T1 DONE — `DryRunExecutor`:** new `crates/flux-visor/src/executor.rs`.
+  Trait `DryRunExecutor` + `LibvirtDryRun` renders the `qemu-img`/`cloud-localds`/
+  `virt-install`/`virsh`/`tc` commands a libvirt executor would run, as
+  `ExecutionStep`s marked `StepStatus::Planned`. `render_plan` is execution-free
+  by construction (`executed=false`, all steps `Planned`); `report.is_dry_run()`
+  proves it. **Runs nothing** — no `virsh`/`qemu`. The live `LibvirtExecutor` is
+  intentionally a separate, operator-gated boundary (future `HostExecutor` trait
+  + privilege token), not in this crate.
+
+`flux_combo flux-visor` → **green, 28/28**.
+
+Remaining board: **T2** P2P capacity-heartbeat daemon, **T3** security runbook,
+billing/abuse `WebhookGen`. Suggested still-unbuilt nicety: a read-only Cortex
+*preview* routing each `PlatformTaskPlan`'s modes through `AiCortex::route_task`.
+
+Next after this (pre-T1, now also done): wire dry-run plans into a Cortex
+*preview* (route each plan's modes through `AiCortex::route_task` to show which
+agent *would* take it — read-only, still no dispatch).
 
 ## Current objective
 

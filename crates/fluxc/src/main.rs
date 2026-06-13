@@ -379,6 +379,7 @@ fn main() {
                                     let wallet_hex: String = v.agent_wallet.iter().map(|b| format!("{:02x}", b)).collect();
                                     let art_hex: String = v.artifact_hash.iter().map(|b| format!("{:02x}", b)).collect();
                                     let src_hex: String = v.source_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let hybrid = !proof.ed25519_sig.is_empty();
                                     let signed = !proof.sqisign_sig.is_empty();
                                     println!("✓ Verified provenance proof");
                                     println!("  artifact:        {} ({} bytes)", artifact, art_bytes.len());
@@ -386,7 +387,14 @@ fn main() {
                                     println!("  source BLAKE3:   {}", src_hex);
                                     println!("  agent wallet:    qnk{}", wallet_hex);
                                     println!("  timestamp:       {}us", v.timestamp_us);
-                                    println!("  SQIsign signed:  {}", if signed { "✓ L5 (292B sig, 129B pubkey)" } else { "✗ (scaffold mode)" });
+                                    let sig_line = if hybrid {
+                                        "✓ require-both: SQIsign-L5 (292B) + Ed25519 (64B)"
+                                    } else if signed {
+                                        "✓ SQIsign-L5 (292B sig, 129B pubkey)"
+                                    } else {
+                                        "✗ (scaffold mode)"
+                                    };
+                                    println!("  signature:       {}", sig_line);
                                     println!("  on-chain backed: {}", if v.on_chain_backed { "✓" } else { "✗ (no settle_tx)" });
                                 }
                                 Err(e) => { eprintln!("✗ Verification failed: {}", e); std::process::exit(1); }

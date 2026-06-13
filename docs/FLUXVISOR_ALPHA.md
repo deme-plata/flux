@@ -18,14 +18,34 @@ development host.
 
 Suggested alpha plans:
 
-| plan | vCPU | RAM | disk | traffic |
-|---|---:|---:|---:|---:|
-| small | 2 | 4 GiB | 120 GiB | 5 TB/mo |
-| builder | 4 | 12 GiB | 350 GiB | 12 TB/mo |
-| storage | 2 | 4 GiB | 1.5 TiB | 30 TB/mo |
+| plan | vCPU | RAM | disk | traffic | €/mo |
+|---|---:|---:|---:|---:|---:|
+| small | 2 | 4 GiB | 120 GiB | 5 TB/mo | 12 |
+| builder | 4 | 12 GiB | 350 GiB | 12 TB/mo | 35 |
+| storage | 2 | 4 GiB | 1.5 TiB | 30 TB/mo | 49 |
+| cold-storage | 1 | 1 GiB | 8 TiB | 2 TB/mo | 30 |
 
 The alpha default is no RAM or disk oversell. CPU oversell should stay disabled
 until the host has real utilization data.
+
+### Why cold-storage exists — making an expensive box pay for itself
+
+The compute plans (small/builder/storage) are bound by **RAM and traffic**, not
+disk. On a storage-heavy box that strands the asset. Worked example —
+Server Epsilon (the €220/month lease: 48 threads, 64 GB RAM, ~88 TB HDD,
+100 TB/mo) modelled by `epsilon_host_profile()` with the node co-resident:
+
+| plan | max units | bound by | revenue/mo |
+|---|---:|---|---:|
+| storage (VPS) | 2 | traffic | €98 |
+| **cold-storage** | **9** | **disk** | **€270** |
+
+The compute-oriented `storage` VPS alone (€98) does **not** cover the €220 lease.
+`cold-storage` — disk-dense, RAM/traffic-light — is bound by disk instead, fills
+the 88 TB, and clears the lease with margin. `HostProfile::max_units(plan)` /
+`max_monthly_revenue_cents(plan)` compute this; the
+`epsilon_cold_storage_clears_the_lease` test asserts it (all dry-run; nothing is
+run on the box).
 
 ## Why dry-run first
 

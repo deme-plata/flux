@@ -479,6 +479,33 @@ impl HostProfile {
             ipv6_prefixes: self.capacity.ipv6_prefixes,
         }
     }
+
+    /// Maximum number of identical `plan` units this host can sell, bounded by
+    /// the scarcest resource after the overcommit policy. A resource the plan
+    /// does not consume (e.g. a cold-storage box with no public IPv4) is not a
+    /// constraint. Returns 0 only for a degenerate plan that consumes nothing.
+    pub fn max_units(&self, plan: &VmPlan) -> u32 {
+        let cap = self.sellable_capacity();
+        let r = &plan.resources;
+        [
+            units_for(r.vcpu as u64, cap.vcpu_threads as u64),
+            units_for(r.ram_mib, cap.ram_mib),
+            units_for(r.disk_gib, cap.disk_gib),
+            units_for(r.monthly_traffic_tb as u64, cap.monthly_traffic_tb as u64),
+            units_for(r.ipv4 as u64, cap.ipv4 as u64),
+            units_for(r.ipv6_prefixes as u64, cap.ipv6_prefixes as u64),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(0)
+    }
+
+    /// Monthly revenue in euro cents from selling [`HostProfile::max_units`] of
+    /// `plan` on this host at full occupancy.
+    pub fn max_monthly_revenue_cents(&self, plan: &VmPlan) -> u64 {
+        self.max_units(plan) as u64 * plan.monthly_price_eur_cents as u64
+    }
 }
 
 fn scale_u16(value: u16, per_mille: u16) -> u16 {
@@ -487,6 +514,16 @@ fn scale_u16(value: u16, per_mille: u16) -> u16 {
 
 fn scale_u64(value: u64, per_mille: u16) -> u64 {
     value.saturating_mul(per_mille as u64) / 1000
+}
+
+/// Units of a per-unit demand that fit into an available amount. `None` when the
+/// plan does not consume this resource (per-unit 0), so it is not a constraint.
+fn units_for(per_unit: u64, available: u64) -> Option<u32> {
+    if per_unit == 0 {
+        None
+    } else {
+        Some((available / per_unit) as u32)
+    }
 }
 
 /// Resources consumed by a plan or reservation.
@@ -599,7 +636,56 @@ pub fn fluxhost_alpha_plans() -> Vec<VmPlan> {
             4_900,
         )
         .expect("static plan"),
+        // Disk-dense, RAM- and traffic-light. This is the plan that actually
+        // monetizes a storage box like Epsilon (88 TB of HDD): customers park
+        // terabytes but rarely move them, so RAM and egress stay cheap.
+        VmPlan::new(
+            "cold-storage",
+            "Cold Storage / Backup Target",
+            ResourceSet {
+                vcpu: 1,
+                ram_mib: 1024,
+                disk_gib: 8 * 1024,
+                monthly_traffic_tb: 2,
+                ipv4: 0,
+                ipv6_prefixes: 1,
+            },
+            3_000,
+        )
+        .expect("static plan"),
     ]
+}
+
+/// Guest-sellable [`HostProfile`] for Server Epsilon (the €220/month lease)
+/// while the Quillon node co-resides on the box.
+///
+/// Raw hardware: 2× Xeon Gold 5118 (48 threads), 64 GB RAM, 2 TB NVMe + 4× 22 TB
+/// HDD (~88 TB), 100 TB/month on a 1 Gbit port. The numbers below are what is
+/// left for guests after reserving headroom for the node and OS:
+///
+/// - ~8 threads + ~38 GB RAM held for the q-api-server memory latch + OS,
+/// - the NVMe kept for the node's chain DB (guest pool lives on the HDDs),
+/// - ~30 TB/month of traffic reserved for node sync / P2P.
+///
+/// The point this profile makes: on Epsilon **disk is abundant and RAM/traffic
+/// are scarce**, so the disk-dense `cold-storage` plan is what clears the lease.
+/// See the `epsilon_cold_storage_clears_the_lease` test.
+pub fn epsilon_host_profile() -> HostProfile {
+    HostProfile::new(
+        "epsilon-host-01",
+        Backend::LibvirtKvm,
+        HostCapacity {
+            vcpu_threads: 40,
+            ram_mib: 24 * 1024,
+            disk_gib: 80_000,
+            monthly_traffic_tb: 70,
+            ipv4: 4,
+            ipv6_prefixes: 16,
+        },
+        OvercommitPolicy::default(),
+        NetworkProfile::new("br0", "eno1", 1_000).expect("static network profile"),
+    )
+    .expect("static epsilon profile")
 }
 
 /// Boot image metadata accepted by the planner.
@@ -1021,12 +1107,68 @@ mod tests {
     }
 
     #[test]
-    fn alpha_catalog_has_three_sellable_plans() {
+    fn alpha_catalog_has_four_sellable_plans() {
         let plans = fluxhost_alpha_plans();
-        assert_eq!(plans.len(), 3);
+        assert_eq!(plans.len(), 4);
         assert!(plans.iter().any(|p| p.name == "small"));
         assert!(plans.iter().any(|p| p.name == "builder"));
         assert!(plans.iter().any(|p| p.name == "storage"));
+        assert!(plans.iter().any(|p| p.name == "cold-storage"));
+    }
+
+    #[test]
+    fn epsilon_profile_has_expected_guest_capacity() {
+        let host = epsilon_host_profile();
+        assert_eq!(host.name, "epsilon-host-01");
+        let cap = host.sellable_capacity();
+        assert_eq!(cap.disk_gib, 80_000);
+        assert_eq!(cap.ram_mib, 24 * 1024);
+        assert_eq!(cap.monthly_traffic_tb, 70);
+    }
+
+    #[test]
+    fn cold_storage_is_disk_bound_on_epsilon() {
+        let host = epsilon_host_profile();
+        let cold = fluxhost_alpha_plans()
+            .into_iter()
+            .find(|p| p.name == "cold-storage")
+            .unwrap();
+        // For a disk-dense plan, disk is the scarce resource — RAM and traffic
+        // each allow many more units than disk does.
+        let cap = host.sellable_capacity();
+        let by_disk = cap.disk_gib / cold.resources.disk_gib;
+        let by_ram = cap.ram_mib / cold.resources.ram_mib;
+        let by_traffic =
+            cap.monthly_traffic_tb as u64 / cold.resources.monthly_traffic_tb as u64;
+        assert_eq!(host.max_units(&cold) as u64, by_disk);
+        assert!(by_disk < by_ram, "disk must bind before RAM");
+        assert!(by_disk < by_traffic, "disk must bind before traffic");
+    }
+
+    #[test]
+    fn epsilon_cold_storage_clears_the_lease() {
+        // The €220/month lease (22_000 euro cents) must be covered by
+        // cold-storage at full occupancy, with margin.
+        let host = epsilon_host_profile();
+        let catalog = fluxhost_alpha_plans();
+        let cold = catalog.iter().find(|p| p.name == "cold-storage").unwrap();
+
+        let units = host.max_units(cold);
+        let revenue = host.max_monthly_revenue_cents(cold);
+        assert!(units >= 8, "expected >= 8 cold-storage units, got {units}");
+        assert!(
+            revenue >= 22_000,
+            "cold-storage revenue {revenue}c must clear the €220 (22000c) lease"
+        );
+
+        // The contrast that justifies the new plan: the compute-oriented
+        // `storage` VPS alone does NOT cover the lease on this box, because it
+        // is RAM/traffic-bound and leaves the 88 TB of disk on the floor.
+        let storage = catalog.iter().find(|p| p.name == "storage").unwrap();
+        assert!(
+            host.max_monthly_revenue_cents(storage) < 22_000,
+            "storage VPS alone should not cover the lease — that's why cold-storage exists"
+        );
     }
 
     #[test]

@@ -1,0 +1,13 @@
+[package]
+name = "flux-visor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Flux-native virtualization control-plane core: plans, capacity accounting, and dry-run provisioning actions for a small hosting alpha."
+
+[dependencies]
+flux-p2p = { path = "../flux-p2p" }
+flux-cortex = { path = "../flux-cortex" }
+serde = { workspace = true }
+thiserror = { workspace = true }

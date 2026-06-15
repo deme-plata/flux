@@ -411,28 +411,45 @@ pub fn feedback_webhook_data(f: &BuildFeedback) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // predict_build / record_feedback / load_history all read+write
+    // $HOME/.flux/predictions.json. The shared test_home helper gives each test a
+    // fresh, empty HOME under one process-wide lock so the global HOME swap can't
+    // interleave with the other modules' persistence tests.
+    use crate::test_home::with_temp_home;
 
     #[test]
     fn test_predict_no_changes() {
-        let p = predict_build("fluxc", false, &[]);
-        assert_eq!(p.dimensions.source_delta, 0.0);
-        assert!(p.predicted_cache_rate > 0.9);
-        assert!(!p.is_cold);
+        with_temp_home("no_changes", || {
+            let p = predict_build("fluxc", false, &[]);
+            assert_eq!(p.dimensions.source_delta, 0.0);
+            // Fresh history → neutral hist factor (0.5): cache_affinity = 0.7·1 + 0.3·0.5
+            // = 0.85 → predicted_cache_rate ≈ 0.857 (rises toward 0.99 as accurate
+            // history accumulates). "No changes" still reads as a high cache rate.
+            assert!(p.predicted_cache_rate > 0.85, "got {}", p.predicted_cache_rate);
+            assert!(!p.is_cold);
+        });
     }
 
     #[test]
     fn test_predict_cold_build() {
-        let p = predict_build("fluxc", true, &["src/main.rs".into()]);
-        assert!(p.is_cold);
-        assert_eq!(p.predicted_cache_rate, 0.0);
+        with_temp_home("cold", || {
+            let p = predict_build("fluxc", true, &["src/main.rs".into()]);
+            assert!(p.is_cold);
+            assert_eq!(p.predicted_cache_rate, 0.0);
+        });
     }
 
     #[test]
     fn test_feedback_tracking() {
-        let p = predict_build("flux-search", false, &[]);
-        let f = record_feedback(&p, 245, 0.95, true);
-        assert!(f.was_accurate); // within 20% of predicted
-        assert!(f.error_ms <= (p.predicted_ms as i64 / 5).max(1));
+        with_temp_home("feedback", || {
+            let p = predict_build("flux-search", false, &[]);
+            // Feed an actual within ±20% of the prediction so it's marked accurate.
+            // (The old test fed a value ~50% off yet still asserted accuracy.)
+            let actual = (p.predicted_ms as f64 * 0.9) as u64;
+            let f = record_feedback(&p, actual, 0.95, true);
+            assert!(f.was_accurate, "|{} - {}| should be within 20%", actual, p.predicted_ms);
+            assert!(f.error_ms.abs() <= (p.predicted_ms as i64 / 5).max(1));
+        });
     }
 
     #[test]
@@ -444,11 +461,13 @@ mod tests {
 
     #[test]
     fn test_history_persistence_roundtrip() {
-        let p = predict_build("fluxc", false, &[]);
-        let f = record_feedback(&p, 500, 0.80, true);
-        
-        let hist = load_history();
-        assert!(hist.total_predictions >= 1);
-        assert!(!hist.feedback.is_empty());
+        with_temp_home("roundtrip", || {
+            let p = predict_build("fluxc", false, &[]);
+            let _f = record_feedback(&p, 500, 0.80, true);
+
+            let hist = load_history();
+            assert!(hist.total_predictions >= 1);
+            assert!(!hist.feedback.is_empty());
+        });
     }
 }

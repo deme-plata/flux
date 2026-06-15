@@ -452,8 +452,12 @@ mod tests {
 
     #[test]
     fn test_persistence_roundtrip() {
-        let tune = apply_preset("TITAN_ARMOR").unwrap();
-        let loaded = load_tune();
-        assert_eq!(loaded.preset_name, "TITAN_ARMOR");
+        // tune.json lives under $HOME/.flux — isolate HOME via the shared lock so a
+        // parallel module's HOME swap can't make load_tune() read the wrong store.
+        crate::test_home::with_temp_home("tune_roundtrip", || {
+            let _tune = apply_preset("TITAN_ARMOR").unwrap();
+            let loaded = load_tune();
+            assert_eq!(loaded.preset_name, "TITAN_ARMOR");
+        });
     }
 }

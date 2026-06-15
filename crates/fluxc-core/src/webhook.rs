@@ -761,26 +761,11 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Run config-mutating tests against an isolated HOME so the live
-    // ~/.flux/webhooks.json (with its real registrations) is never touched.
-    // Serialized because they all repoint the process-global HOME env var.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_temp_home<T>(tag: &str, f: impl FnOnce() -> T) -> T {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var("HOME").ok();
-        let dir = std::env::temp_dir().join(format!("flux-wh-test-{}", tag));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("HOME", &dir);
-        let out = f();
-        match prev {
-            Some(p) => std::env::set_var("HOME", p),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = fs::remove_dir_all(&dir);
-        out
-    }
+    // Config-mutating tests run against an isolated HOME so the live
+    // ~/.flux/webhooks.json (with its real registrations) is never touched. Uses the
+    // crate-shared helper so the one process-wide lock also serializes against the
+    // other modules' HOME-swapping persistence tests (predict/benchmark/tune).
+    use crate::test_home::with_temp_home;
 
     #[test]
     fn test_quarantine_after_threshold() {

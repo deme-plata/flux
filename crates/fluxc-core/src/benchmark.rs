@@ -631,7 +631,7 @@ pub fn format_benchmark_report(report: &BenchmarkReport) -> String {
     lines.push(format!(
         "⚡ Flux Benchmark Report — {}/{} crates compiled, health: {:.0}%",
         report.crates_compiled,
-        report.crates.len(),
+        report.crates_compiled + report.crates_failed,
         report.overall_health * 100.0,
     ));
     lines.push(format!(
@@ -904,23 +904,27 @@ mod tests {
 
     #[test]
     fn test_history_persistence_roundtrip() {
-        let mut history = BenchmarkHistory::default();
-        let report = BenchmarkReport {
-            timestamp_secs: 1,
-            crates: vec![],
-            total_compile_ms: 100,
-            overall_health: 0.9,
-            crates_compiled: 1,
-            crates_failed: 0,
-            total_tests_pass: 10,
-            total_tests_all: 10,
-            suggestions: vec![],
-        };
-        history.reports.push(report);
-        save_history(&history);
+        // Isolate HOME (benchmarks.json lives under $HOME/.flux): otherwise a parallel
+        // module's HOME swap reads the wrong store mid-test. Shared lock = deterministic.
+        crate::test_home::with_temp_home("bench_roundtrip", || {
+            let mut history = BenchmarkHistory::default();
+            let report = BenchmarkReport {
+                timestamp_secs: 1,
+                crates: vec![],
+                total_compile_ms: 100,
+                overall_health: 0.9,
+                crates_compiled: 1,
+                crates_failed: 0,
+                total_tests_pass: 10,
+                total_tests_all: 10,
+                suggestions: vec![],
+            };
+            history.reports.push(report);
+            save_history(&history);
 
-        let loaded = load_history();
-        assert_eq!(loaded.reports.len(), 1);
-        assert_eq!(loaded.reports[0].total_compile_ms, 100);
+            let loaded = load_history();
+            assert_eq!(loaded.reports.len(), 1);
+            assert_eq!(loaded.reports[0].total_compile_ms, 100);
+        });
     }
 }

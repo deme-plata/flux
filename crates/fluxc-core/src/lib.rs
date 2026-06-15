@@ -1069,6 +1069,34 @@ pub fn parse_args(raw: &[String]) -> (BuildConfig, Vec<String>) {
     (config, rest)
 }
 
+/// Shared test helper: run `f` with $HOME pointed at a fresh temp dir, serialized
+/// process-wide. Every fluxc-core module persists under $HOME/.flux/*.json
+/// (predictions, webhooks, benchmarks, tune, heatmap, stats); under parallel
+/// `cargo test` the per-module persistence tests would otherwise swap the global
+/// $HOME out from under each other and read the wrong (or a half-written) store.
+/// One lock across all of them makes every HOME-touching test deterministic.
+#[cfg(test)]
+pub(crate) mod test_home {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub fn with_temp_home<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("HOME").ok();
+        let dir = std::env::temp_dir().join(format!("flux-test-home-{}", tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HOME", &dir);
+        let out = f();
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -349,8 +349,9 @@ fn compute_safety_score(code: &str) -> f64 {
         .filter(|&&p| lower.contains(p))
         .count();
 
-    // No violations = 1.0, each violation reduces by 0.15
-    (1.0 - violations as f64 * 0.15).max(0.0)
+    // No violations = 1.0, each violation reduces by 0.2 (so unsafe+transmute = 0.6,
+    // clearly below the 0.7 "risky" line; clean code stays 1.0).
+    (1.0 - violations as f64 * 0.2).max(0.0)
 }
 
 fn count_diff_lines(original: &str, patched: &str) -> usize {

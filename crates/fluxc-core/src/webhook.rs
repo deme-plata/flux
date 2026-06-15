@@ -452,11 +452,13 @@ pub fn trigger_event(event: &str, data: serde_json::Value) -> String {
 fn dispatch_single(webhook: &Webhook, payload: &WebhookPayload) -> Result<u16, String> {
     let body = serde_json::to_string(payload).map_err(|e| format!("json: {}", e))?;
 
-    // Compute HMAC-SHA256 signature
-    let mut mac = HmacSha256::new_from_slice(webhook.secret.as_bytes())
-        .map_err(|e| format!("hmac init: {}", e))?;
-    mac.update(body.as_bytes());
-    let signature = hex::encode(mac.finalize().into_bytes());
+    // Legacy body-only signature (kept so existing receivers keep verifying) plus a
+    // replay-resistant v2 signature over "{timestamp}.{body}" — a captured POST can't
+    // be replayed with a stale timestamp. The v2 digest also seeds a stable
+    // per-delivery id (idempotency key for the receiver).
+    let sig_legacy = hmac_hex(&webhook.secret, body.as_bytes())?;
+    let sig_v2 = hmac_hex(&webhook.secret, format!("{}.{}", payload.timestamp, body).as_bytes())?;
+    let delivery_id: String = sig_v2.chars().take(24).collect();
 
     // A 0s timeout is never intended (old configs default the field to 0); clamp
     // to a sane 10s. `retries` is honored verbatim — 0 means a single attempt.
@@ -466,7 +468,10 @@ fn dispatch_single(webhook: &Webhook, payload: &WebhookPayload) -> Result<u16, S
     let mut last_status: u16 = 0;
     let mut last_err = String::new();
     for attempt in 0..attempts {
-        match send_http_post(&webhook.url, &body, &signature, timeout) {
+        match send_http_post(
+            &webhook.url, &body, &sig_legacy, &sig_v2,
+            &payload.event, payload.timestamp, &delivery_id, timeout,
+        ) {
             Ok(status) => {
                 last_status = status;
                 if (200..300).contains(&status) {
@@ -525,8 +530,50 @@ fn record_delivery(id: &str, ok: bool, status: u16) {
     let _ = save_config(&config);
 }
 
+/// Hex HMAC-SHA256 of `msg` under `secret`.
+fn hmac_hex(secret: &str, msg: &[u8]) -> Result<String, String> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("hmac init: {}", e))?;
+    mac.update(msg);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// The signed delivery headers for a webhook POST. Extracted so the set is
+/// unit-testable — in particular that `X-Flux-Event` carries the real event name
+/// (it used to be hardcoded to the constant "flux-webhook"). Adds, on top of the
+/// legacy body-only signature:
+///   * `X-Flux-Signature-V2: t=<ts>,v1=<hmac of "{ts}.{body}">` — replay-resistant,
+///   * `X-Flux-Timestamp` and `X-Flux-Delivery` (idempotency key) for the receiver.
+/// All additive: an existing receiver that only reads `X-Flux-Signature` is unaffected.
+fn delivery_headers(
+    sig_legacy: &str,
+    sig_v2: &str,
+    event: &str,
+    timestamp: u64,
+    delivery_id: &str,
+) -> Vec<(String, String)> {
+    vec![
+        ("Content-Type".into(), "application/json".into()),
+        ("X-Flux-Signature".into(), format!("sha256={}", sig_legacy)),
+        ("X-Flux-Signature-V2".into(), format!("t={},v1={}", timestamp, sig_v2)),
+        ("X-Flux-Event".into(), event.to_string()),
+        ("X-Flux-Timestamp".into(), timestamp.to_string()),
+        ("X-Flux-Delivery".into(), delivery_id.to_string()),
+    ]
+}
+
 /// Send HTTP POST — uses curl subprocess for broad compatibility.
-fn send_http_post(url: &str, body: &str, signature: &str, timeout_secs: u64) -> Result<u16, String> {
+#[allow(clippy::too_many_arguments)]
+fn send_http_post(
+    url: &str,
+    body: &str,
+    sig_legacy: &str,
+    sig_v2: &str,
+    event: &str,
+    timestamp: u64,
+    delivery_id: &str,
+    timeout_secs: u64,
+) -> Result<u16, String> {
     // SEC-006: re-check at the dispatch chokepoint — catches DNS rebinding and
     // any webhook entry that predates the register-time guard.
     ssrf_check(url)?;
@@ -534,11 +581,11 @@ fn send_http_post(url: &str, body: &str, signature: &str, timeout_secs: u64) -> 
     cmd.arg("-s")
         .arg("-o").arg("/dev/null")
         .arg("-w").arg("%{http_code}")
-        .arg("-X").arg("POST")
-        .arg("-H").arg(format!("Content-Type: application/json"))
-        .arg("-H").arg(format!("X-Flux-Signature: sha256={}", signature))
-        .arg("-H").arg("X-Flux-Event: flux-webhook")
-        .arg("-d").arg(body)
+        .arg("-X").arg("POST");
+    for (k, v) in delivery_headers(sig_legacy, sig_v2, event, timestamp, delivery_id) {
+        cmd.arg("-H").arg(format!("{}: {}", k, v));
+    }
+    cmd.arg("-d").arg(body)
         .arg("--max-time").arg(timeout_secs.to_string())
         .arg("--connect-timeout").arg("5")
         .arg(url);
@@ -611,24 +658,25 @@ pub fn auto_dispatch(event: &str, data: serde_json::Value) {
 
 /// Test a webhook URL by sending a signed ping. Returns (success, http_status, message).
 pub fn test_webhook_url(url: &str, secret: &str) -> (bool, u16, String) {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let body = serde_json::to_string(&serde_json::json!({
         "event": "ping",
-        "timestamp": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        "timestamp": ts,
         "data": {"test": true},
         "source": "fluxc webhook test",
     })).unwrap_or_default();
 
-    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
-        Ok(m) => m,
+    let sig_legacy = match hmac_hex(secret, body.as_bytes()) {
+        Ok(s) => s,
         Err(e) => return (false, 0, format!("HMAC init failed: {}", e)),
     };
-    mac.update(body.as_bytes());
-    let signature = hex::encode(mac.finalize().into_bytes());
+    let sig_v2 = match hmac_hex(secret, format!("{}.{}", ts, body).as_bytes()) {
+        Ok(s) => s,
+        Err(e) => return (false, 0, format!("HMAC init failed: {}", e)),
+    };
+    let delivery_id: String = sig_v2.chars().take(24).collect();
 
-    match send_http_post(url, &body, &signature, 10) {
+    match send_http_post(url, &body, &sig_legacy, &sig_v2, "ping", ts, &delivery_id, 10) {
         Ok(status) if (200..300).contains(&status) => {
             (true, status, format!("HTTP {} — reachable and accepted signed ping", status))
         }
@@ -686,25 +734,25 @@ mod tests {
 
     #[test]
     fn test_register_and_list() {
-        // Clean start — remove any test webhooks
-        let _ = remove_webhook("test-hook");
+        // Must run under an isolated HOME like the other config-mutating tests:
+        // otherwise this test writes the process-global ~/.flux/webhooks.json while a
+        // parallel `with_temp_home` test has HOME repointed, corrupting that test's
+        // store (the pre-existing flake that failed test_prune/test_register at random).
+        with_temp_home("register_list", || {
+            let result = register_webhook(
+                "test-hook",
+                "https://example.com/webhook",
+                "test-secret",
+                vec!["build_complete".into(), "test_complete".into()],
+            );
+            assert!(result.is_ok());
 
-        let result = register_webhook(
-            "test-hook",
-            "https://example.com/webhook",
-            "test-secret",
-            vec!["build_complete".into(), "test_complete".into()],
-        );
-        assert!(result.is_ok());
-
-        let list = list_webhooks();
-        assert!(list.contains("test-hook"));
-        assert!(list.contains("https://example.com/webhook"));
-        assert!(list.contains("build_complete"));
-        assert!(list.contains("test_complete"));
-
-        // Cleanup
-        let _ = remove_webhook("test-hook");
+            let list = list_webhooks();
+            assert!(list.contains("test-hook"));
+            assert!(list.contains("https://example.com/webhook"));
+            assert!(list.contains("build_complete"));
+            assert!(list.contains("test_complete"));
+        });
     }
 
     #[test]
@@ -795,5 +843,31 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("build_complete"));
         assert!(json.contains("fluxc"));
+    }
+
+    #[test]
+    fn test_delivery_headers_carry_real_event_and_v2_sig() {
+        // Regression: X-Flux-Event used to be hardcoded to "flux-webhook", so every
+        // receiver saw the same constant regardless of what actually happened.
+        let hs = delivery_headers("legacysig", "v2sig", "build_complete", 1716825600, "deadbeefcafe");
+        let get = |k: &str| hs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("X-Flux-Event").as_deref(), Some("build_complete"));
+        assert_ne!(get("X-Flux-Event").as_deref(), Some("flux-webhook"));
+        assert_eq!(get("X-Flux-Timestamp").as_deref(), Some("1716825600"));
+        assert_eq!(get("X-Flux-Signature").as_deref(), Some("sha256=legacysig"));
+        assert_eq!(get("X-Flux-Signature-V2").as_deref(), Some("t=1716825600,v1=v2sig"));
+        assert_eq!(get("X-Flux-Delivery").as_deref(), Some("deadbeefcafe"));
+    }
+
+    #[test]
+    fn test_v2_signature_is_replay_resistant() {
+        // Same body, different timestamp → different v2 signature, so a captured
+        // POST can't be replayed under a stale timestamp.
+        let body = r#"{"event":"build_complete"}"#;
+        let a = hmac_hex("secret", format!("{}.{}", 1000u64, body).as_bytes()).unwrap();
+        let b = hmac_hex("secret", format!("{}.{}", 2000u64, body).as_bytes()).unwrap();
+        assert_ne!(a, b);
+        // Deterministic for identical inputs.
+        assert_eq!(a, hmac_hex("secret", format!("{}.{}", 1000u64, body).as_bytes()).unwrap());
     }
 }

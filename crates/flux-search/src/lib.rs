@@ -53,6 +53,14 @@ pub struct SearchResult {
     pub ranking_factors: Option<RankingFactors>,
     pub meta_description: Option<String>,
     pub last_crawled: Option<u64>,
+    /// 1-based line number of the best-matching line in the document content
+    /// (grep-style). `None` for non-line-oriented or empty content.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// The trimmed text of that line — so callers get the actual code, not just
+    /// a filename + rank. This is the single biggest gap vs ripgrep.
+    #[serde(default)]
+    pub line_text: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -196,15 +204,24 @@ impl SearchEngine {
     }
 
     pub fn index_path<P: AsRef<Path>>(&mut self, path: P, recursive: bool) -> Result<usize, String> {
+        let root = path.as_ref().to_path_buf();
+        // Respect .gitignore directory entries (ripgrep's headline behavior) so the
+        // index isn't polluted with build artifacts / vendored trees, on top of the
+        // hardcoded skips. Dependency-free: simple bare-name / `name/` patterns only.
+        let gitignored_dirs = collect_gitignored_dirs(&root);
         let mut count = 0usize;
-        let mut stack = vec![path.as_ref().to_path_buf()];
+        let mut stack = vec![root];
 
         while let Some(path) = stack.pop() {
             if path.is_dir() {
                 let entries = fs::read_dir(&path).map_err(|e| format!("read_dir {}: {e}", path.display()))?;
                 for entry in entries.flatten() {
                     let child = entry.path();
-                    if child.is_dir() && recursive && !is_ignored_dir(&child) {
+                    if child.is_dir()
+                        && recursive
+                        && !is_ignored_dir(&child)
+                        && !dir_is_gitignored(&child, &gitignored_dirs)
+                    {
                         stack.push(child);
                     } else if child.is_file() && is_indexable_file(&child) {
                         if self.index_file(&child).is_ok() {
@@ -352,8 +369,28 @@ impl SearchEngine {
         for term in &plan.terms {
             if let Some(postings) = self.inverted_index.get(&term.term) {
                 for (doc_url, &tf) in postings {
-                    let idf = ((self.doc_count as f64 + 1.0) / (postings.len() as f64 + 1.0)).ln();
+                    // smooth-idf (+1): a term present in *every* doc otherwise yields
+                    // idf=ln(1)=0, making a real match score 0 and get filtered out.
+                    let idf = ((self.doc_count as f64 + 1.0) / (postings.len() as f64 + 1.0)).ln() + 1.0;
                     *doc_scores.entry(doc_url.clone()).or_insert(0.0) += tf as f64 * idf * term.weight;
+                }
+            }
+        }
+
+        // Spell-correction was cosmetic until now: the corrected query was surfaced
+        // in the response but its tokens never reached the index, so a typo-only
+        // query ("serach") matched nothing (the semantic pass even seeds a 0.0 entry,
+        // so an `is_empty` guard would never fire). Feed the corrected tokens into the
+        // index too — additively — so the correction actually contributes tf·idf.
+        if let Some(ref corrected) = plan.corrected_query {
+            for tok in tokenize(corrected) {
+                if let Some(postings) = self.inverted_index.get(&tok) {
+                    for (doc_url, &tf) in postings {
+                        // smooth-idf (+1): a term present in *every* doc otherwise yields
+                    // idf=ln(1)=0, making a real match score 0 and get filtered out.
+                    let idf = ((self.doc_count as f64 + 1.0) / (postings.len() as f64 + 1.0)).ln() + 1.0;
+                        *doc_scores.entry(doc_url.clone()).or_insert(0.0) += tf as f64 * idf;
+                    }
                 }
             }
         }
@@ -413,15 +450,20 @@ impl SearchEngine {
 
         let formatted: Vec<SearchResult> = page_rows
             .iter()
-            .map(|(score, factors, doc)| SearchResult {
-                doc_id: doc.id.clone(),
-                url: doc.url.clone(),
-                title: doc.title.clone(),
-                snippet: generate_snippet(&doc.content, &query.q, 200),
-                score: *score,
-                ranking_factors: Some(factors.clone()),
-                meta_description: doc.meta_description.clone(),
-                last_crawled: doc.last_crawled,
+            .map(|(score, factors, doc)| {
+                let (line, line_text) = best_match_line(&doc.content, &query.q);
+                SearchResult {
+                    doc_id: doc.id.clone(),
+                    url: doc.url.clone(),
+                    title: doc.title.clone(),
+                    snippet: generate_snippet(&doc.content, &query.q, 200),
+                    score: *score,
+                    ranking_factors: Some(factors.clone()),
+                    meta_description: doc.meta_description.clone(),
+                    last_crawled: doc.last_crawled,
+                    line,
+                    line_text,
+                }
             })
             .collect();
 
@@ -435,6 +477,79 @@ impl SearchEngine {
         };
         self.cache.insert(cache_key, (response.clone(), now_ms()));
         response
+    }
+
+    /// Literal substring search — ripgrep parity. No spell-correction, no synonym
+    /// expansion, no semantic fallback: returns exactly the documents whose content
+    /// or title contains `needle`, each with the first matching line number + text.
+    ///
+    /// This is the mode to use for code/symbol lookup: `tokenize` splits on every
+    /// non-alphanumeric char, so the normal `search()` would shatter `refill_slots`
+    /// into `["refill", "slots"]` and drag in semantically-related noise. A literal
+    /// scan keeps the symbol intact and stays deterministic (ordered by match count
+    /// desc, then url asc). `case_sensitive` toggles case folding.
+    pub fn literal_search(
+        &self,
+        needle: &str,
+        page: usize,
+        per_page: usize,
+        case_sensitive: bool,
+    ) -> SearchResponse {
+        let start = now_ms();
+        let page = page.max(1);
+        let per_page = per_page.max(1).min(1_000);
+        let needle_cmp = if case_sensitive { needle.to_string() } else { needle.to_lowercase() };
+
+        let mut hits: Vec<(u32, SearchResult)> = Vec::new();
+        if !needle.is_empty() {
+            for doc in self.documents.values() {
+                let body = if case_sensitive { doc.content.clone() } else { doc.content.to_lowercase() };
+                let title = if case_sensitive { doc.title.clone() } else { doc.title.to_lowercase() };
+                let count = (body.matches(&needle_cmp).count() + title.matches(&needle_cmp).count()) as u32;
+                if count == 0 {
+                    continue;
+                }
+                let (line, line_text) = first_literal_line(&doc.content, needle, case_sensitive);
+                hits.push((
+                    count,
+                    SearchResult {
+                        doc_id: doc.id.clone(),
+                        url: doc.url.clone(),
+                        title: doc.title.clone(),
+                        snippet: line_text
+                            .clone()
+                            .unwrap_or_else(|| generate_snippet(&doc.content, needle, 200)),
+                        score: count as f64,
+                        ranking_factors: None,
+                        meta_description: doc.meta_description.clone(),
+                        last_crawled: doc.last_crawled,
+                        line,
+                        line_text,
+                    },
+                ));
+            }
+        }
+        // Deterministic: most matches first, ties broken by url (stable, grep-like).
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.url.cmp(&b.1.url)));
+
+        let total_results = hits.len();
+        let total_pages = if total_results == 0 { 0 } else { (total_results + per_page - 1) / per_page };
+        let start_idx = page.saturating_sub(1) * per_page;
+        let end_idx = (start_idx + per_page).min(total_results);
+        let results: Vec<SearchResult> = if start_idx >= total_results {
+            Vec::new()
+        } else {
+            hits[start_idx..end_idx].iter().map(|(_, r)| r.clone()).collect()
+        };
+
+        SearchResponse {
+            results,
+            total_results,
+            page,
+            total_pages,
+            query_time_ms: now_ms().saturating_sub(start),
+            corrected_query: None,
+        }
     }
 
     pub fn doc_count(&self) -> usize {
@@ -637,10 +752,94 @@ pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
+/// 1-based line number + trimmed text of the line in `content` with the most
+/// query-term occurrences (ties → earliest line). Returns `(None, None)` when the
+/// query has no tokens or nothing matches. Used to give ranked results a concrete
+/// grep-style line instead of just a filename.
+pub fn best_match_line(content: &str, query: &str) -> (Option<u32>, Option<String>) {
+    let terms = tokenize(query);
+    if terms.is_empty() {
+        return (None, None);
+    }
+    let mut best_score = 0u32;
+    let mut best_line = 0u32;
+    let mut best_text: Option<String> = None;
+    for (i, raw) in content.lines().enumerate() {
+        let lower = raw.to_lowercase();
+        let score: u32 = terms.iter().map(|t| lower.matches(t.as_str()).count() as u32).sum();
+        if score > best_score {
+            best_score = score;
+            best_line = (i as u32) + 1;
+            best_text = Some(raw.trim().chars().take(240).collect());
+        }
+    }
+    if best_score == 0 {
+        (None, None)
+    } else {
+        (Some(best_line), best_text)
+    }
+}
+
+/// First 1-based line containing `needle` as a literal substring, plus its trimmed
+/// text. Symbol-friendly (does not tokenize), so `refill_slots` / `Foo::bar` match.
+fn first_literal_line(content: &str, needle: &str, case_sensitive: bool) -> (Option<u32>, Option<String>) {
+    if needle.is_empty() {
+        return (None, None);
+    }
+    let needle_cmp = if case_sensitive { needle.to_string() } else { needle.to_lowercase() };
+    for (i, raw) in content.lines().enumerate() {
+        let hay = if case_sensitive { raw.to_string() } else { raw.to_lowercase() };
+        if hay.contains(&needle_cmp) {
+            return (Some((i as u32) + 1), Some(raw.trim().chars().take(240).collect()));
+        }
+    }
+    (None, None)
+}
+
 fn is_ignored_dir(path: &Path) -> bool {
     path.file_name()
         .and_then(|s| s.to_str())
         .map(|name| matches!(name, "target" | "node_modules" | ".git" | "dist" | "build"))
+        .unwrap_or(false)
+}
+
+/// Collect directory-ignore names from `.gitignore` files at `root` and up to a
+/// few parent levels (to catch the repo-root file when indexing a subdir). Only
+/// simple directory patterns are honored — a bare name (`vendor`) or a trailing
+/// slash (`coverage/`). Globs, negations and path-anchored rules are deferred to a
+/// future `ignore`-crate upgrade; this covers the common index-pollution cases.
+fn collect_gitignored_dirs(root: &Path) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let mut dir = Some(root.to_path_buf());
+    let mut levels = 0;
+    while let Some(d) = dir {
+        if let Ok(text) = fs::read_to_string(d.join(".gitignore")) {
+            for raw in text.lines() {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                    continue;
+                }
+                let trimmed = line.trim_start_matches('/').trim_end_matches('/');
+                // Only simple directory names (no globs, no nested path).
+                if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('*') {
+                    continue;
+                }
+                set.insert(trimmed.to_string());
+            }
+        }
+        levels += 1;
+        if levels >= 4 {
+            break;
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    set
+}
+
+fn dir_is_gitignored(path: &Path, ignored: &std::collections::HashSet<String>) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|name| ignored.contains(name))
         .unwrap_or(false)
 }
 
@@ -751,5 +950,71 @@ mod tests {
         let content = "Rust is a systems programming language focused on safety, speed, and concurrency. It prevents segfaults and guarantees thread safety.";
         let snippet = generate_snippet(content, "rust safety", 80);
         assert!(snippet.contains("Rust"));
+    }
+
+    // ── ripgrep-lesson regressions ──
+
+    #[test]
+    fn test_ranked_results_carry_line_and_text() {
+        // Lesson 1: a hit must come back with the concrete line, not just a filename.
+        let mut engine = SearchEngine::new();
+        engine.index_document(doc(
+            "1",
+            "file://crates/sigil-top/src/block_sync.rs",
+            "block_sync.rs",
+            "fn main() {}\nlet refill_slots = if full_archive { 1 } else { max };\nreturn ok;",
+        ));
+        let resp = engine.search(SearchQuery { q: "refill slots".into(), ..Default::default() });
+        assert!(!resp.results.is_empty());
+        let top = &resp.results[0];
+        assert_eq!(top.line, Some(2), "best-matching line is line 2");
+        assert!(top.line_text.as_deref().unwrap().contains("refill_slots"));
+    }
+
+    #[test]
+    fn test_literal_search_keeps_symbols_and_is_noise_free() {
+        // Lesson 2: literal mode must match the underscore symbol intact (tokenizing
+        // would shatter it into refill/slots) AND return nothing for an absent term
+        // — no semantic/synonym fallback dragging in unrelated docs.
+        let mut engine = SearchEngine::new();
+        engine.index_document(doc(
+            "1",
+            "file://a.rs",
+            "a.rs",
+            "fn x() {}\n    let refill_slots = compute();\n    ok\n",
+        ));
+        engine.index_document(doc(
+            "2",
+            "file://b.rs",
+            "b.rs",
+            "totally unrelated prose about scheduling and frontiers",
+        ));
+
+        let hit = engine.literal_search("refill_slots", 1, 10, false);
+        assert_eq!(hit.total_results, 1, "exactly the one doc containing the symbol");
+        assert_eq!(hit.results[0].line, Some(2));
+        assert!(hit.results[0].line_text.as_deref().unwrap().contains("refill_slots"));
+        assert!(hit.corrected_query.is_none(), "literal mode does not spell-correct");
+
+        let miss = engine.literal_search("nonexistent_symbol_xyz", 1, 10, false);
+        assert_eq!(miss.total_results, 0, "no semantic noise for an absent symbol");
+    }
+
+    #[test]
+    fn test_index_path_respects_gitignore_dirs() {
+        // Lesson 4: a directory listed in .gitignore must not be indexed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "skipme/\n").unwrap();
+        fs::create_dir(root.join("skipme")).unwrap();
+        fs::create_dir(root.join("keep")).unwrap();
+        fs::write(root.join("skipme").join("a.rs"), "fn ignored_fn() {}").unwrap();
+        fs::write(root.join("keep").join("b.rs"), "fn kept_fn() {}").unwrap();
+
+        let mut engine = SearchEngine::new();
+        let n = engine.index_path(root, true).unwrap();
+        assert_eq!(n, 1, "only keep/b.rs is indexable+unignored");
+        assert_eq!(engine.literal_search("ignored_fn", 1, 10, false).total_results, 0);
+        assert_eq!(engine.literal_search("kept_fn", 1, 10, false).total_results, 1);
     }
 }

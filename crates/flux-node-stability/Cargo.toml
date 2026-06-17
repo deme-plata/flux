@@ -1,0 +1,12 @@
+[package]
+name = "flux-node-stability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stability primitives for native graph nodes (q-api-server / sigil-node): hysteresis memory backpressure that replaces the single hard RSS latch which oscillates the node into an OOM death-loop. Pure, no_std-friendly logic verified with flux_combo, grafted into the node's produce path."
+
+[lib]
+name = "flux_node_stability"
+path = "src/lib.rs"
+
+[dependencies]

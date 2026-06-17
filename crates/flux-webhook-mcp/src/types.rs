@@ -104,6 +104,12 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Public wrapper around the internal monotonic-ish millisecond clock,
+/// used by the goalloop engine for heartbeat/audit timestamps.
+pub fn now_ms_pub() -> u64 {
+    now_ms()
+}
+
 /// Standard event types used by the system.
 pub mod event_types {
     pub const FILE_STORED: &str = "file_stored";

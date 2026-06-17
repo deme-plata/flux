@@ -1,0 +1,25 @@
+[package]
+name = "quillon-gpu-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone Quillon (QUG) BLAKE3 PoW miner. CPU by default; optional GPU backend behind the `gpu` feature flag (flux-gpu JIT, Vera/NVIDIA/AMD). One binary, gpu compiled in only when asked for."
+
+[[bin]]
+name = "quillon-gpu-miner"
+path = "src/main.rs"
+
+[lib]
+name = "quillon_gpu_miner"
+path = "src/lib.rs"
+
+[features]
+# CPU-only by default — the GPU path pulls in flux-gpu and is opt-in.
+default = []
+gpu = ["dep:flux-gpu"]
+
+[dependencies]
+blake3 = "1"
+rayon = "1"
+ureq = "2"
+flux-gpu = { path = "../flux-gpu", optional = true }

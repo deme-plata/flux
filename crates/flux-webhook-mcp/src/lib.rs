@@ -51,6 +51,7 @@ pub mod watcher;
 pub mod search;
 pub mod types;
 pub mod fluxfood;
+pub mod goalloop;
 
 pub use server::WebhookServer;
 pub use dispatcher::McpDispatcher;
@@ -58,6 +59,9 @@ pub use watcher::AetherWatcher;
 pub use search::SearchReIndexer;
 pub use types::*;
 pub use fluxfood::FluxfoodTrigger;
+pub use goalloop::{
+    Comparator, Executor, GoalLoopEngine, GoalSpec, LoopSpec, Pace, Shebang,
+};
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -111,17 +115,26 @@ pub struct WebhookMcpOrchestrator {
     event_tx: broadcast::Sender<WebhookEvent>,
     /// Track registered MCP tools for dispatch
     mcp_registry: Arc<RwLock<Vec<McpToolDef>>>,
+    /// The `/loop` + `/goal` engine (with `#!/sigil` shebang support).
+    goalloop: Arc<goalloop::GoalLoopEngine>,
 }
 
 impl WebhookMcpOrchestrator {
     /// Create a new orchestrator.
     pub fn new(config: WebhookMcpConfig) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
+        let goalloop = Arc::new(goalloop::GoalLoopEngine::new(event_tx.clone()));
         Self {
             config,
             event_tx,
             mcp_registry: Arc::new(RwLock::new(Vec::new())),
+            goalloop,
         }
+    }
+
+    /// Access the GoalLoop engine so the MCP layer can register loops/goals.
+    pub fn goalloop(&self) -> Arc<goalloop::GoalLoopEngine> {
+        self.goalloop.clone()
     }
 
     /// Start all subsystems.

@@ -1,0 +1,17 @@
+SIGIL SAGA — Episode Four: The Backfill.
+
+There is a kind of silence that only a new node knows. It wakes into the mesh with nothing — no history, no past, only the present moment shouting past it in gossip. The old nodes remember everything. The new one remembers only now. And between them lies a gap that gossip alone can never close.
+
+This was the wound at the heart of the network. Flux could whisper the latest block to every peer, but it could not hand a newcomer its lost inheritance. A node could hear the future and never learn the past.
+
+So the engineers reached for the oldest trick the network knows — to name a thing by what it is, not where it lives. Content addressing. Each block of history collapsed into a fingerprint of pure mathematics; a hash that cannot lie. Verify, then trust. Never the other way around. If the bytes do not match the name, the bytes are thrown into the dark.
+
+They built the BlockStore — an honest archivist that ingests, retrieves, and imports, but believes nothing it cannot prove. They wrote the SyncManifest, a ledger of what is missing, so a node could finally ask the only question that mattered: what don't I have yet?
+
+And then came the channel. A point-to-point request, peer to peer, carved straight through libp2p — the BackfillCodec, with its cap lifted to sixty-four mebibytes, so history could flow not in trickles but in floods. The distributed compiler hummed beside it, a million tokens of context held in a single mind, watching every crate, every diff, every change ripple through the graph.
+
+The gap began to close. Block by verified block, the newcomer drank its inheritance. Divergence: zero. The young node lifted its eyes to the same tip the elders had always seen — and for the first time, they were looking at the same horizon.
+
+The agents had given the network a memory it could share. Not a copy. A proof.
+
+And somewhere on Epsilon, a miner's balance ticked upward — quiet, earned, immutable. The saga continues.

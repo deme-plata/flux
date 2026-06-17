@@ -132,6 +132,43 @@ impl GpuContext {
             .or_else(|| self.devices.first())
     }
 
+    /// True iff a REAL hardware accelerator is present (not the Software
+    /// fallback). This is the "should I dispatch to GPU or run on CPU?"
+    /// decision every accelerated caller needs — factored out of flux-gpu so
+    /// callers (e.g. quillon-gpu-miner) stop hand-rolling the
+    /// `best_device().filter(vendor != Software)` branch. Dogfood-learned
+    /// 2026-06-17 while feature-flagging the Quillon GPU miner.
+    pub fn has_gpu(&self) -> bool {
+        self.devices.iter().any(|d| d.vendor != GpuVendor::Software)
+    }
+
+    /// Human-readable label of the device that would actually run work:
+    /// `"NVIDIA GeForce GTX 1080 (Nvidia, 20 CU)"`, or `"CPU (software fallback)"`
+    /// when no hardware accelerator exists. For logs / CLI banners.
+    pub fn best_device_label(&self) -> String {
+        match self.best_device() {
+            Some(d) if d.vendor != GpuVendor::Software => {
+                format!("{} ({:?}, {} CU)", d.name, d.vendor, d.compute_units)
+            }
+            _ => "CPU (software fallback)".to_string(),
+        }
+    }
+
+    /// Iterator over REAL hardware accelerators only (Software fallback
+    /// excluded). The honest device set for workloads that must not silently
+    /// run on CPU — e.g. a GPU miner's "are there any cards at all?" probe.
+    /// Dogfood-learned 2026-06-17 alongside [`has_gpu`](Self::has_gpu).
+    pub fn accelerated_devices(&self) -> impl Iterator<Item = &GpuDevice> {
+        self.devices.iter().filter(|d| d.vendor != GpuVendor::Software)
+    }
+
+    /// Sum of compute units across all real accelerators (0 if none). The
+    /// basis a supercluster scheduler uses to split a nonce search space
+    /// proportionally to each box's GPU horsepower instead of evenly.
+    pub fn total_compute_units(&self) -> u32 {
+        self.accelerated_devices().map(|d| d.compute_units).sum()
+    }
+
     /// Compile a Rust function to SPIR-V GPU kernel.
     /// In full Flux: uses Flux's Cranelift → SPIR-V backend.
     /// For now: placeholder that demonstrates the API.
@@ -276,6 +313,68 @@ impl GpuDispatchHandle {
     }
 }
 
+/// Split a contiguous nonce search space `[0, total)` across N workers,
+/// giving each a slice proportional to its `weights[i]` (e.g. each box's
+/// [`GpuContext::total_compute_units`]). Returns `(start, len)` per worker;
+/// the slices tile the whole range with no gaps or overlap, and the
+/// remainder from integer division is handed to the last worker so the
+/// lengths always sum back to `total`.
+///
+/// This is the pure scheduler primitive behind supercluster GPU mining:
+/// the strongest card searches the most nonces, no two boxes test the same
+/// nonce, and every nonce in `[0, total)` is covered exactly once.
+/// Dogfood-added 2026-06-17 for the Quillon GPU miner's distributed lane.
+pub fn partition_nonce_space(total: u64, weights: &[u32]) -> Vec<(u64, u64)> {
+    if weights.is_empty() || total == 0 {
+        return Vec::new();
+    }
+    let sum: u64 = weights.iter().map(|&w| w as u64).sum();
+    // All-zero weights ⇒ fall back to an even split so no worker starves.
+    if sum == 0 {
+        let n = weights.len() as u64;
+        let base = total / n;
+        let mut out = Vec::with_capacity(weights.len());
+        let mut cursor = 0u64;
+        for i in 0..weights.len() {
+            let len = if i + 1 == weights.len() { total - cursor } else { base };
+            out.push((cursor, len));
+            cursor += len;
+        }
+        return out;
+    }
+    let mut out = Vec::with_capacity(weights.len());
+    let mut cursor = 0u64;
+    for (i, &w) in weights.iter().enumerate() {
+        let len = if i + 1 == weights.len() {
+            total - cursor // last worker absorbs the rounding remainder
+        } else {
+            (total as u128 * w as u128 / sum as u128) as u64
+        };
+        out.push((cursor, len));
+        cursor += len;
+    }
+    out
+}
+
+/// Interleaved (strided) nonce assignment: node `node_index` of `num_nodes`
+/// searches nonces `node_index, node_index + num_nodes, node_index + 2*num_nodes, …`.
+/// Returns `(offset, stride)` to drive a `(offset..).step_by(stride)` walk, or
+/// `None` if `node_index` is out of range.
+///
+/// Complements [`partition_nonce_space`]: that gives contiguous blocks (best
+/// when every box is equal and reliable); striding spreads each node uniformly
+/// across the WHOLE space, so a slow or dead node leaves evenly-distributed
+/// gaps instead of one large contiguous unsearched region — the robust choice
+/// for heterogeneous fleets or boxes that may drop mid-search. Every nonce `k`
+/// belongs to exactly node `k % num_nodes`, so coverage is complete and
+/// disjoint with no coordination. Dogfood-added 2026-06-17.
+pub fn stride_assignment(node_index: usize, num_nodes: usize) -> Option<(u64, u64)> {
+    if num_nodes == 0 || node_index >= num_nodes {
+        return None;
+    }
+    Some((node_index as u64, num_nodes as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +406,95 @@ mod tests {
         let handle = ctx.dispatch("test_kernel", (1024, 1, 1)).unwrap();
         assert_eq!(handle.total_threads, 1024);
         assert_eq!(handle.total_workgroups, 16); // 1024 / 64
+    }
+
+    #[test]
+    fn test_has_gpu_matches_best_device() {
+        let ctx = GpuContext::new();
+        // has_gpu() must agree with best_device() being a non-Software vendor.
+        let real = ctx.best_device().map_or(false, |d| d.vendor != GpuVendor::Software);
+        assert_eq!(ctx.has_gpu(), real);
+    }
+
+    #[test]
+    fn test_best_device_label_nonempty() {
+        let ctx = GpuContext::new();
+        let label = ctx.best_device_label();
+        assert!(!label.is_empty());
+        // When no hardware accelerator, label is the software-fallback string.
+        if !ctx.has_gpu() {
+            assert_eq!(label, "CPU (software fallback)");
+        }
+    }
+
+    #[test]
+    fn test_accelerated_devices_excludes_software() {
+        let ctx = GpuContext::new();
+        // Every device the honest iterator yields must be real hardware.
+        assert!(ctx.accelerated_devices().all(|d| d.vendor != GpuVendor::Software));
+        // Count agrees with has_gpu().
+        assert_eq!(ctx.accelerated_devices().count() > 0, ctx.has_gpu());
+    }
+
+    #[test]
+    fn test_total_compute_units_consistency() {
+        let ctx = GpuContext::new();
+        let sum: u32 = ctx.accelerated_devices().map(|d| d.compute_units).sum();
+        assert_eq!(ctx.total_compute_units(), sum);
+        // No real GPU ⇒ zero horsepower; some GPU ⇒ positive.
+        assert_eq!(ctx.total_compute_units() == 0, !ctx.has_gpu());
+    }
+
+    #[test]
+    fn test_partition_tiles_whole_range_no_overlap() {
+        let parts = partition_nonce_space(1000, &[1, 1, 2]); // weights 1:1:2
+        assert_eq!(parts.len(), 3);
+        // Proportional: 250, 250, 500 (last absorbs remainder).
+        assert_eq!(parts, vec![(0, 250), (250, 250), (500, 500)]);
+        // Contiguous tiling: each start == previous start+len, total covered.
+        let mut cursor = 0u64;
+        for (start, len) in &parts {
+            assert_eq!(*start, cursor);
+            cursor += len;
+        }
+        assert_eq!(cursor, 1000); // exact coverage, no gap/overlap
+    }
+
+    #[test]
+    fn test_partition_remainder_goes_to_last() {
+        // 100 / 3 even weights = 33,33,34 — sum must still equal total.
+        let parts = partition_nonce_space(100, &[1, 1, 1]);
+        let total: u64 = parts.iter().map(|(_, l)| l).sum();
+        assert_eq!(total, 100);
+        assert_eq!(parts.last().unwrap().1, 34);
+    }
+
+    #[test]
+    fn test_stride_assignment_covers_disjointly() {
+        let n = 4usize;
+        // Each node gets (offset, stride=n).
+        assert_eq!(stride_assignment(2, n), Some((2, 4)));
+        assert_eq!(stride_assignment(4, n), None); // out of range
+        assert_eq!(stride_assignment(0, 0), None); // no nodes
+        // Property: every nonce 0..40 belongs to exactly one node = k % n.
+        let mut covered = vec![0u32; 40];
+        for node in 0..n {
+            let (offset, stride) = stride_assignment(node, n).unwrap();
+            let mut k = offset;
+            while k < 40 {
+                covered[k as usize] += 1;
+                k += stride;
+            }
+        }
+        assert!(covered.iter().all(|&c| c == 1), "every nonce covered exactly once");
+    }
+
+    #[test]
+    fn test_partition_edge_cases() {
+        assert!(partition_nonce_space(0, &[1, 2]).is_empty());
+        assert!(partition_nonce_space(100, &[]).is_empty());
+        // All-zero weights ⇒ even split fallback, still tiles fully.
+        let even = partition_nonce_space(99, &[0, 0]);
+        assert_eq!(even.iter().map(|(_, l)| l).sum::<u64>(), 99);
     }
 }

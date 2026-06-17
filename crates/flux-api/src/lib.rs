@@ -27,6 +27,7 @@ pub mod sdk_kotlin;
 pub mod sdk_python;
 pub mod sdk_rust;
 pub mod sdk_ts;
+pub mod webhook_sdk;
 
 pub use discover::{
     discover_endpoints, discover_endpoints_static, ApiEndpointDescriptor,
@@ -45,6 +46,7 @@ pub use event_types::{
     generate_python_event_types, generate_rust_event_types, generate_ts_event_types,
     EventVariant,
 };
+pub use webhook_sdk::{generate_python_webhook_handler, generate_ts_webhook_handler};
 pub use openapi::generate_openapi;
 pub use schema::{
     ApiEndpoint, ApiParameter, ApiResponse, ApiSchema, HttpMethod, ParamLocation,

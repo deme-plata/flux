@@ -1,0 +1,9 @@
+[package]
+name = "flux-cashewswap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux-native port of the CashewSwap LiquidityPool AMM (constant-product DEX)."
+
+[dependencies]
+thiserror = { workspace = true }

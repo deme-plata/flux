@@ -197,6 +197,65 @@ fn extract_path_params(path: &str) -> Vec<ApiParameter> {
     out
 }
 
+/// Named schema definitions for a known crate — the concrete shape behind the
+/// `Ref { name }`s that `known_patterns` attaches as request/response bodies.
+/// `generate_openapi_with_schemas` lowers these into `components/schemas`
+/// instead of the empty `{}` stubs the plain emitter produces.
+pub(crate) fn known_schemas(name: &str) -> Vec<(String, ApiSchema)> {
+    use ApiSchema as S;
+    let status_enum = |values: &[&str]| S::Enum {
+        ty: crate::schema::PrimType::String,
+        values: values.iter().map(|v| serde_json::Value::String((*v).into())).collect(),
+    };
+    match name {
+        "wickes-cms" => vec![(
+            "Page".to_string(),
+            S::object()
+                .req_prop("id", S::string_with_format("uuid"))
+                .req_prop("title", S::string())
+                .prop("status", status_enum(&["draft", "published", "archived"]))
+                .prop("body", S::string().nullable())
+                .build(),
+        )],
+        "wickes-erp" => vec![(
+            "Order".to_string(),
+            S::object()
+                .req_prop("id", S::string_with_format("uuid"))
+                .req_prop("total", S::number())
+                .prop("currency", S::string())
+                .prop("items", S::array_of(S::ref_to("LineItem")))
+                .build(),
+        ), (
+            "LineItem".to_string(),
+            S::object()
+                .req_prop("sku", S::string())
+                .req_prop("qty", S::integer())
+                .build(),
+        )],
+        "wickes-finance" => vec![(
+            "Payment".to_string(),
+            S::object()
+                .req_prop("invoice_id", S::string_with_format("uuid"))
+                .req_prop("amount", S::number())
+                .prop("method", status_enum(&["card", "bank", "crypto"]))
+                .build(),
+        )],
+        _ => vec![],
+    }
+}
+
+/// Collect the named schema definitions for every crate in `ws` into one
+/// registry, suitable for [`crate::openapi::generate_openapi_with_schemas`].
+pub fn discover_schemas(ws: &flux_graph::WorkspaceGraph) -> std::collections::BTreeMap<String, ApiSchema> {
+    let mut out = std::collections::BTreeMap::new();
+    for ci in &ws.crates {
+        for (name, schema) in known_schemas(&ci.name) {
+            out.entry(name).or_insert(schema);
+        }
+    }
+    out
+}
+
 pub(crate) fn known_patterns(name: &str) -> Vec<EndpointSpec> {
     match name {
         "wickes-cms" => vec![

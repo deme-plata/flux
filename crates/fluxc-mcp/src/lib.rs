@@ -13,13 +13,14 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use handlers::ToolRegistry;
 
-use fluxc_core::serve::push_feed_event;
+use fluxc_core::serve_events::push_feed_event;
 
 /// Build the complete tool registry with all 46 tools.
 fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     handlers::build::register(&mut registry);
     handlers::test_combo::register(&mut registry);
+    handlers::supersonic::register(&mut registry);
     handlers::stats::register(&mut registry);
     handlers::predict::register(&mut registry);
     handlers::webhook::register(&mut registry);

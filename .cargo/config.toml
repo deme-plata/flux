@@ -1,0 +1,14 @@
+# Fast linking for the whole Flux workspace — the "0-100 km/h in 2s" lever for flux_combo.
+#
+# On a big Batch-N crate (fluxc-core: 100+ transitive deps, 95 tests) the
+# test-binary LINK dominates wall-clock once compilation is cached. The default
+# bfd linker spends tens of seconds there; mold does it in ~1s.
+#
+# /usr/bin/mold is installed and gcc on this host supports -fuse-ld=mold
+# (verified: rustc links a binary via `cc -C link-arg=-fuse-ld=mold`).
+#
+# NOTE: adding rustflags changes the build fingerprint, so the FIRST build after
+# this lands is a one-time cold rebuild for the workspace — then permanently
+# faster links for every agent (combo, sigil-top, q-* migration, all of it).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

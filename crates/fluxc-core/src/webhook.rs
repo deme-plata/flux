@@ -5,7 +5,6 @@
 // After every build/test/bench/iterate, matching webhooks are POSTed.
 
 use std::fs;
-use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::sync::LazyLock;
@@ -16,102 +15,7 @@ use serde::{Deserialize, Serialize};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// SEC-006 (SSRF guard): validate that a webhook URL is safe to dispatch to.
-///
-/// Webhook URLs are agent-supplied (the `flux_webhook_register` MCP tool), so a
-/// hostile/confused agent could point one at internal services to exfiltrate
-/// data or pivot. We:
-///   * require an http/https scheme,
-///   * resolve the host and inspect EVERY resolved IP (DNS-rebinding-safe),
-///   * ALWAYS reject the cloud metadata address 169.254.169.254,
-///   * reject loopback / private / link-local / unspecified — UNLESS
-///     `FLUX_WEBHOOK_ALLOW_PRIVATE=1` (the documented single-host dev pattern of
-///     pointing a webhook at fluxc serve on 127.0.0.1).
-/// Enforced at the DISPATCH chokepoint (`send_http_post`), so it covers every
-/// delivery path, DNS rebinding, and webhook entries that predate this guard —
-/// without making registration network-dependent.
-fn ssrf_check(url: &str) -> Result<(), String> {
-    let allow_private = std::env::var("FLUX_WEBHOOK_ALLOW_PRIVATE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    ssrf_check_with(url, allow_private)
-}
-
-/// Pure SSRF policy — `allow_private` injected so it's testable without touching
-/// the process-global `FLUX_WEBHOOK_ALLOW_PRIVATE` (which would race parallel tests).
-fn ssrf_check_with(url: &str, allow_private: bool) -> Result<(), String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| format!("webhook URL must be http(s): {url}"))?;
-    // authority = up to the first '/', '?' or '#'; strip any userinfo before '@'
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    if authority.is_empty() {
-        return Err(format!("webhook URL has no host: {url}"));
-    }
-    // host:port — handle bracketed IPv6 [::1]:port
-    let (host, port): (String, u16) = if let Some(h) = authority.strip_prefix('[') {
-        let (h6, tail) = h.split_once(']').ok_or_else(|| format!("bad IPv6 authority: {authority}"))?;
-        let port = tail.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(443);
-        (h6.to_string(), port)
-    } else if let Some((h, p)) = authority.rsplit_once(':') {
-        // only treat trailing ':NNN' as a port if it parses as a number
-        match p.parse::<u16>() {
-            Ok(port) => (h.to_string(), port),
-            Err(_) => (authority.to_string(), 443),
-        }
-    } else {
-        (authority.to_string(), 443)
-    };
-
-    let addrs: Vec<IpAddr> = (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|e| format!("webhook host '{host}' does not resolve: {e}"))?
-        .map(|sa| sa.ip())
-        .collect();
-    if addrs.is_empty() {
-        return Err(format!("webhook host '{host}' resolved to no addresses"));
-    }
-    for ip in addrs {
-        if is_metadata_ip(&ip) {
-            return Err(format!("webhook target {ip} is the cloud metadata endpoint — refused"));
-        }
-        if !allow_private && is_private_ip(&ip) {
-            return Err(format!(
-                "webhook target {ip} is loopback/private/link-local — refused \
-                 (set FLUX_WEBHOOK_ALLOW_PRIVATE=1 to allow same-host webhooks)"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The cloud-metadata SSRF target — blocked unconditionally.
-fn is_metadata_ip(ip: &IpAddr) -> bool {
-    matches!(ip, IpAddr::V4(v4) if v4.octets() == [169, 254, 169, 254])
-}
-
-/// Loopback / private / link-local / unspecified, v4 and v6.
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() {
-                return true;
-            }
-            // IPv4-mapped (::ffff:a.b.c.d) — re-check as v4
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified();
-            }
-            let seg = v6.segments();
-            (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-        }
-    }
-}
+pub use crate::webhook_ssrf::{ssrf_check, ssrf_check_with, is_metadata_ip, is_private_ip};
 
 /// Auto-quarantine an endpoint after this many consecutive delivery failures.
 /// Quarantined endpoints are disabled so build-event dispatch stops wasting
@@ -646,7 +550,7 @@ pub fn auto_dispatch(event: &str, data: serde_json::Value) {
 
     // Push AI feed event so the dashboard shows webhook activity live
     if fired_count > 0 {
-        crate::serve::push_feed_event(
+        crate::serve_events::push_feed_event(
             "Webhook",
             &format!("{} → {} endpoint(s) fired", event, fired_count),
             "webhook",

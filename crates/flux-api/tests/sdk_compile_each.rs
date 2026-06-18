@@ -10,8 +10,9 @@
 // behind `--nocapture`, surfaced via the test summary anyway.
 
 use flux_api::{
-    discover_endpoints, generate_go_sdk, generate_kotlin_sdk, generate_python_sdk,
-    generate_rust_client_sdk, generate_typescript_sdk,
+    discover_endpoints, discover_schemas, generate_go_sdk, generate_kotlin_sdk,
+    generate_python_sdk, generate_python_sdk_with_types, generate_rust_client_sdk,
+    generate_typescript_sdk,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -78,6 +79,24 @@ fn python_sdk_parses_with_py_compile() {
     let mut cmd = Command::new("python3");
     cmd.arg("-m").arg("py_compile").arg(&path);
     run_check(&mut cmd, "python");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn typed_python_sdk_parses_with_py_compile() {
+    // The typed variant emits `TypedDict` definitions + annotated body params;
+    // prove the richer output still compiles under py_compile.
+    if !tool_present("python3") {
+        println!("[skip] python3 not installed");
+        return;
+    }
+    let g = ws(&["wickes-cms", "wickes-erp", "wickes-finance", "flux-ue-bridge"]);
+    let eps = discover_endpoints(&g);
+    let sdk = generate_python_sdk_with_types(&eps, "http://localhost:8080", &discover_schemas(&g));
+    let path = write_temp("py_typed", ".py", &sdk);
+    let mut cmd = Command::new("python3");
+    cmd.arg("-m").arg("py_compile").arg(&path);
+    run_check(&mut cmd, "typed python");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -165,11 +184,21 @@ fn rust_sdk_passes_syntax_check_with_rustc() {
             }
             pub struct RequestBuilder;
             impl RequestBuilder {
+                pub fn query<T: ?Sized>(self, _: &T) -> Self { self }
+                pub fn json<T: ?Sized>(self, _: &T) -> Self { self }
+                pub fn bearer_auth<T>(self, _: T) -> Self { self }
                 pub async fn send(self) -> Result<Response, Error> { Ok(Response) }
             }
             pub struct Response;
             #[derive(Debug)]
             pub struct Error;
+        }
+        // Minimal serde_json shim — the generated SDK names `serde_json::Value`
+        // as the request-body type. A real consumer depends on the crate; the
+        // parse/type-check here only needs the path to resolve.
+        pub mod serde_json {
+            #[derive(Default)]
+            pub struct Value;
         }
     "#;
     let path = write_temp("rs", ".rs", &format!("{stub}\n{sdk}"));

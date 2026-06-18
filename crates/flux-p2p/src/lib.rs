@@ -277,6 +277,7 @@ impl Default for NetworkConfig {
                 "/flux/1/compile-result".into(),
                 "/flux/1/cache-invalidate".into(),
                 "/dagknight/1/vertices".into(),
+                COMBO_AFFINITY_TOPIC.into(),
             ],
         }
     }
@@ -671,7 +672,7 @@ impl NetworkManager {
     /// Publish combo profile (from a recent supersonic combo run) for affinity.
     /// Nodes call this after `flux_combo_supersonic` to let the mesh know their speed.
     pub fn publish_combo_profile(&self, crate_name: &str, predicted_ms: f64, confidence: f64) -> Result<(), String> {
-        self.publish(super::swarm::COMBO_AFFINITY_TOPIC, format!(r#"{{"crate":"{}","predicted_ms":{},"confidence":{}}}"#, crate_name, predicted_ms, confidence).into_bytes())
+        self.publish(COMBO_AFFINITY_TOPIC, format!(r#"{{"crate":"{}","predicted_ms":{},"confidence":{}}}"#, crate_name, predicted_ms, confidence).into_bytes())
     }
 
     /// v0.7.0: Publish a compile request to the fleet. Build nodes subscribed

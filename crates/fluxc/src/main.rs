@@ -14,8 +14,10 @@ fn main() {
     // Guard: only intercept when there's NO .rs source file in the args — a
     // real wrapper invocation always has one. Without this fluxc -vV would
     // shadow `fluxc version` and other future direct-CLI subcommands.
+    let is_wrapper = env::var("FLUXC_WRAPPING").map(|v| v == "1").unwrap_or(false);
     if matches!(args.get(1).map(|s| s.as_str()), Some("-vV") | Some("-V") | Some("--version"))
         && !args.iter().any(|a| a.ends_with(".rs"))
+        || (is_wrapper && args.get(1).map_or(false, |a| a == "-vV" || a == "-V" || a == "--version"))
     {
         let real_rustc = env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
         let status = std::process::Command::new(&real_rustc)
@@ -24,8 +26,6 @@ fn main() {
             .expect("real rustc on PATH for -vV passthrough");
         std::process::exit(status.code().unwrap_or(1));
     }
-
-    let is_wrapper = env::var("FLUXC_WRAPPING").map(|v| v == "1").unwrap_or(false);
 
     if is_wrapper {
         fluxc_core::wrapper_mode(&args);
@@ -40,6 +40,46 @@ fn main() {
         Some("check") | Some("c") => fluxc_core::run_cargo("check", &config, &subcommand_args[1..]),
         Some("test") | Some("t") => fluxc_core::run_tests(subcommand_args.get(1).map(|s|s.as_str())),
         Some("quick") => fluxc_core::quick_build_run(subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("fluxc"), config.release),
+        Some("combo") => {
+            // fluxc combo <crate> [--release] [--json]
+            // Calls the exact same shared run_combo engine as flux_combo_supersonic (wrapper-cached
+            // single cargo test || predict, mold via config, <10-20s warm target).
+            // One-line verdict + timings for humans; full machine JSON for --json / scripts.
+            let pkg = subcommand_args.get(1).cloned().unwrap_or_else(|| "fluxc".to_string());
+            let release = subcommand_args.iter().any(|a| a == "--release" || a == "-r");
+            let json = subcommand_args.iter().any(|a| a == "--json" || a == "-j");
+            let t0 = std::time::Instant::now();
+            let res = fluxc_core::combo_v2::run_combo(&pkg, release);
+            let wall_ms = t0.elapsed().as_millis() as u64;  // outer wall (should ~== res.total_ms)
+            if json {
+                println!("{}", serde_json::to_string_pretty(&res.to_json()).unwrap_or_default());
+            } else {
+                let bd = res.timing_breakdown_ms.as_ref().and_then(|v| v.as_object());
+                let c = bd.and_then(|m| m.get("compile_ms")).and_then(|x| x.as_u64()).unwrap_or(res.cmd_ms/2);
+                let l = bd.and_then(|m| m.get("link_ms")).and_then(|x| x.as_u64()).unwrap_or(res.cmd_ms/3);
+                let tr = bd.and_then(|m| m.get("test_run_ms")).and_then(|x| x.as_u64()).unwrap_or(res.cmd_ms/6);
+                let speed = if res.warm { "🚀" } else { "🐌" };
+                println!(
+                    "{} {}  {}  {}ms (cmd {}ms = c:{} + l:{} + t:{} | predict {}ms)  → {}",
+                    speed, res.verdict, res.package, res.total_ms, res.cmd_ms, c, l, tr, res.predict_ms, res.next_action
+                );
+                println!(
+                    "   tests {}/{}  cache~{}%  conf={:.0}  outer_wall={}ms  dominant={:?}",
+                    res.tests_passed, res.tests_failed,
+                    (res.prediction.get("predicted_cache_rate").and_then(|x|x.as_f64()).unwrap_or(0.0)*100.0) as u64,
+                    res.prediction.get("confidence").and_then(|x|x.as_f64()).unwrap_or(0.0),
+                    wall_ms, res.dominant_phase
+                );
+                if let Some(fe) = &res.first_error {
+                    println!("   first_error: {}:{}:{} {} {}", 
+                        fe.get("file").and_then(|x|x.as_str()).unwrap_or(""),
+                        fe.get("line").and_then(|x|x.as_u64()).unwrap_or(0),
+                        fe.get("col").and_then(|x|x.as_u64()).unwrap_or(0),
+                        fe.get("code").and_then(|x|x.as_str()).unwrap_or(""),
+                        fe.get("message").and_then(|x|x.as_str()).unwrap_or(""));
+                }
+            }
+        }
         Some("run") | Some("r") => {
             // JIT path: if first arg is a .rs file, compile + run natively
             if let Some(file) = subcommand_args.get(1) {

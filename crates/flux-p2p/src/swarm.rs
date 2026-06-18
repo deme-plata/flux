@@ -627,10 +627,6 @@ impl FluxSwarmManager {
             return Err("Swarm not started".into());
         }
         let profile = format!(r#"{{"crate":"{}","predicted_ms":{},"confidence":{}}}"#, crate_name, predicted_ms, confidence);
-        // Ensure subscribed (higher layer should have done, but safe)
-        if !self.topics.contains(&COMBO_AFFINITY_TOPIC.to_string()) {
-            let _ = self.subscribe(COMBO_AFFINITY_TOPIC);
-        }
         self.publish(COMBO_AFFINITY_TOPIC, profile.into_bytes())
     }
 
@@ -831,7 +827,7 @@ impl FluxSwarmManager {
                     self.entanglement.feed_block(&from_str, &[tx_hash], false);
                     // Forward to application via event channel
                     if let Some(ref rx) = self.event_rx {
-                        if message.topic == COMBO_AFFINITY_TOPIC {
+                        if message.topic.as_str() == COMBO_AFFINITY_TOPIC {
                             // Parse and emit specialized event for combo affinity (invention hook)
                             if let Ok(s) = std::str::from_utf8(&message.data) {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
@@ -846,7 +842,7 @@ impl FluxSwarmManager {
                                             predicted_ms: pred,
                                             confidence: conf,
                                         });
-                                        continue;
+                                        return;
                                     }
                                 }
                             }

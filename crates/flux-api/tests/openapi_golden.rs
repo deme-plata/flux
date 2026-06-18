@@ -8,7 +8,9 @@
 // [[feedback-flux-combo-zero-tests-means-test-build-failed]] for why running
 // the binary directly is the only way to trust test counts.
 
-use flux_api::{discover_endpoints, generate_openapi};
+use flux_api::{
+    discover_endpoints, discover_schemas, generate_openapi_with_schemas,
+};
 use serde_json::Value;
 
 fn ci(name: &str) -> flux_graph::CrateInfo {
@@ -30,8 +32,16 @@ fn ws(names: &[&str]) -> flux_graph::WorkspaceGraph {
 }
 
 fn doc_for(crates: &[&str]) -> Value {
-    let eps = discover_endpoints(&ws(crates));
-    generate_openapi(&format!("{} suite", crates.join("+")), "0.12.0", &eps)
+    let g = ws(crates);
+    let eps = discover_endpoints(&g);
+    // Thread the real schema registry so component schemas are populated, not
+    // stubbed — and prove oas3 still accepts the richer document.
+    generate_openapi_with_schemas(
+        &format!("{} suite", crates.join("+")),
+        "0.17.0",
+        &eps,
+        &discover_schemas(&g),
+    )
 }
 
 fn assert_oas3_parses(doc: &Value, label: &str) {
@@ -113,19 +123,33 @@ fn flux_ue_bridge_doc_structural_snapshot() {
     }
 }
 
-/// Ensure the components/schemas block lists every Ref name reachable from
-/// the wickes payments use-case (Page + Order + Payment).
+/// Ensure the components/schemas block carries REAL definitions for every Ref
+/// reachable from the wickes payments use-case (Page + Order + Payment), plus
+/// the transitive LineItem that Order pulls in — not just stub `{}`s.
 #[test]
 fn wickes_full_suite_lists_all_refs_in_components() {
     let doc = doc_for(&["wickes-cms", "wickes-erp", "wickes-finance"]);
     let schemas = doc["components"]["schemas"]
         .as_object()
         .expect("components.schemas object");
-    for name in ["Page", "Order", "Payment"] {
+    for name in ["Page", "Order", "Payment", "LineItem"] {
         assert!(
             schemas.contains_key(name),
             "missing {name} in components.schemas: {:?}",
             schemas.keys().collect::<Vec<_>>()
         );
+        // Real object definition, not the empty `{}` stub.
+        assert_eq!(
+            schemas[name]["type"], "object",
+            "{name} should be a populated object schema, got {}",
+            schemas[name]
+        );
     }
+    // Payment's enum field lowered its allowed values.
+    let methods = &schemas["Payment"]["properties"]["method"]["enum"];
+    assert!(
+        methods.as_array().map_or(false, |a| a.iter().any(|v| v == "crypto")),
+        "Payment.method enum not lowered: {}",
+        schemas["Payment"]
+    );
 }

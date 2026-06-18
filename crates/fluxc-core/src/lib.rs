@@ -4,12 +4,18 @@
 // fluxc (CLI) depends on it for build orchestration.
 
 pub mod serve;
+pub mod serve_stats;
+pub mod serve_events;
+pub mod serve_router;
+pub mod combo_v2;
+pub mod warm_bin_cache;
 pub mod tune;
 pub mod portal;
 pub mod goals;
 pub mod ai_debug;
 pub use ::flux_net; // P1: extracted to its own flux-net crate; re-export keeps fluxc_core::flux_net::* stable
 pub mod webhook;
+pub mod webhook_ssrf;
 pub mod webhook_inbound;
 pub mod predict;
 pub mod qspec;

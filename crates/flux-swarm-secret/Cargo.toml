@@ -1,0 +1,29 @@
+[package]
+name = "flux-swarm-secret"
+version = "0.1.0"
+edition = "2021"
+description = "Real PQ-hybrid-ready sealed-envelope encryption for the Flux swarm bus (X25519 + BLAKE3-KDF + ChaCha20-Poly1305; forward-secret per message). The ML-KEM leg drops in via a REAL pqcrypto crate — NOT the flux-kyberkem stub, which returns all-zero shared secrets."
+
+[dependencies]
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+blake3 = "1.5"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+thiserror = "1.0"
+zeroize = "1"
+flux-p2p = { path = "../flux-p2p", optional = true }
+# Real FIPS-203 ML-KEM-1024 (PQClean via pqcrypto), NOT the flux-kyberkem stub.
+pqcrypto-mlkem = { version = "0.1", optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
+
+[features]
+# Real push transport: bind sealed frames onto flux-p2p gossipsub.
+# Off by default so the crypto core builds/tests without libp2p.
+p2p = ["dep:flux-p2p"]
+# PQ-hybrid sealed box: X25519 + real ML-KEM-1024. Off by default so the core
+# builds without the C-backed pqcrypto toolchain.
+pq = ["dep:pqcrypto-mlkem", "dep:pqcrypto-traits"]

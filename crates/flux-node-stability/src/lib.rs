@@ -298,7 +298,10 @@ pub fn sample_rss_gb() -> Option<f64> {
 /// Coarse alert level derived from a [`HealthSnapshot`] — the single signal a
 /// monitor pages on, so alerting logic lives here (tested) instead of being
 /// re-derived ad-hoc at every call site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Variants are ordered `Ok < Degraded < Critical`, so [`Ord`]/`max` gives the
+/// fleet's worst state directly (see [`worst_of`](HealthLevel::worst_of)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HealthLevel {
     /// Producing normally, not restarting too fast.
     Ok,
@@ -325,6 +328,14 @@ impl HealthLevel {
     /// Whether an LB should keep routing traffic here (true for Ok/Degraded).
     pub fn should_serve_traffic(self) -> bool {
         self.as_http_status() == 200
+    }
+
+    /// Aggregate a fleet's per-node levels into ONE fleet-level signal: the
+    /// worst node dominates (`Critical > Degraded > Ok`). An empty fleet is
+    /// `Ok` (nothing is unhealthy). This is what a multi-node dashboard pages
+    /// on — one Critical node makes the whole fleet Critical.
+    pub fn worst_of(levels: impl IntoIterator<Item = HealthLevel>) -> HealthLevel {
+        levels.into_iter().max().unwrap_or(HealthLevel::Ok)
     }
 }
 
@@ -712,6 +723,23 @@ mod tests {
         let s = sup.snapshot(106.0);
         assert_eq!(s.level(), HealthLevel::Critical);
         assert!(s.summary_line().contains("stability=CRITICAL"));
+    }
+
+    #[test]
+    fn health_level_worst_of_aggregates_fleet() {
+        // Ordering Ok < Degraded < Critical.
+        assert!(HealthLevel::Ok < HealthLevel::Degraded);
+        assert!(HealthLevel::Degraded < HealthLevel::Critical);
+        // One Critical node makes the whole fleet Critical.
+        assert_eq!(
+            HealthLevel::worst_of([HealthLevel::Ok, HealthLevel::Degraded, HealthLevel::Critical]),
+            HealthLevel::Critical
+        );
+        // All-Ok fleet stays Ok; Degraded present (no Critical) ⇒ Degraded.
+        assert_eq!(HealthLevel::worst_of([HealthLevel::Ok, HealthLevel::Ok]), HealthLevel::Ok);
+        assert_eq!(HealthLevel::worst_of([HealthLevel::Ok, HealthLevel::Degraded]), HealthLevel::Degraded);
+        // Empty fleet ⇒ Ok (nothing unhealthy).
+        assert_eq!(HealthLevel::worst_of([]), HealthLevel::Ok);
     }
 
     #[test]

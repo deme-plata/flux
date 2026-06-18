@@ -67,6 +67,25 @@ pub fn target_difficulty_bits(target: &[u8; 32]) -> u32 {
     bits
 }
 
+/// Build a target with exactly `bits` leading zero bits (the rest all ones) —
+/// the inverse of [`target_difficulty_bits`]. Lets a caller configure a miner
+/// or a test at a chosen difficulty instead of hand-writing 32 hex bytes.
+/// `bits` is clamped to 256 (an all-zero, unsatisfiable target).
+pub fn target_for_difficulty_bits(bits: u32) -> [u8; 32] {
+    let bits = bits.min(256);
+    let mut t = [0xffu8; 32];
+    let full_zero_bytes = (bits / 8) as usize;
+    for byte in t.iter_mut().take(full_zero_bytes) {
+        *byte = 0;
+    }
+    let rem = bits % 8;
+    if full_zero_bytes < 32 && rem > 0 {
+        // Zero the top `rem` bits of the first non-zero byte.
+        t[full_zero_bytes] = 0xffu8 >> rem;
+    }
+    t
+}
+
 /// Expected number of hashes to find one valid solution = 2^difficulty_bits.
 /// Saturates to `f64::INFINITY` for absurd difficulties so callers don't
 /// silently wrap. This is a statistical mean, not a guarantee — the geometric
@@ -399,6 +418,11 @@ pub mod gpu {
     /// Search a batch on the GPU. The Flux GPU layer JITs the BLAKE3 search
     /// kernel; until a real device is attached it walks the same nonce range
     /// the CPU backend does, so results are bit-identical and verifiable.
+    ///
+    /// The compute fallback uses the MULTI-CORE [`mine_batch_cpu_parallel`],
+    /// not the serial scan — a GPU box still has many CPU cores, and until real
+    /// SPIR-V dispatch lands those cores shouldn't sit idle (the serial fallback
+    /// here previously wasted them while the CPU-only path was already parallel).
     pub fn mine_batch_gpu(work: &Work, nonce_start: u64, n_tries: u64) -> Option<Solution> {
         let mut ctx = GpuContext::new();
         // Register the search kernel so dispatch accounting / JIT path runs;
@@ -408,7 +432,7 @@ pub mod gpu {
             "fn search(challenge: [u8;32], nonce: u64) -> [u8;32] { blake3(challenge, nonce) }",
             (256, 1, 1), // workgroup dims: 256 nonces per group, 1D search
         );
-        mine_batch_cpu(work, nonce_start, n_tries)
+        mine_batch_cpu_parallel(work, nonce_start, n_tries)
     }
 }
 
@@ -537,6 +561,23 @@ mod tests {
         let c = [7u8; 32];
         assert_eq!(digest_for(&c, 42), digest_for(&c, 42));
         assert_ne!(digest_for(&c, 42), digest_for(&c, 43));
+    }
+
+    #[test]
+    fn difficulty_target_roundtrips() {
+        // target_difficulty_bits ∘ target_for_difficulty_bits == identity (clamped 256).
+        for bits in [0u32, 1, 4, 7, 8, 12, 16, 20, 24, 100, 255, 256, 300] {
+            let target = target_for_difficulty_bits(bits);
+            assert_eq!(target_difficulty_bits(&target), bits.min(256), "roundtrip failed at {bits}");
+        }
+        // Spot-check the byte layout: 12 bits = first byte 0x00, second 0x0f.
+        let t12 = target_for_difficulty_bits(12);
+        assert_eq!(t12[0], 0x00);
+        assert_eq!(t12[1], 0x0f);
+        assert_eq!(t12[2], 0xff);
+        // 0 bits = trivial all-0xff; 256 = unsatisfiable all-zero.
+        assert_eq!(target_for_difficulty_bits(0), [0xff; 32]);
+        assert_eq!(target_for_difficulty_bits(256), [0x00; 32]);
     }
 
     #[test]

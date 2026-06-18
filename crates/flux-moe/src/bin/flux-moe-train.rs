@@ -35,24 +35,28 @@ fn main() {
     println!("✓ wrote {n_examples} chronos examples ({} records × 2 framings) → {out}", records.len());
 
     // The agentic-money / flux TOOL-CALL corpus — the "execution on par with
-    // Claude Code" differentiator. Validate every seed call, then emit alongside.
-    match toolcorpus::validate_seed() {
-        Ok(n) => {
+    // Claude Code" differentiator. Validate the single-call seed AND the chains +
+    // negatives, then emit the FULL stream (tool-pick + chaining + when-to-refuse).
+    match (toolcorpus::validate_all(), toolcorpus::validate_raw_all()) {
+        (Ok(n_seed), Ok(n_raw)) => {
             let tool_path = out.replace("chronos-corpus", "toolcall-corpus");
             let tool_path = if tool_path == out { "toolcall-corpus.jsonl".to_string() } else { tool_path };
-            let tj = toolcorpus::to_jsonl();
+            let tj = toolcorpus::to_jsonl_full();
+            let total = tj.lines().count();
             if let Err(e) = std::fs::write(&tool_path, &tj) {
                 eprintln!("write {tool_path}: {e}");
             } else {
-                println!("✓ wrote {n} tool-call examples (agentic-money + flux surfaces) → {tool_path}");
+                println!("✓ wrote {total} tool-call examples → {tool_path}");
+                println!("    ({n_seed} single-call seed + {n_raw} chains+negatives: chaining & refusal/confirmation-gating)");
             }
         }
-        Err(e) => eprintln!("⚠ tool-call seed INVALID — not written: {e}"),
+        (Err(e), _) | (_, Err(e)) => eprintln!("⚠ tool-call corpus INVALID — not written: {e}"),
     }
 
-    // The trading/general expert is the target; pick a base + propose the command.
-    // (≤3B so CPU-LoRA is feasible on the owned swarm; classifier_only=false.)
-    let p = plan("Qwen/Qwen3-1.5B", 1.5, /*gpu_available=*/ false, /*classifier_only=*/ false);
+    // Target: a local agentic-money expert on Viktor's RTX 2080 (8GB, Turing sm_75).
+    // Qwen3-0.6B full-fits and QLoRA-trains comfortably in 8GB — propose the GPU path.
+    // (MOE-SERVE measures zero-shot FIRST; only train if a base genuinely falls short.)
+    let p = plan("Qwen/Qwen3-0.6B", 0.6, /*gpu_available=*/ true, /*classifier_only=*/ false);
     println!("\n── proposed trainer plan ──");
     println!("base:    {}", p.base_model);
     println!("backend: {:?} · method {:?}", p.backend, p.method);

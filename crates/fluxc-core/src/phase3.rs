@@ -1231,7 +1231,7 @@ fn fire_heal_webhook(event: &str, path: &str, attempt: usize, error: &str) {
             .as_secs(),
     });
     crate::webhook::auto_dispatch(event, data);
-    crate::serve::push_feed_event(
+    crate::serve_events::push_feed_event(
         "Heal",
         &format!("{} (attempt {}) → {}", path, attempt, event),
         "heal",

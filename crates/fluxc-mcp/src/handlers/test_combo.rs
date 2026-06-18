@@ -101,7 +101,8 @@ fn flux_test(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str());
     let filter = args.get("filter").and_then(|v| v.as_str());
 
-    let mut cmd = crate::handlers::cargo_cmd();
+    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let mut cmd = std::process::Command::new(&flux_exe);
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["--package", pkg]); }
     if let Some(f) = filter { cmd.args(["--", f]); }
@@ -147,30 +148,26 @@ fn flux_combo(args: &Value) -> String {
     let pkg = package.to_string();
     let pkg2 = pkg.clone();
 
-    let compile_handle = std::thread::spawn({
-        let p = pkg.clone();
-        move || {
-            let mode = if release { "build" } else { "check" };
-            let output = crate::handlers::cargo_cmd()
-                .args([mode, "-p", &p])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-                .unwrap_or_default();
-            output
-        }
-    });
+    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
 
-    let test_handle = std::thread::spawn(move || {
-        let raw = crate::handlers::cargo_cmd()
-            .args(["test", "-p", &pkg2])
-            .output();
-        match raw {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                crate::handlers::parse_test_counts(&stdout, &stderr)
+    // NOTE: no per-call tune spawn (per swarm feedback to avoid latency). Assume SPEED_BOOTS or set at boot.
+    // Dogfood: use fluxc test (which already does the type-check, no redundant check thread to avoid lock contention).
+
+    let test_handle = std::thread::spawn({
+        let pkg2 = pkg2.clone();
+        let exe = flux_exe.clone();
+        move || {
+            let raw = std::process::Command::new(&exe)
+                .args(["test", "-p", &pkg2])
+                .output();
+            match raw {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    crate::handlers::parse_test_counts(&stdout, &stderr)
+                }
+                Err(_) => (0, 0),
             }
-            Err(_) => (0, 0),
         }
     });
 
@@ -179,7 +176,6 @@ fn flux_combo(args: &Value) -> String {
         move || predict::predict_build(&p, false, &[])
     });
 
-    let _compile_output = compile_handle.join().unwrap();
     let (test_passed, test_failed) = test_handle.join().unwrap();
     let pred = predict_handle.join().unwrap();
 
@@ -201,7 +197,7 @@ fn flux_combo(args: &Value) -> String {
         dashboard(
             &format!("{} · {}ms · {}", pkg, total_ms, if test_failed == 0 { "green" } else { "RED" }),
             &[
-                " BUILD     ✓ compiled · parallel".to_string(),
+                " BUILD     ✓ (via fluxc test, no redundant check)".to_string(),
                 format!(" TESTS     {}  {}/{} {}", bar(test_frac, 24), test_passed, total, status),
                 format!(" PREDICT   {}ms   cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 12), (pred.predicted_cache_rate * 100.0) as u64),
                 format!("           confidence {} {}%", bar(pred.confidence, 12), (pred.confidence * 100.0) as u64),
@@ -271,8 +267,12 @@ fn flux_quickcast(args: &Value) -> String {
         .map(|(t, _)| t)
         .unwrap_or_else(|_| tune::load_tune());
 
-    // Check (cargo check)
-    let check_ok = crate::handlers::cargo_cmd()
+    // Check via fluxc (dogfood, no raw cargo)
+    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let _ = std::process::Command::new(&flux_exe)
+        .args(["tune", "--preset", "speed-boots"])
+        .status();
+    let check_ok = std::process::Command::new(&flux_exe)
         .args(["check", "-p", package])
         .status()
         .map(|s| s.success())
@@ -297,15 +297,22 @@ fn flux_ult(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc");
     let start = std::time::Instant::now();
 
-    // Parallel: check + heatmap + predict
+    // Parallel: check + heatmap + predict (dogfood via fluxc + speed tune)
     let pkg = package.to_string();
+    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let _ = std::process::Command::new(&flux_exe)
+        .args(["tune", "--preset", "speed-boots"])
+        .status();
     let check_handle = std::thread::spawn({
         let p = pkg.clone();
-        move || crate::handlers::cargo_cmd()
-            .args(["check", "-p", &p])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let exe = flux_exe.clone();
+        move || {
+            std::process::Command::new(&exe)
+                .args(["check", "-p", &p])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
     });
 
     let heatmap_handle = std::thread::spawn(|| heatmap::capture_heatmap());

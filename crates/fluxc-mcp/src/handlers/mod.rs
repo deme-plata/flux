@@ -278,3 +278,4 @@ pub mod compile_error;
 pub mod flux_legacy;
 pub mod cortex;
 pub mod swarm_compile;
+pub mod supersonic;

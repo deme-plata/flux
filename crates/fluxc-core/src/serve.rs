@@ -22,6 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Re-export publicly so legacy `fluxc_core::serve::*` paths (fluxc bin, fluxc-mcp)
+// keep working after the serve→serve_stats/serve_events split. The split left these
+// as private `use`, which made the whole workspace un-rebuildable (E0603) — that is
+// why target/debug/fluxc was frozen at the pre-split build.
+pub use crate::serve_stats::{LiveStats, init_live_stats};
+pub use crate::serve_events::{push_event, push_feed_event, now_ms};
+
 // ── Request / Response ──
 
 pub struct Request {
@@ -120,39 +127,9 @@ impl Response {
     }
 }
 
-fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
-    req.headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
-}
+// (auth + static helpers moved to serve_router.rs as part of serve god-file split)
 
-fn serve_token() -> Option<String> {
-    std::env::var("FLUX_SERVE_TOKEN")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn token_matches(req: &Request, token: &str) -> bool {
-    if let Some(auth) = header_value(req, "authorization") {
-        if auth.strip_prefix("Bearer ").map(|v| v == token).unwrap_or(false) {
-            return true;
-        }
-    }
-    header_value(req, "x-flux-token").map(|v| v == token).unwrap_or(false)
-}
-
-fn is_authorized(req: &Request) -> bool {
-    match serve_token() {
-        Some(token) => token_matches(req, &token),
-        None => true,
-    }
-}
-
-fn is_mutating_endpoint(req: &Request) -> bool {
-    req.method == "POST" && matches!(req.path.as_str(), "/api/tune" | "/api/build_event")
-}
+pub(crate) use crate::serve_router::serve_token;
 
 fn is_private_bind_host(host: &str) -> bool {
     let h = host.trim();
@@ -170,296 +147,9 @@ fn is_private_bind_host(host: &str) -> bool {
         || is_172_private
 }
 
-/// Content-type lookup by file extension. Covers the file types a
-/// browser-side SIGIL/Flux demo needs (HTML, JS, CSS, WASM, JSON, SVG,
-/// PNG/JPG/ICO for assets) and falls back to octet-stream for anything else.
-fn content_type_for(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if      lower.ends_with(".html") || lower.ends_with(".htm") { "text/html; charset=utf-8" }
-    else if lower.ends_with(".js")   { "application/javascript; charset=utf-8" }
-    else if lower.ends_with(".mjs")  { "application/javascript; charset=utf-8" }
-    else if lower.ends_with(".css")  { "text/css; charset=utf-8" }
-    else if lower.ends_with(".json") { "application/json" }
-    else if lower.ends_with(".wasm") { "application/wasm" }
-    else if lower.ends_with(".svg")  { "image/svg+xml" }
-    else if lower.ends_with(".png")  { "image/png" }
-    else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg" }
-    else if lower.ends_with(".gif")  { "image/gif" }
-    else if lower.ends_with(".ico")  { "image/x-icon" }
-    else if lower.ends_with(".txt") || lower.ends_with(".md") { "text/plain; charset=utf-8" }
-    else if lower.ends_with(".woff2") { "font/woff2" }
-    else if lower.ends_with(".woff")  { "font/woff" }
-    else { "application/octet-stream" }
-}
-
-/// Resolve a request path against `$FLUX_STATIC_DIR` and return the file
-/// bytes if a safe match exists. Returns `None` when the env var isn't set,
-/// the path tries to escape via `..`, the resolved file is outside the dir,
-/// or the file doesn't exist / can't be read.
-///
-/// Mapping rules:
-/// - `/` → `<dir>/index.html`
-/// - `/foo/` → `<dir>/foo/index.html`
-/// - `/foo/bar.html` → `<dir>/foo/bar.html`
-/// - any `..` in the request path → reject (returns None)
-fn serve_static_file(req: &Request) -> Option<Response> {
-    let dir = std::env::var("FLUX_STATIC_DIR").ok()?;
-    let dir_path = std::path::PathBuf::from(&dir);
-    if !dir_path.is_dir() {
-        return None;
-    }
-
-    // Drop the query string (e.g. cache-bust `?v=123`) before resolving the file —
-    // otherwise "main.js?v=1" is treated as a filename and 404s.
-    let path_only = req.path.split('?').next().unwrap_or(&req.path);
-
-    // Strip leading '/' and reject path traversal up front. We never
-    // canonicalize first — canonicalize on a malicious symlink could escape
-    // before we check. Explicit `..` rejection is the conservative move.
-    let rel = path_only.trim_start_matches('/');
-    if rel.split('/').any(|seg| seg == ".." || seg == ".") {
-        return None;
-    }
-
-    let dir_canon = dir_path.canonicalize().ok()?;
-
-    // Resolve a candidate file under dir_path, confirming it stays inside (defends
-    // against absolute-path inputs / symlink escapes), then apply ETag/304 + Range.
-    let try_file = |candidate: std::path::PathBuf| -> Option<Response> {
-        let cand_canon = candidate.canonicalize().ok()?;
-        if !cand_canon.starts_with(&dir_canon) { return None; }
-        let bytes = std::fs::read(&cand_canon).ok()?;
-        let ct = content_type_for(cand_canon.to_string_lossy().as_ref());
-        Some(static_file_response(req, bytes, ct))
-    };
-
-    let direct = if rel.is_empty() || rel.ends_with('/') {
-        dir_path.join(rel).join("index.html")
-    } else {
-        dir_path.join(rel)
-    };
-    if let Some(r) = try_file(direct) { return Some(r); }
-
-    // SPA fallback (FLUX_SPA_FALLBACK=1): a deep link with no matching file falls back to the
-    // nearest index.html walking UP the path — so /cockpit/<route> serves /cockpit/index.html
-    // (the cockpit SPA), not the root qwen index. Skip for obvious asset requests (have a file
-    // extension in the last segment) so a missing .js/.png honestly 404s instead of returning HTML.
-    if std::env::var("FLUX_SPA_FALLBACK").ok().as_deref() == Some("1") {
-        let last = rel.rsplit('/').next().unwrap_or("");
-        let looks_like_asset = last.contains('.');
-        if !looks_like_asset {
-            let mut segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-            loop {
-                let cand = dir_path.join(segs.join("/")).join("index.html");
-                if let Some(r) = try_file(cand) { return Some(r); }
-                if segs.is_empty() { break; }
-                segs.pop();
-            }
-        }
-    }
-    None
-}
-
-// Apply HTTP caching (ETag/If-None-Match → 304) and Range (bytes=a-b → 206) to a static file body.
-fn static_file_response(req: &Request, bytes: Vec<u8>, ct: &str) -> Response {
-    // Strong-ish ETag = first 16 hex of BLAKE3(content). Cheap, content-addressed.
-    let etag = format!("\"{}\"", &blake3::hash(&bytes).to_hex()[..16]);
-
-    // Conditional GET: client already has this exact content.
-    if let Some(inm) = header_value(req, "if-none-match") {
-        if inm.split(',').any(|t| t.trim() == etag) {
-            let mut r = Response { status: 304, content_type: ct.into(), body: Vec::new(), events: None,
-                extra_headers: vec![("ETag".into(), etag.clone()), ("Cache-Control".into(), "no-cache".into())] };
-            r.extra_headers.push(("Accept-Ranges".into(), "bytes".into()));
-            return r;
-        }
-    }
-
-    let total = bytes.len();
-    // Range request: serve a single byte range as 206. Format "bytes=start-end" (end optional).
-    if let Some(rng) = header_value(req, "range").and_then(|h| h.strip_prefix("bytes=")) {
-        if let Some((s, e)) = rng.split_once('-') {
-            let start: usize = s.trim().parse().unwrap_or(0);
-            let end: usize = if e.trim().is_empty() { total.saturating_sub(1) } else { e.trim().parse().unwrap_or(total - 1) };
-            if start <= end && start < total {
-                let end = end.min(total - 1);
-                let slice = bytes[start..=end].to_vec();
-                return Response {
-                    status: 206, content_type: ct.into(), body: slice, events: None,
-                    extra_headers: vec![
-                        ("ETag".into(), etag),
-                        ("Accept-Ranges".into(), "bytes".into()),
-                        ("Content-Range".into(), format!("bytes {}-{}/{}", start, end, total)),
-                    ],
-                };
-            }
-        }
-    }
-
-    Response {
-        status: 200, content_type: ct.into(), body: bytes, events: None,
-        extra_headers: vec![("ETag".into(), etag), ("Accept-Ranges".into(), "bytes".into())],
-    }
-}
-
-// ── Router ──
-
-type Handler = fn(&Request, &LiveStats) -> Response;
-
-pub struct Router {
-    routes: Vec<(String, String, Handler)>, // (method, path, handler)
-}
-
-impl Router {
-    pub fn new() -> Self {
-        Router { routes: Vec::new() }
-    }
-
-    pub fn route(mut self, method: &str, path: &str, handler: Handler) -> Self {
-        self.routes.push((method.to_string(), path.to_string(), handler));
-        self
-    }
-
-    fn dispatch(&self, req: &Request, stats: &LiveStats) -> Response {
-        if is_mutating_endpoint(req) && !is_authorized(req) {
-            return Response::unauthorized();
-        }
-        for (method, path, handler) in &self.routes {
-            if req.method == *method && req.path == *path {
-                return handler(req, stats);
-            }
-            // Support path prefixes for /sse and static
-            if req.method == *method && path.ends_with('*') {
-                let prefix = &path[..path.len()-1];
-                if req.path.starts_with(prefix) {
-                    return handler(req, stats);
-                }
-            }
-        }
-        // No route matched. Fall back to the static-file directory when
-        // `FLUX_STATIC_DIR` is set — this lets `fluxc serve` host any
-        // Flux-sibling app's dist/ (sigil/gui/dist/, future quillonos UI,
-        // flux-arena Compile Garden, etc.) without bolting on python http
-        // or another web server. Per FLUXFOOD lever 0: "the compiler IS the
-        // web server."
-        if req.method == "GET" {
-            if let Some(resp) = serve_static_file(req) {
-                return resp;
-            }
-        }
-        Response::not_found()
-    }
-}
-
-// ── Live Stats ──
-
-pub struct LiveStats {
-    pub builds_completed: AtomicU64,
-    pub cache_hits: AtomicU64,
-    pub cache_misses: AtomicU64,
-    pub total_build_time_ms: AtomicU64,
-    pub tests_passed: AtomicU64,
-    pub tests_failed: AtomicU64,
-    pub p2p_peers: AtomicU64,
-    pub dagknight_round: AtomicU64,
-    pub mempool_txs: AtomicU64,
-    pub last_event: parking_lot::Mutex<String>,
-    /// In-process event queue: (event_type, data_json). Drained by SSE loop for sub-ms delivery.
-    pub event_queue: parking_lot::Mutex<Vec<(String, String)>>,
-    /// AI feed events: (agent, message, tool, timestamp_ms). Drained by SSE loop.
-    pub feed_events: parking_lot::Mutex<Vec<(String, String, String, u64)>>,
-    pub start_time_ms: u64,
-}
-
-/// Push an event into the live stats event queue. Called from MCP tools or webhooks.
-/// If a serve/SSE thread is active, it drains this queue within one poll cycle.
-pub fn push_event(event_type: &str, data: &serde_json::Value) {
-    // This is a no-op when called from MCP mode (serve not running).
-    // When serve IS running, the SSE loop drains this queue.
-    // We use a weak approach: just store the event in a file-based queue
-    // that the SSE bridge can pick up.
-    let queue_dir = std::path::PathBuf::from("/tmp/flux-events");
-    let _ = std::fs::create_dir_all(&queue_dir);
-    let event_file = queue_dir.join(format!("evt_{}.json", now_ms()));
-    let payload = serde_json::json!({
-        "type": event_type,
-        "data": data,
-        "timestamp_ms": now_ms(),
-    });
-    if let Ok(json) = serde_json::to_string(&payload) {
-        let _ = std::fs::write(&event_file, json);
-    }
-}
-
-/// Push an AI feed event — called from MCP tools to broadcast real-time activity.
-/// Writes to ~/.flux/events/ for cross-process delivery (MCP process → serve process).
-/// The SSE loop polls this directory and emits ai_feed events to connected dashboards.
-pub fn push_feed_event(agent: &str, message: &str, tool: &str) {
-    let queue_dir = std::path::PathBuf::from("/tmp/flux-events");
-    let _ = std::fs::create_dir_all(&queue_dir);
-    let event_file = queue_dir.join(format!("feed_{}.json", now_ms()));
-    let payload = serde_json::json!({
-        "type": "ai_feed",
-        "agent": agent,
-        "message": message,
-        "tool": tool,
-        "timestamp_ms": now_ms(),
-    });
-    if let Ok(json) = serde_json::to_string(&payload) {
-        let _ = std::fs::write(&event_file, json);
-    }
-}
-
-impl LiveStats {
-    pub fn new() -> Arc<Self> {
-        Arc::new(LiveStats {
-            builds_completed: AtomicU64::new(0),
-            cache_hits: AtomicU64::new(0),
-            cache_misses: AtomicU64::new(0),
-            total_build_time_ms: AtomicU64::new(0),
-            tests_passed: AtomicU64::new(0),
-            tests_failed: AtomicU64::new(0),
-            p2p_peers: AtomicU64::new(0),
-            dagknight_round: AtomicU64::new(0),
-            mempool_txs: AtomicU64::new(0),
-            last_event: parking_lot::Mutex::new(String::new()),
-            event_queue: parking_lot::Mutex::new(Vec::new()),
-            feed_events: parking_lot::Mutex::new(Vec::new()),
-            start_time_ms: now_ms(),
-        })
-    }
-
-    pub fn to_json(&self) -> String {
-        let builds = self.builds_completed.load(Ordering::Relaxed);
-        let hits = self.cache_hits.load(Ordering::Relaxed);
-        let misses = self.cache_misses.load(Ordering::Relaxed);
-        let total = hits + misses;
-        let rate = if total > 0 { (hits as f64 / total as f64) * 100.0 } else { 0.0 };
-        let build_time = self.total_build_time_ms.load(Ordering::Relaxed);
-        let avg_time = if builds > 0 { build_time / builds } else { 0 };
-        let uptime = (now_ms() - self.start_time_ms) / 1000;
-
-        // Dynamic workspace version, computed once. The previous hardcoded
-        // "v0.9.9-beta1" survived ~18 releases and misled every /api/stats
-        // consumer (dashboard, garden, monitors) about what was deployed.
-        static SERVE_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-            crate::version::VersionInfo::load(&crate::version::workspace_root())
-                .map(|v| v.display())
-                .unwrap_or_else(|_: String| "unknown".into())
-        });
-
-        let sap_json = r#"{"contrib":0.87,"latency":0.91,"stake":0.72,"accuracy":0.98,"uptime":0.94,"total":0.884,"peers":8}"#;
-        format!(r#"{{"builds":{},"cache_hits":{},"cache_misses":{},"cache_rate":{:.1},"avg_build_ms":{},"total_build_ms":{},"tests_passed":{},"tests_failed":{},"p2p_peers":{},"dagknight_round":{},"mempool_txs":{},"uptime_secs":{},"timestamp":{},"mcp_tools":44,"version":"{}","sap":{},"xalgo":{{"temporal_trust":0.87,"consensus_align":0.94,"tx_quality":0.91,"topology_rank":0.78,"econ_efficiency":0.83,"total":0.866,"peers_scored":12}}}}"#,
-            builds, hits, misses, rate, avg_time, build_time,
-            self.tests_passed.load(Ordering::Relaxed),
-            self.tests_failed.load(Ordering::Relaxed),
-            self.p2p_peers.load(Ordering::Relaxed),
-            self.dagknight_round.load(Ordering::Relaxed),
-            self.mempool_txs.load(Ordering::Relaxed),
-            uptime, now_ms(), &**SERVE_VERSION, sap_json
-        )
-    }
-}
+// Router + dispatch extracted to serve_router.rs (god-file split, legacy_plan).
+// Re-export for compat in build_router / tests / start_server inside this module.
+pub use crate::serve_router::Router;
 
 // ── Route Handlers ──
 
@@ -1429,18 +1119,7 @@ fn write_response<S: Write>(stream: &mut S, resp: &Response) {
     }
 }
 
-// ── Legacy compatibility ──
 
-pub fn init_live_stats() -> Arc<LiveStats> {
-    LiveStats::new()
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 #[cfg(test)]
 mod tests {

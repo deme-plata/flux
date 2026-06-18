@@ -19,12 +19,36 @@
 
 use crate::schema::*;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+/// Emit an OpenAPI 3.1 document with **stub** component schemas — every
+/// `Ref { name }` reachable from the endpoints becomes an empty `{}` schema.
+///
+/// This is the back-compat entry point: callers that hand-build endpoint specs
+/// with named refs but no definitions (flux-0x, flux-cmc, the MCP `openapi`
+/// format) get exactly the document they got before. To emit **real** schema
+/// definitions, supply a registry via [`generate_openapi_with_schemas`].
 pub fn generate_openapi(
     title: &str,
     version: &str,
     endpoints: &[ApiEndpoint],
+) -> Value {
+    generate_openapi_with_schemas(title, version, endpoints, &BTreeMap::new())
+}
+
+/// Emit an OpenAPI 3.1 document, resolving `Ref { name }` against `defs`
+/// (a `name -> ApiSchema` registry, e.g. from [`crate::discover::discover_schemas`]).
+///
+/// Resolution is a transitive closure: a definition that itself references
+/// another schema pulls that one in too (e.g. an `Order` whose `items` are
+/// `Ref("LineItem")` causes `LineItem` to be emitted). Any ref with no entry in
+/// `defs` falls back to a permissive `{}` stub so the document stays valid
+/// rather than dangling.
+pub fn generate_openapi_with_schemas(
+    title: &str,
+    version: &str,
+    endpoints: &[ApiEndpoint],
+    defs: &BTreeMap<String, ApiSchema>,
 ) -> Value {
     let mut paths = Map::new();
     for ep in endpoints {
@@ -36,24 +60,51 @@ pub fn generate_openapi(
         pe_obj.insert(mk.into(), build_operation(ep));
     }
 
-    let mut refs = BTreeSet::new();
-    for ep in endpoints {
-        for p in &ep.parameters {
-            collect_refs(&p.schema, &mut refs);
-        }
-        if let Some(body) = &ep.request_body {
-            collect_refs(body, &mut refs);
-        }
-        for r in &ep.responses {
-            if let Some(s) = &r.schema {
-                collect_refs(s, &mut refs);
+    // Seed the worklist with every ref reachable from the endpoint surface.
+    let mut queue: Vec<String> = Vec::new();
+    {
+        let mut seed = BTreeSet::new();
+        for ep in endpoints {
+            for p in &ep.parameters {
+                collect_refs(&p.schema, &mut seed);
+            }
+            if let Some(body) = &ep.request_body {
+                collect_refs(body, &mut seed);
+            }
+            for r in &ep.responses {
+                if let Some(s) = &r.schema {
+                    collect_refs(s, &mut seed);
+                }
             }
         }
+        queue.extend(seed);
     }
+
+    // Transitive closure: resolve each name against `defs`, lowering its real
+    // definition and queueing any nested refs it introduces.
     let mut components_schemas = Map::new();
-    for name in &refs {
-        // Stub: empty object schema. v0.13 will populate real definitions.
-        components_schemas.insert(name.clone(), json!({}));
+    let mut done = BTreeSet::new();
+    while let Some(name) = queue.pop() {
+        if !done.insert(name.clone()) {
+            continue;
+        }
+        match defs.get(&name) {
+            Some(def) => {
+                components_schemas.insert(name.clone(), schema_to_json_schema(def));
+                let mut nested = BTreeSet::new();
+                collect_refs(def, &mut nested);
+                for r in nested {
+                    if !done.contains(&r) {
+                        queue.push(r);
+                    }
+                }
+            }
+            None => {
+                // No definition supplied — keep the v0.12 permissive stub so the
+                // $ref still resolves to a (vacuous) schema instead of dangling.
+                components_schemas.insert(name.clone(), json!({}));
+            }
+        }
     }
 
     let mut doc = json!({
@@ -221,7 +272,7 @@ fn collect_refs(s: &ApiSchema, out: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discover::discover_endpoints;
+    use crate::discover::{discover_endpoints, discover_schemas};
 
     fn ci(name: &str) -> flux_graph::CrateInfo {
         flux_graph::CrateInfo {
@@ -335,5 +386,75 @@ mod tests {
         let s = serde_json::to_string(&doc).expect("serialize");
         let v: Value = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(v["openapi"], "3.1.0");
+    }
+
+    #[test]
+    fn plain_emitter_still_stubs_refs() {
+        // Back-compat: with no registry, every ref is the permissive `{}` stub.
+        let g = ws(&["wickes-cms"]);
+        let doc = generate_openapi("Wickes", "1.0", &discover_endpoints(&g));
+        assert_eq!(doc["components"]["schemas"]["Page"], json!({}));
+    }
+
+    #[test]
+    fn with_schemas_emits_real_definition() {
+        let g = ws(&["wickes-cms"]);
+        let doc = generate_openapi_with_schemas(
+            "Wickes",
+            "1.0",
+            &discover_endpoints(&g),
+            &discover_schemas(&g),
+        );
+        let page = &doc["components"]["schemas"]["Page"];
+        assert_eq!(page["type"], "object", "Page should be a real object schema: {doc}");
+        assert_eq!(page["properties"]["id"]["type"], "string");
+        assert_eq!(page["properties"]["id"]["format"], "uuid");
+        assert_eq!(page["required"], json!(["id", "title"]));
+        // The enum field lowered its allowed values.
+        let status = &page["properties"]["status"];
+        assert_eq!(status["type"], "string");
+        assert!(status["enum"].as_array().unwrap().iter().any(|v| v == "published"));
+        // Nullable body lowered to oneOf[…, null].
+        assert!(page["properties"]["body"]["oneOf"].is_array());
+    }
+
+    #[test]
+    fn with_schemas_resolves_transitive_refs() {
+        // Order.items is an array of Ref("LineItem") — LineItem must be pulled
+        // into components even though no endpoint references it directly.
+        let g = ws(&["wickes-erp"]);
+        let doc = generate_openapi_with_schemas(
+            "ERP",
+            "1.0",
+            &discover_endpoints(&g),
+            &discover_schemas(&g),
+        );
+        let schemas = doc["components"]["schemas"].as_object().unwrap();
+        assert!(schemas.contains_key("Order"), "Order missing: {doc}");
+        assert!(schemas.contains_key("LineItem"), "transitive LineItem missing: {doc}");
+        assert_eq!(
+            doc["components"]["schemas"]["Order"]["properties"]["items"]["items"]["$ref"],
+            "#/components/schemas/LineItem"
+        );
+        assert_eq!(doc["components"]["schemas"]["LineItem"]["type"], "object");
+    }
+
+    #[test]
+    fn with_schemas_falls_back_to_stub_for_unknown_ref() {
+        // A ref the registry doesn't define still resolves to a `{}` stub.
+        let eps = vec![ApiEndpoint {
+            crate_name: "x".into(),
+            method: HttpMethod::POST,
+            path: "/x".into(),
+            operation_id: "x".into(),
+            summary: "".into(),
+            parameters: vec![],
+            request_body: Some(ApiSchema::ref_to("Mystery")),
+            responses: vec![],
+            tags: vec!["x".into()],
+            middleware: None,
+        }];
+        let doc = generate_openapi_with_schemas("X", "1.0", &eps, &std::collections::BTreeMap::new());
+        assert_eq!(doc["components"]["schemas"]["Mystery"], json!({}));
     }
 }

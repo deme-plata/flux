@@ -356,6 +356,27 @@ pub fn partition_nonce_space(total: u64, weights: &[u32]) -> Vec<(u64, u64)> {
     out
 }
 
+/// Verify a set of `(start, len)` ranges EXACTLY tiles `[0, total)`:
+/// contiguous, no gaps, no overlap, full coverage. A runtime safety check the
+/// supercluster scheduler runs before trusting a partition — especially one
+/// assembled from heterogeneous per-node weights. If this returns `false`,
+/// some nonces would be searched twice (overlap) or never (gap), so the round
+/// is unsound and should be rejected rather than silently mis-mined.
+/// Overflow-safe (checked addition), so a malformed huge `len` can't wrap.
+pub fn partition_covers(parts: &[(u64, u64)], total: u64) -> bool {
+    let mut cursor = 0u64;
+    for &(start, len) in parts {
+        if start != cursor {
+            return false; // gap or overlap with the previous range
+        }
+        cursor = match cursor.checked_add(len) {
+            Some(c) => c,
+            None => return false, // len overflowed the space
+        };
+    }
+    cursor == total
+}
+
 /// Interleaved (strided) nonce assignment: node `node_index` of `num_nodes`
 /// searches nonces `node_index, node_index + num_nodes, node_index + 2*num_nodes, …`.
 /// Returns `(offset, stride)` to drive a `(offset..).step_by(stride)` walk, or
@@ -467,6 +488,24 @@ mod tests {
         let total: u64 = parts.iter().map(|(_, l)| l).sum();
         assert_eq!(total, 100);
         assert_eq!(parts.last().unwrap().1, 34);
+    }
+
+    #[test]
+    fn test_partition_covers_validates_tiling() {
+        // A real partition tiles correctly.
+        assert!(partition_covers(&partition_nonce_space(1000, &[1, 1, 2]), 1000));
+        assert!(partition_covers(&partition_nonce_space(100, &[1, 1, 1]), 100));
+        // Gap: ranges don't start where the previous ended.
+        assert!(!partition_covers(&[(0, 100), (200, 100)], 300));
+        // Overlap: second range starts before the first ended.
+        assert!(!partition_covers(&[(0, 100), (50, 100)], 150));
+        // Short coverage: sum of lens < total.
+        assert!(!partition_covers(&[(0, 100)], 200));
+        // Empty parts: covers only total==0.
+        assert!(partition_covers(&[], 0));
+        assert!(!partition_covers(&[], 5));
+        // Overflow guard: a wrapping len is rejected, not accepted.
+        assert!(!partition_covers(&[(0, u64::MAX), (0, 1)], 0));
     }
 
     #[test]

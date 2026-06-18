@@ -670,12 +670,12 @@ mod tests {
         sap.insert("peer-a".into(), 0.8);
         sap.insert("peer-b".into(), 0.6);
 
-        let mh = super::super::MeshHealth {
+        let mh = super::MeshHealth {
             connected_peers: 2,
             quality: "warming".into(),
             ..Default::default()
         };
-        let bc = super::super::swarm::BatchConfig::default();
+        let bc = super::swarm::BatchConfig::default();
 
         let metrics = collect_metrics(2, &sap, &mh, &bc, 500.0, std::collections::HashMap::new());
         assert_eq!(metrics.sap.peer_count, 2);

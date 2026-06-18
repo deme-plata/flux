@@ -13,6 +13,7 @@
 //   casing      — private case helpers shared by SDK generators
 
 mod casing;
+mod codegen;
 pub mod discover;
 pub mod event_types;
 pub mod openapi;
@@ -30,7 +31,7 @@ pub mod sdk_ts;
 pub mod webhook_sdk;
 
 pub use discover::{
-    discover_endpoints, discover_endpoints_static, ApiEndpointDescriptor,
+    discover_endpoints, discover_endpoints_static, discover_schemas, ApiEndpointDescriptor,
 };
 
 /// Re-export `inventory` so `flux_api_macros::api` can emit
@@ -47,7 +48,7 @@ pub use event_types::{
     EventVariant,
 };
 pub use webhook_sdk::{generate_python_webhook_handler, generate_ts_webhook_handler};
-pub use openapi::generate_openapi;
+pub use openapi::{generate_openapi, generate_openapi_with_schemas};
 pub use schema::{
     ApiEndpoint, ApiParameter, ApiResponse, ApiSchema, HttpMethod, ParamLocation,
 };
@@ -58,11 +59,11 @@ pub use middleware::{
 };
 pub use publish::{plan_publish, publish_dry_run, Language, PublishPlan, SdkBundle};
 pub use sdk_chrome::{generate_chrome_extension, ChromeExtensionBundle};
-pub use sdk_go::generate_go_sdk;
-pub use sdk_kotlin::generate_kotlin_sdk;
-pub use sdk_python::generate_python_sdk;
-pub use sdk_rust::generate_rust_client_sdk;
-pub use sdk_ts::generate_typescript_sdk;
+pub use sdk_go::{generate_go_sdk, generate_go_sdk_with_types};
+pub use sdk_kotlin::{generate_kotlin_sdk, generate_kotlin_sdk_with_types};
+pub use sdk_python::{generate_python_sdk, generate_python_sdk_with_types};
+pub use sdk_rust::{generate_rust_client_sdk, generate_rust_client_sdk_with_types};
+pub use sdk_ts::{generate_typescript_sdk, generate_typescript_sdk_with_types};
 
 #[cfg(test)]
 mod tests {

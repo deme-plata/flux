@@ -1161,6 +1161,11 @@ fn execute_tool(name: &str, args: &Value) -> String {
             if release { cmd.arg("--release"); }
             cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap());
             cmd.env("FLUXC_WRAPPING", "1");
+            // Ensure probe `... -vV` (used by cargo to discover host) can forward to a real rustc.
+            // Without REAL_RUSTC the early guard in main.rs falls back to "rustc" which can fail
+            // in restricted PATHs or during self-build probe, causing "didn't have a line for `host:`".
+            let real = std::env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
+            cmd.env("REAL_RUSTC", &real);
             
             match cmd.status() {
                 Ok(s) if s.success() => {

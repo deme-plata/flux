@@ -185,7 +185,11 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     };
 
     let total_ms = start.elapsed().as_millis() as u64;
-    let warm = total_ms < 10_000;
+    // `warm` must mean "a real, green combo finished fast" — NOT "it failed fast".
+    // Without the compile_ok/failed gate, a RED combo that errors out in <10s (e.g. the
+    // cargo rustc-probe failure in a fresh CARGO_TARGET_DIR, which runs 0 tests) would
+    // falsely read warm:true. Require GREEN.
+    let warm = total_ms < 10_000 && compile_ok && failed == 0;
 
     let next_action = if !compile_ok {
         "fix_first_error".to_string()

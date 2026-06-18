@@ -620,6 +620,38 @@ pub fn wrapper_mode(args: &[String]) {
     let rustc_path = if args.len() > 1 { &args[1] } else { "rustc" };
     let rustc_args: Vec<String> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
 
+    // PROBE PASS-THROUGH (fix: combo failed in fresh CARGO_TARGET_DIR).
+    // Cargo invokes the wrapper for NON-compilation probes to learn the toolchain:
+    //   `rustc - --print=sysroot --print=cfg ...`  (target-info / sysroot / cfg)
+    //   `rustc -vV` / `--version`
+    // These write stdout that cargo parses. They must NEVER hit the content cache:
+    // caching a probe means a later cache HIT returns via apply_cached_outputs WITHOUT
+    // emitting the --print output, and cargo dies with "failed to run `rustc` to learn
+    // about target-specific information" (exactly the `fluxc combo` failure on a cold/
+    // isolated target). A real compile always has a positional `.rs` source; a probe
+    // never does. So: no `.rs` source, or any `--print`/version flag ⇒ exec real rustc
+    // straight through, no lookup, no store.
+    let has_rs_src = rustc_args
+        .iter()
+        .any(|a| a.ends_with(".rs") && !a.starts_with("--"));
+    let is_probe = !has_rs_src
+        || rustc_args
+            .iter()
+            .any(|a| a == "--print" || a.starts_with("--print=") || a == "-vV" || a == "-V" || a == "--version");
+    if is_probe {
+        let mut cmd = Command::new(rustc_path);
+        for a in &rustc_args {
+            cmd.arg(a);
+        }
+        match cmd.status() {
+            Ok(s) => process::exit(s.code().unwrap_or(0)),
+            Err(e) => {
+                eprintln!("fluxc wrapper: probe passthrough to '{}' failed: {}", rustc_path, e);
+                process::exit(1);
+            }
+        }
+    }
+
     // Locate the source file rustc was invoked on (positional .rs argument).
     let src_file = rustc_args.iter()
         .find(|a| a.ends_with(".rs") && !a.starts_with("--"))

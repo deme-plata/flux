@@ -670,12 +670,15 @@ mod tests {
         sap.insert("peer-a".into(), 0.8);
         sap.insert("peer-b".into(), 0.6);
 
-        let mh = super::MeshHealth {
+        // `super::*` here is the cortex_optimizer module; MeshHealth + swarm live at
+        // the crate root, so address them as `crate::` (not `super::`, which resolves
+        // to cortex_optimizer from inside this nested test module → E0422).
+        let mh = crate::MeshHealth {
             connected_peers: 2,
             quality: "warming".into(),
             ..Default::default()
         };
-        let bc = super::swarm::BatchConfig::default();
+        let bc = crate::swarm::BatchConfig::default();
 
         let metrics = collect_metrics(2, &sap, &mh, &bc, 500.0, std::collections::HashMap::new());
         assert_eq!(metrics.sap.peer_count, 2);

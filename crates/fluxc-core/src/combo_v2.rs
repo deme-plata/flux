@@ -152,19 +152,23 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     let wbc_key = crate::warm_bin_cache::crate_key(&ws_root, &pkg);
     let cache_hit = crate::warm_bin_cache::restore(&ws_root, &pkg, &wbc_key);
 
-    // THE cmd leg: spawn `fluxc test -p` (or check) — this is the dogfood path used by CLI users
-    // and gives <10-20s warm numbers (avoids wrapper-binary exec tax on meta probes that plain "cargo"
-    // +RUSTC_WRAPPER pays on every cargo test invocation). The wrapper caching is active in the
-    // broader system whenever cargo is invoked with RUSTC_WRAPPER set (e.g. by supersonic MCP or builds).
+    // THE cmd leg: direct `cargo test -p PKG` (default features only) with wrapper envs.
+    // This ensures strict scoping to the requested package's default dep tree (no --all-features,
+    // no --workspace, no accidental optional deps like flux-p2p for flux-swarm-secret).
+    // Matches the proven fast GREEN primitive exactly. Wrapper + mold + cache active via envs.
     // cargo test already typechecks; parallel predict overlaps.
     let cmd_start = Instant::now();
-    let mut cmd = std::process::Command::new(&flux_exe);
+    let mut cmd = std::process::Command::new("cargo");
     if likely_red {
-        cmd.args(["check", "-p", &pkg]);
+        cmd.arg("check");
     } else {
-        cmd.args(["test", "-p", &pkg]);
+        cmd.arg("test");
     }
+    cmd.args(["-p", &pkg]);
     if release { cmd.arg("--release"); }
+    cmd.env("RUSTC_WRAPPER", &flux_exe);
+    cmd.env("FLUXC_WRAPPING", "1");
+    cmd.env("REAL_RUSTC", &real_rustc);
     let out = cmd.output();
     let cmd_ms = cmd_start.elapsed().as_millis() as u64;
 

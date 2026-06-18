@@ -33,7 +33,7 @@ use swarm::{FluxSwarmManager, FluxSwarmConfig, TransportMode, PeerInfo};
 pub use swarm::SwarmAppEvent;
 
 /// Re-export SIGIL block topic helpers for sigil-top integration.
-pub use swarm::{sigil_topic, SIGIL_G0_BLOCKS_TOPIC};
+pub use swarm::{sigil_topic, SIGIL_G0_BLOCKS_TOPIC, COMBO_AFFINITY_TOPIC};
 
 /// Default bootstrap peers — always configured for out-of-the-box P2P.
 /// Delta (5.79.79.158) and Epsilon (89.149.241.126) are the core mesh.
@@ -668,6 +668,12 @@ impl NetworkManager {
         }
     }
 
+    /// Publish combo profile (from a recent supersonic combo run) for affinity.
+    /// Nodes call this after `flux_combo_supersonic` to let the mesh know their speed.
+    pub fn publish_combo_profile(&self, crate_name: &str, predicted_ms: f64, confidence: f64) -> Result<(), String> {
+        self.publish(super::swarm::COMBO_AFFINITY_TOPIC, format!(r#"{{"crate":"{}","predicted_ms":{},"confidence":{}}}"#, crate_name, predicted_ms, confidence).into_bytes())
+    }
+
     /// v0.7.0: Publish a compile request to the fleet. Build nodes subscribed
     /// to /flux/1/compile-request pick it up, compile the package, and publish
     /// results to /flux/1/compile-result with the same request_id.
@@ -1009,6 +1015,7 @@ impl NetworkManager {
             &mesh,
             &swarm::BatchConfig::default(),
             100.0,
+            std::collections::HashMap::new(),  // combo_profiles fed from live combos
         );
 
         // Run the optimizer

@@ -42,6 +42,11 @@ pub struct P2PMetrics {
     pub batch: BatchMetrics,
     /// Compile distribution history
     pub compile: CompileMetrics,
+    /// Combo prediction profiles for affinity (peer_id -> predicted build time ms for typical tasks)
+    /// Populated from supersonic combo runs on peers; lower = faster for compile routing.
+    /// This is the invention: "Supersonic Combo Affinity" — P2P uses live combo predictions
+    /// (from flux_combo_supersonic) to route tasks to the peers that will finish fastest.
+    pub combo_profiles: HashMap<String, f64>,
     /// Timestamp of this observation
     pub observed_at_ms: u64,
 }
@@ -447,10 +452,16 @@ impl CortexP2POptimizer {
             .round() as u32;
         let recommended_fan = (predicted_peers as f64).sqrt().round() as u32;
 
-        // Preferred compile nodes: sort by inverse load
+        // Preferred compile nodes: sort by (load + combo_penalty).
+        // Invention: "Supersonic Combo Affinity Routing" — peers that report low
+        // predicted_ms from running flux_combo_supersonic get priority for tasks.
+        // This makes the P2P mesh "combo-aware": fast combo nodes win routes.
         let mut nodes: Vec<(String, f64)> = current.compile.node_loads
             .iter()
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| {
+                let combo_pen = current.combo_profiles.get(k).copied().unwrap_or(500.0);
+                (k.clone(), *v + combo_pen / 100.0)  // combo time as additive penalty
+            })
             .collect();
         nodes.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let preferred: Vec<String> = nodes.into_iter().map(|(k, _)| k).collect();
@@ -519,6 +530,7 @@ pub fn collect_metrics(
     mesh_health: &super::MeshHealth,
     batch_config: &super::swarm::BatchConfig,
     msg_rate: f64,
+    combo_profiles: HashMap<String, f64>,
 ) -> P2PMetrics {
     let sap_vals: Vec<f64> = sap_scores.values().copied().collect();
     let sap_avg = if sap_vals.is_empty() {
@@ -587,6 +599,7 @@ pub fn collect_metrics(
             avg_latency_ms: 0.0,
             node_loads: HashMap::new(),
         },
+        combo_profiles,
         observed_at_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -664,7 +677,7 @@ mod tests {
         };
         let bc = super::super::swarm::BatchConfig::default();
 
-        let metrics = collect_metrics(2, &sap, &mh, &bc, 500.0);
+        let metrics = collect_metrics(2, &sap, &mh, &bc, 500.0, std::collections::HashMap::new());
         assert_eq!(metrics.sap.peer_count, 2);
         assert!((metrics.sap.avg_score - 0.7).abs() < 0.01);
         assert_eq!(metrics.batch.max_batch_size, 64);

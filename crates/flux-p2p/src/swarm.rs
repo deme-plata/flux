@@ -36,6 +36,13 @@ use libp2p::futures::StreamExt;
 /// domain-agnostic; the application defines block types and encodes to bytes.
 pub const BACKFILL_PROTOCOL: &str = "/sigil/backfill/1";
 
+/// Gossip topic for combo affinity profiles.
+/// Nodes publish after running supersonic combos: {crate, predicted_ms, confidence}.
+/// Receivers feed into Cortex for combo-aware compile routing.
+/// Invention: "Supersonic Combo Affinity" — P2P mesh uses live combo predictions
+/// (produced by flux_combo_supersonic) to route tasks to the fastest predicted peers.
+pub const COMBO_AFFINITY_TOPIC: &str = "/flux/combo-affinity/v1";
+
 /// Max request-response payload (request OR response), in bytes. 64 MiB — far above
 /// the built-in cbor codec's hardcoded 10 MiB response cap, so backfill can ship big
 /// block-range chunks point-to-point.
@@ -340,6 +347,15 @@ pub enum SwarmAppEvent {
         request_id: u64,
         payload: Vec<u8>,
     },
+    /// Combo profile received via gossip (from publish_combo_profile after a supersonic run).
+    /// Higher layers feed `crate`, `predicted_ms`, `confidence` into Cortex metrics
+    /// for affinity routing.
+    ComboProfile {
+        from: PeerId,
+        crate_name: String,
+        predicted_ms: f64,
+        confidence: f64,
+    },
     /// v0.7.0: Block sync progress update — fired when a block sync operation
     /// makes progress. Sigil-top consumes this to drive the TUI sync gauge.
     SyncProgress {
@@ -603,6 +619,21 @@ impl FluxSwarmManager {
         Ok(())
     }
 
+    /// Publish a combo profile after running a supersonic combo.
+    /// This is the key hook for the invention: after `flux_combo_supersonic`,
+    /// the node calls this to advertise its speed to the mesh for affinity routing.
+    pub fn publish_combo_profile(&mut self, crate_name: &str, predicted_ms: f64, confidence: f64) -> Result<(), String> {
+        if !self.started {
+            return Err("Swarm not started".into());
+        }
+        let profile = format!(r#"{{"crate":"{}","predicted_ms":{},"confidence":{}}}"#, crate_name, predicted_ms, confidence);
+        // Ensure subscribed (higher layer should have done, but safe)
+        if !self.topics.contains(&COMBO_AFFINITY_TOPIC.to_string()) {
+            let _ = self.subscribe(COMBO_AFFINITY_TOPIC);
+        }
+        self.publish(COMBO_AFFINITY_TOPIC, profile.into_bytes())
+    }
+
     /// Publish a message only to top-N entangled peers (based on linking number / Jaccard).
     /// Falls back to normal publish if no entangled peers are known.
     pub fn entangled_publish(&mut self, topic: &str, data: Vec<u8>, n: usize) -> Result<usize, String> {
@@ -800,6 +831,26 @@ impl FluxSwarmManager {
                     self.entanglement.feed_block(&from_str, &[tx_hash], false);
                     // Forward to application via event channel
                     if let Some(ref rx) = self.event_rx {
+                        if message.topic == COMBO_AFFINITY_TOPIC {
+                            // Parse and emit specialized event for combo affinity (invention hook)
+                            if let Ok(s) = std::str::from_utf8(&message.data) {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                                    if let (Some(crate_name), Some(pred), Some(conf)) = (
+                                        v.get("crate").and_then(|x| x.as_str()),
+                                        v.get("predicted_ms").and_then(|x| x.as_f64()),
+                                        v.get("confidence").and_then(|x| x.as_f64()),
+                                    ) {
+                                        rx.write().push(SwarmAppEvent::ComboProfile {
+                                            from,
+                                            crate_name: crate_name.to_string(),
+                                            predicted_ms: pred,
+                                            confidence: conf,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         rx.write().push(SwarmAppEvent::GossipsubMessage {
                             topic: message.topic.to_string(),
                             from,

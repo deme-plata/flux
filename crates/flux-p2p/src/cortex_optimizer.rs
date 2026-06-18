@@ -656,6 +656,7 @@ mod tests {
                 time_limited_flushes: 5,
             },
             compile: CompileMetrics::default(),
+            combo_profiles: HashMap::new(),
             observed_at_ms: 0,
         };
         let result = opt.fallback_result(&metrics);

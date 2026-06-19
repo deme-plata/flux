@@ -53,6 +53,18 @@ fn build_registry() -> ToolRegistry {
 /// Run the MCP stdio server loop.
 pub fn run_mcp_server() {
     let registry = build_registry();
+    // Hydrate the in-memory stats atomics from the disk-backed store at boot. Without
+    // this the MCP server always started at 0, so flux_stats / flux_health_report read
+    // "Builds: 0, Cache 0/0" even when the CLI (which reads disk) showed full all-time
+    // history. Now the MCP surface and the CLI agree from the first call.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ps = fluxc_core::load_persistent_stats();
+        fluxc_core::BUILD_COUNT.store(ps.total_builds, Relaxed);
+        fluxc_core::CACHE_HITS.store(ps.total_cache_hits, Relaxed);
+        fluxc_core::CACHE_MISSES.store(ps.total_cache_misses, Relaxed);
+        fluxc_core::TOTAL_BUILD_TIME_MS.store(ps.total_build_time_ms, Relaxed);
+    }
     let tool_count = registry.tools_schema().len();
     let version_str = format!("v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("⚡ Flux MCP Server {} — stdio transport (modular registry)", version_str);

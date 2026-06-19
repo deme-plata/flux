@@ -1,6 +1,6 @@
 [package]
 name = "flux-swarm-secret"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Real PQ-hybrid-ready sealed-envelope encryption for the Flux swarm bus (X25519 + BLAKE3-KDF + ChaCha20-Poly1305; forward-secret per message). The ML-KEM leg drops in via a REAL pqcrypto crate — NOT the flux-kyberkem stub, which returns all-zero shared secrets."
 

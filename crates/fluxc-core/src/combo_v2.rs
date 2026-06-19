@@ -189,6 +189,22 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     };
 
     let total_ms = start.elapsed().as_millis() as u64;
+
+    // Record this combo into the in-memory atomics + disk-backed store, mirroring the
+    // CLI's detect_and_build(). Previously run_combo (the MCP/CLI combo path) never
+    // touched BUILD_COUNT / CACHE_* / persist_build, so a successful flux_combo left
+    // flux_stats reading 0. cache_hit = the warm_bin_cache restore landed (combo-level
+    // cache hit); count it as the build's hit/miss so the rate is no longer a dead 0/N.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (h, m) = if cache_hit { (1u64, 0u64) } else { (0u64, 1u64) };
+        crate::CACHE_HITS.fetch_add(h, Relaxed);
+        crate::CACHE_MISSES.fetch_add(m, Relaxed);
+        crate::BUILD_COUNT.fetch_add(1, Relaxed);
+        crate::TOTAL_BUILD_TIME_MS.fetch_add(total_ms, Relaxed);
+        crate::persist_build(h, m, total_ms);
+    }
+
     // `warm` must mean "a real, green combo finished fast" — NOT "it failed fast".
     // Without the compile_ok/failed gate, a RED combo that errors out in <10s (e.g. the
     // cargo rustc-probe failure in a fresh CARGO_TARGET_DIR, which runs 0 tests) would

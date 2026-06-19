@@ -115,9 +115,13 @@ fn flux_stats(_args: &Value) -> String {
 
     let project_type = fluxc_core::detect_project();
 
+    let (cu_hits, cu_misses) = fluxc_core::cache_event_counts();
+    let cu_total = cu_hits + cu_misses;
+    let cu_rate = if cu_total > 0 { (cu_hits as f64 / cu_total as f64) * 100.0 } else { 0.0 };
+
     format!(
-        "⚡ Flux Statistics\n  Project: {:?}\n  Builds: {}\n  Cache: {}/{} ({:.1}%)\n  Avg time: {}ms\n  Total time: {}ms",
-        project_type, builds, hits, total, rate, avg_time, total_time
+        "⚡ Flux Statistics\n  Project: {:?}\n  Builds: {}\n  Cache: {}/{} ({:.1}%)\n  Compile cache: {}/{} units ({:.1}%)\n  Avg time: {}ms\n  Total time: {}ms",
+        project_type, builds, hits, total, rate, cu_hits, cu_total, cu_rate, avg_time, total_time
     )
 }
 

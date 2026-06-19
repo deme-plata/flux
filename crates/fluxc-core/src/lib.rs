@@ -133,6 +133,42 @@ pub fn persist_build(hits: u64, misses: u64, build_time_ms: u64) {
     save_persistent_stats(&s);
 }
 
+// ── Compilation-unit cache instrumentation (Hennessy & Patterson: measure the cache
+// at its true granularity). The content-addressed cache lives in `wrapper_mode`, which
+// cargo spawns as a short-lived `fluxc` subprocess PER rustc invocation — so it can't
+// share the in-memory CACHE_* atomics or report back. Before this, the only writer of
+// CACHE_HITS was the frontend path, so the Rust cache hit-rate was a permanently-dead
+// 0/N counter. Fix: each wrapper subprocess appends ONE byte per outcome to a hits/miss
+// file. A single-byte append is atomic well under PIPE_BUF, so N parallel wrappers race
+// cleanly and the file length == the event count. Build paths read the DELTA across a
+// build to get that build's real per-unit hit/miss. ──
+
+fn cache_events_path(hit: bool) -> PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let name = if hit { ".cache-unit-hits" } else { ".cache-unit-misses" };
+    PathBuf::from(home).join(".flux").join(name)
+}
+
+/// Record one compilation-unit cache outcome. Called from `wrapper_mode` (the rustc
+/// wrapper subprocess). Lock-free: a 1-byte O_APPEND is atomic across parallel writers.
+pub fn record_cache_event(hit: bool) {
+    use std::io::Write;
+    let path = cache_events_path(hit);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(b"\x01");
+    }
+}
+
+/// (hits, misses) compilation-unit cache events recorded so far (file length == count).
+pub fn cache_event_counts() -> (u64, u64) {
+    let h = std::fs::metadata(cache_events_path(true)).map(|m| m.len()).unwrap_or(0);
+    let m = std::fs::metadata(cache_events_path(false)).map(|m| m.len()).unwrap_or(0);
+    (h, m)
+}
+
 // ── Project Detection ──
 
 #[derive(Debug, PartialEq)]
@@ -177,6 +213,9 @@ pub fn effective_project_type(config: &BuildConfig) -> ProjectType {
 pub fn detect_and_build(config: &BuildConfig, extra: &[String]) {
     let start = std::time::Instant::now();
     BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Snapshot the compilation-unit cache event counters so we can read this build's
+    // real per-unit hit/miss as the delta below (the wrapper subprocesses append to them).
+    let (ch0, cm0) = cache_event_counts();
 
     // `--distributed` (and `--release`/`--package`) may arrive as SUBCOMMAND flags in
     // `extra` (e.g. `fluxc build --distributed --package X`), which otherwise get passed
@@ -254,8 +293,14 @@ pub fn detect_and_build(config: &BuildConfig, extra: &[String]) {
     TOTAL_BUILD_TIME_MS.fetch_add(elapsed_ms, Ordering::Relaxed);
     println!("  ⏱ Build time: {}ms", elapsed_ms);
 
-    let hits = CACHE_HITS.load(Ordering::Relaxed);
-    let misses = CACHE_MISSES.load(Ordering::Relaxed);
+    // Real cache outcome for THIS build = delta of the wrapper's per-unit counters.
+    // (Before: this read CACHE_HITS, which only the frontend path ever bumped, so every
+    // Rust build persisted 0/0 → the permanently-dead "0/N" all-time cache rate.)
+    let (ch1, cm1) = cache_event_counts();
+    let hits = ch1.saturating_sub(ch0);
+    let misses = cm1.saturating_sub(cm0);
+    CACHE_HITS.fetch_add(hits, Ordering::Relaxed);
+    CACHE_MISSES.fetch_add(misses, Ordering::Relaxed);
     persist_build(hits, misses, elapsed_ms);
 }
 
@@ -476,6 +521,11 @@ pub fn print_stats() {
     println!("  Sessions:        {}", ps.sessions);
     println!("  Total build time: {}ms (session) / {}ms (all-time)", total_time, ps.total_build_time_ms);
 
+    let (cu_hits, cu_misses) = cache_event_counts();
+    let cu_total = cu_hits + cu_misses;
+    let cu_rate = if cu_total > 0 { (cu_hits as f64 / cu_total as f64) * 100.0 } else { 0.0 };
+    println!("  Compile cache:   {}/{} units ({:.1}%)  [wrapper flux_cache, all-time]", cu_hits, cu_total, cu_rate);
+
     let cache_dir = PathBuf::from("target").join("flux-cache");
     if cache_dir.exists() {
         let size = dir_size(&cache_dir);
@@ -670,9 +720,13 @@ pub fn wrapper_mode(args: &[String]) {
     if !cache_key.is_empty() {
         if let Some(entry) = flux_cache::lookup(&cache_key) {
             if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
+                record_cache_event(true);
                 return;
             }
         }
+        // Cacheable unit (real .rs source, non-empty key) with no usable cached output:
+        // a genuine compilation-unit cache MISS. (Uncacheable probes returned earlier.)
+        record_cache_event(false);
     }
 
     // Cache miss — run real rustc.

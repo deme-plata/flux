@@ -28,7 +28,10 @@ pub mod cf;
 pub mod filter;
 pub mod merge;
 pub mod range_tomb;
+pub mod skeleton;
 pub mod ttl;
+
+pub use skeleton::{SkeletonRecord, SkeletonStore};
 
 const SST_MAGIC: [u8; 4] = *b"FXDB";
 /// SST version. v1 = monolithic LZ4 blob (pre-v0.12). v2 = block-based
@@ -52,6 +55,14 @@ const DEFAULT_BLOCK_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LEVEL: u8 = 7;
 /// v0.15: number of L0 files allowed before we compact L0 into L1.
 const L0_COMPACT_THRESHOLD: usize = 4;
+/// v3 (LANE-C bulk-load): the L0 SST cap WHILE compaction is deferred. Fully skipping
+/// compaction for a multi-million-block sync lets L0 grow unbounded, and every `get()` /
+/// `has_height()` (the per-block linkage check) scans newest-to-oldest SSTs — so an
+/// unbounded pile silently degrades the sync's own read path into a feedback stall (flagged
+/// by the DeepSeek review). Bounding L0 at this (much higher than the eager `4`) cap keeps
+/// the point-lookup fan-out sane while still cutting compaction frequency ~8×: the storm is
+/// amortized, not eliminated, and the read path can't run away.
+const BULK_L0_COMPACT_THRESHOLD: usize = 32;
 /// v0.15: size pyramid factor — Li+1 target is `LEVEL_SIZE_RATIO ×` Li.
 /// Smaller than RocksDB's default 10 to keep the test corpus snappy.
 const LEVEL_SIZE_RATIO: usize = 4;
@@ -89,6 +100,14 @@ pub struct Database {
     /// eager open that meant re-reading the entire store from disk on every
     /// lookup. Pruned against the live SST list after compaction.
     sst_readers: Arc<RwLock<std::collections::HashMap<PathBuf, Arc<SstReader>>>>,
+    /// v3 (LANE-C, the 285µs/block fix): cached SST path list. `get()`/`iter*()` previously
+    /// called `list_ssts()` — an `fs::read_dir` syscall + per-file name-parse — on EVERY
+    /// memtable miss. During a forward chain sync every lookup is a guaranteed miss (brand-new
+    /// keys), so the commit path paid ~2-3 `read_dir`s PER BLOCK (~285µs, batch- and fsync-
+    /// independent — the real >20k wall). SSTs change ONLY on `flush()` (adds L0) and `compact()`
+    /// (adds+removes); both invalidate this cache; between them the set is immutable, so caching
+    /// is sound and negative lookups become O(bloom) with ZERO syscalls. Shared across clones.
+    sst_paths: Arc<RwLock<Option<Vec<PathBuf>>>>,
 }
 
 struct DbInner {
@@ -110,6 +129,14 @@ struct DbInner {
     merge_op: RwLock<Option<Arc<dyn merge::MergeOperator>>>,
     /// v0.16: optional compaction filter.
     compaction_filter: RwLock<Option<Arc<dyn filter::CompactionFilter>>>,
+    /// v3 (LANE-C bulk-load): when true, `flush()` persists the memtable to an SST
+    /// but SKIPS the synchronous post-flush `compact()` call. A forward chain sync is
+    /// append-mostly (unique hash/height keys, ~zero overwrites), so leveled compaction
+    /// during the sync is almost pure write-amplification (full-level rewrite, ratio 4
+    /// per level → 10-20× the ingest bytes) — the real >20k-blk/s wall, NOT fsync.
+    /// Defer it: ingest fast into many L0 SSTs, then `compact()` ONCE at the tip.
+    /// Default false (unchanged behavior for every existing caller).
+    defer_compaction: bool,
 }
 
 /// Snapshot of the database at a point in time (MVCC read).
@@ -277,11 +304,13 @@ impl Database {
                 range_tombs: Vec::new(),
                 merge_op: RwLock::new(None),
                 compaction_filter: RwLock::new(None),
+                defer_compaction: false,
             })),
             path: path.clone(),
             block_cache: Arc::new(cache::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES)),
             cfs: Arc::new(cf::CfRegistry::new(path)),
             sst_readers: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            sst_paths: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -298,6 +327,7 @@ impl Database {
             block_cache: Arc::new(cache::BlockCache::new(bytes)),
             cfs: self.cfs,
             sst_readers: self.sst_readers,
+            sst_paths: self.sst_paths,
         }
     }
 
@@ -314,6 +344,49 @@ impl Database {
     pub fn with_max_wal_bytes(self, bytes: u64) -> Self {
         self.inner.write().max_wal_bytes = bytes;
         self
+    }
+
+    /// v3 (LANE-C): fsync ONLY the WAL — the cheap "one fsync per batch" durability
+    /// primitive. Unlike `flush()` (memtable.clone → lz4 → SST sync_all → WAL truncate →
+    /// maybe synchronous compaction), this just forces the already-appended WAL bytes
+    /// durable via `fdatasync`. After it returns, every `put`/`batch_put` issued before it
+    /// survives a power loss (open() replays the WAL into the memtable). This is what lets a
+    /// batched commit be durable WITHOUT paying the SST-flush + compaction-storm cost on the
+    /// hot path. `sync_data` (not `sync_all`): the WAL is a plain growing file with no
+    /// out-of-band metadata that crash recovery depends on (replay reads by content+CRC, not
+    /// by the inode-recorded length), so skipping the metadata flush is sound and ~2× cheaper.
+    /// Holds the READ lock for the fsync, which EXCLUDES any concurrent `put`/`batch_put`
+    /// (they take the write lock) — so no torn append can race the sync. fdatasync forcing
+    /// MORE than the caller's own bytes durable is harmless: durability is monotonic, and the
+    /// commit path's ordering invariant (blocks fsync'd before the tip) is already established
+    /// by the earlier phase-2 sync, independent of whatever else the fsync happens to flush.
+    /// (In sigil-top the BlockStore commit path is the SOLE writer — `&mut` — and BlockReader
+    /// is read-only, so there is in fact no concurrent writer at all.)
+    pub fn sync_wal(&self) -> Result<(), String> {
+        let inner = self.inner.read();
+        if let Some(w) = inner.wal_file.as_ref() {
+            w.sync_data().map_err(|e| format!("wal sync_data: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// v3 (LANE-C): runtime setter for the WAL auto-flush threshold (builder `with_max_wal_bytes`
+    /// only works at open time). Bulk-load raises this so the memtable grows larger and flushes
+    /// to SSTs far less often during a high-rate sync; restore it for steady-state operation.
+    pub fn set_max_wal_bytes(&self, bytes: u64) {
+        self.inner.write().max_wal_bytes = bytes;
+    }
+
+    /// v3 (LANE-C bulk-load): toggle deferred compaction (see `DbInner::defer_compaction`).
+    /// Set `true` before a high-rate sync so `flush()` never blocks the commit thread on a
+    /// full-level rewrite; set `false` and call `compact()` once when the sync reaches tip.
+    pub fn set_defer_compaction(&self, defer: bool) {
+        self.inner.write().defer_compaction = defer;
+    }
+
+    /// v3 (LANE-C): is post-flush compaction currently deferred?
+    pub fn is_compaction_deferred(&self) -> bool {
+        self.inner.read().defer_compaction
     }
 
     /// v0.36: if the WAL has outgrown `max_wal_bytes`, flush. MUST be called
@@ -351,6 +424,27 @@ impl Database {
         let r = Arc::new(SstReader::open(path)?);
         self.sst_readers.write().insert(path.to_path_buf(), Arc::clone(&r));
         Ok(r)
+    }
+
+    /// v3 (LANE-C): the SST path list, from cache when warm. A cache miss does ONE `list_ssts`
+    /// (`fs::read_dir` + name-parse) and memoizes it; subsequent reads (the hot negative-lookup
+    /// path during sync) cost only a read-lock + clone — no syscall. Invalidated by `flush()` /
+    /// `compact()`, the only operations that change the SST set. Returns oldest-first (the order
+    /// `list_ssts` returns), so callers that need newest-first still `.rev()` as before.
+    fn cached_sst_paths(&self) -> Result<Vec<PathBuf>, String> {
+        if let Some(paths) = self.sst_paths.read().as_ref() {
+            return Ok(paths.clone());
+        }
+        let paths = list_ssts(&self.path)?;
+        *self.sst_paths.write() = Some(paths.clone());
+        Ok(paths)
+    }
+
+    /// v3 (LANE-C): drop the cached SST path list so the next read re-enumerates. MUST be called
+    /// after any `flush()` (new L0 SST) or `compact()` (SSTs added+removed) — else a reader could
+    /// miss a freshly-flushed SST and wrongly return `None` for a key that IS on disk.
+    fn invalidate_sst_paths(&self) {
+        *self.sst_paths.write() = None;
     }
 
     /// Cache stats as (hits, misses, current_bytes). Useful for tests and
@@ -478,7 +572,7 @@ impl Database {
     pub fn iter_from(&self, start: &[u8]) -> DbIterator {
         // Build the merged view exactly as iter() does, then skip past start.
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        if let Ok(ssts) = list_ssts(&self.path) {
+        if let Ok(ssts) = self.cached_sst_paths() {
             for sst in &ssts {
                 if let Ok(table) = self.sst_cached(sst) {
                     for (k, v) in table.pairs() {
@@ -545,7 +639,8 @@ impl Database {
         // Read-through SSTs. Newest first (highest sequence number in filename).
         // v0.12: lookups consult the LRU block cache to avoid re-decompressing
         // the same blocks on hot keys.
-        let ssts = list_ssts(&self.path)?;
+        // v3 (LANE-C): cached SST list — no `read_dir` syscall on this (hot) miss path.
+        let ssts = self.cached_sst_paths()?;
         for sst in ssts.iter().rev() {
             // v0.35: cached reader (header+bloom resident, body lazy). A bloom miss
             // now costs zero disk reads; before this line the WHOLE file was read
@@ -738,6 +833,7 @@ impl Clone for Database {
             block_cache: Arc::clone(&self.block_cache),
             cfs: Arc::clone(&self.cfs),
             sst_readers: Arc::clone(&self.sst_readers),
+            sst_paths: Arc::clone(&self.sst_paths),
         }
     }
 }
@@ -1026,6 +1122,8 @@ impl Database {
         let mut f = fs::File::create(&sst_path).map_err(|e| format!("create sst: {}", e))?;
         f.write_all(&out).map_err(|e| format!("sst write: {}", e))?;
         f.sync_all().map_err(|e| format!("sst sync: {}", e))?;
+        // v3 (LANE-C): a new L0 SST now exists — drop the cached path list so readers see it.
+        self.invalidate_sst_paths();
 
         // Snapshot entries are now durable in the SST. Re-take the lock briefly
         // and remove only entries that have not changed since the snapshot. If no
@@ -1053,9 +1151,19 @@ impl Database {
         }
         drop(inner);
 
-        // Auto-compact if we've accumulated too many SSTs.
+        // Auto-compact if we've accumulated too many SSTs. In bulk-load (v3 LANE-C) the
+        // threshold is raised — NOT removed: the synchronous full-level rewrite is the
+        // throughput wall, but fully skipping it lets L0 grow unbounded and the per-block
+        // `has_height()` linkage check (a point lookup that scans every SST) degrades the
+        // sync's OWN read path. So we let L0 pile to BULK_L0_COMPACT_THRESHOLD (8× the eager
+        // cap) before one bounded compaction, then `compact_to_tip` folds the rest at the end.
+        let threshold = if self.inner.read().defer_compaction {
+            BULK_L0_COMPACT_THRESHOLD
+        } else {
+            AUTO_COMPACT_THRESHOLD
+        };
         let sst_count = list_ssts(&self.path)?.len();
-        if sst_count > AUTO_COMPACT_THRESHOLD {
+        if sst_count > threshold {
             self.compact()?;
         }
         Ok(())
@@ -1067,7 +1175,7 @@ impl Database {
     pub fn iter(&self) -> DbIterator {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         // Oldest-first so newer writes overwrite older ones.
-        if let Ok(ssts) = list_ssts(&self.path) {
+        if let Ok(ssts) = self.cached_sst_paths() {
             for sst in &ssts {
                 if let Ok(table) = self.sst_cached(sst) {
                     for (k, v) in table.pairs() {
@@ -1096,7 +1204,7 @@ impl Database {
     /// idiomatic call for "latest key" scans (turbo-sync's tip lookup).
     pub fn iter_rev(&self) -> DbIterator {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        if let Ok(ssts) = list_ssts(&self.path) {
+        if let Ok(ssts) = self.cached_sst_paths() {
             for sst in &ssts {
                 if let Ok(table) = self.sst_cached(sst) {
                     for (k, v) in table.pairs() {
@@ -1124,7 +1232,7 @@ impl Database {
     /// lookup, reorg-rollback walks, DagKnight round-descending scans.
     pub fn iter_from_back(&self, end: &[u8]) -> DbIterator {
         let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        if let Ok(ssts) = list_ssts(&self.path) {
+        if let Ok(ssts) = self.cached_sst_paths() {
             for sst in &ssts {
                 if let Ok(table) = self.sst_cached(sst) {
                     for (k, v) in table.pairs() {
@@ -1631,6 +1739,10 @@ impl Database {
             }
             fs::rename(&tmp_path, &out_path)
                 .map_err(|e| format!("compact rename: {}", e))?;
+            // v3 (LANE-C): the merged output now exists alongside the inputs (both still valid —
+            // newer seq shadows older). Invalidate so a reader re-lists BOTH before we remove the
+            // inputs; a second invalidate follows the removals so the next read sees output-only.
+            self.invalidate_sst_paths();
             for h in &at_level {
                 // Drop cached blocks for the file we're about to remove —
                 // otherwise they sit as zombies until evicted by capacity.
@@ -1640,6 +1752,8 @@ impl Database {
                 self.sst_readers.write().remove(&h.path);
                 let _ = fs::remove_file(&h.path);
             }
+            // v3 (LANE-C): inputs removed — re-list so the next read sees the merged output only.
+            self.invalidate_sst_paths();
             if current_level == 0 {
                 // Memtable's content is now durable on disk; clear it.
                 self.inner.write().memtable.clear();

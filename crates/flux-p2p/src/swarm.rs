@@ -966,13 +966,18 @@ impl FluxSwarmManager {
             }
             SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
                 tracing::warn!(%peer_id, num_established, cause = ?cause, "P2P-DBG Peer DISCONNECTED — cause shown (why peers drop)");
-                // Only drop from the connected set when the LAST connection closes.
+                // Only treat a peer as gone when its LAST connection closes. A mesh forms
+                // duplicate connections (both sides dial); libp2p keeps one and closes the
+                // redundant one with num_established > 0. Tearing the peer down / emitting
+                // PeerDisconnected on those redundant closes was the churn source —
+                // peer_count (self.peers.len()) flapped 1↔0 every few seconds, worse with
+                // more nodes. Gate ALL teardown on the last connection going away.
                 if num_established == 0 {
                     self.connected.write().remove(&peer_id);
-                }
-                self.peers.remove(&peer_id);
-                if let Some(ref rx) = self.event_rx {
-                    rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
+                    self.peers.remove(&peer_id);
+                    if let Some(ref rx) = self.event_rx {
+                        rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
+                    }
                 }
             }
             // P2P-DBG: surface the events that were previously swallowed — these explain

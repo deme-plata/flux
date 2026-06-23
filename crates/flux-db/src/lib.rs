@@ -26,19 +26,21 @@ pub mod block;
 pub mod cache;
 pub mod cf;
 pub mod filter;
+pub mod ingest;
 pub mod merge;
 pub mod range_tomb;
 pub mod skeleton;
 pub mod ttl;
 
 pub use skeleton::{SkeletonRecord, SkeletonStore};
+pub use ingest::{build_sorted_sst_bytes, sst_ingest_enabled, BulkMode};
 
-const SST_MAGIC: [u8; 4] = *b"FXDB";
+pub(crate) const SST_MAGIC: [u8; 4] = *b"FXDB";
 /// SST version. v1 = monolithic LZ4 blob (pre-v0.12). v2 = block-based
 /// format with index + footer; payload bytes start at the position right
 /// after the bloom filter, but the payload is now `block::build_block_sst`
 /// output rather than a single compressed buffer.
-const SST_VERSION: u8 = 2;
+pub(crate) const SST_VERSION: u8 = 2;
 const AUTO_COMPACT_THRESHOLD: usize = 4;
 /// v0.36: default WAL auto-flush threshold. Once the approximate number of
 /// bytes appended to the WAL since the last truncation exceeds this, the next
@@ -81,6 +83,33 @@ fn compress(data: &[u8]) -> Vec<u8> {
 
 fn decompress(data: &[u8]) -> Vec<u8> {
     lz4::block::decompress(data, None).unwrap_or_else(|_| data.to_vec())
+}
+
+/// v3 (LANE 1): serialize one SST file image — header + bloom + block body — into a single
+/// buffer, in the EXACT on-disk framing that [`SstReader::open`] parses:
+///
+/// ```text
+///   magic(4) ‖ version(1) ‖ flags(1) ‖ key_count(u64 LE) ‖ num_hashes(u32 LE)
+///     ‖ bloom_len(u32 LE) ‖ bloom_bytes ‖ block_body_len(u32 LE) ‖ block_body
+/// ```
+///
+/// Factored out of `flush()` and `compact()` (which inlined byte-identical copies) so the
+/// off-thread SST-ingest path (`ingest`) produces a bit-for-bit identical file and the
+/// framing lives in ONE place. `block_body` is `block::build_block_sst` output (the v2
+/// block-based payload). Changing these bytes is a read-format change — don't, casually.
+pub(crate) fn encode_sst(key_count: u64, bloom: &BloomFilter, block_body: &[u8]) -> Vec<u8> {
+    let bloom_bytes: Vec<u8> = bloom.bits.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut out = Vec::with_capacity(22 + bloom_bytes.len() + 4 + block_body.len());
+    out.extend_from_slice(&SST_MAGIC);
+    out.push(SST_VERSION);
+    out.push(0u8); // flags
+    out.extend_from_slice(&key_count.to_le_bytes());
+    out.extend_from_slice(&(bloom.num_hashes as u32).to_le_bytes());
+    out.extend_from_slice(&(bloom_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&bloom_bytes);
+    out.extend_from_slice(&(block_body.len() as u32).to_le_bytes());
+    out.extend_from_slice(block_body);
+    out
 }
 
 /// Main database handle — thread-safe, cloneable.
@@ -243,6 +272,13 @@ impl Database {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
         let path = path.into();
         fs::create_dir_all(&path).map_err(|e| format!("create dir: {}", e))?;
+
+        // v3 (LANE 1): sweep orphan `*.sst.tmp` left by a kill-9 mid-ingest (crash after
+        // tmp write, before the atomic rename). They are never listed as live SSTs
+        // (list_ssts matches only `.sst`/`.sst.lz4`) so they can't corrupt reads — this
+        // just reclaims their disk. The ingested prefix is re-pulled by the caller because
+        // the durable tip never advanced past an un-renamed SST (ingest-or-nothing).
+        ingest::sweep_stale_tmp(&path);
 
         let wal_path = path.join("flux.wal");
         // WAL-bomb guard: a WAL beyond this cap is evidence of a broken truncation
@@ -1104,17 +1140,8 @@ impl Database {
         }
         let block_body = builder.finish();
 
-        let bloom_bytes: Vec<u8> = bloom.bits.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let mut out = Vec::with_capacity(64 + bloom_bytes.len() + block_body.len());
-        out.extend_from_slice(&SST_MAGIC);
-        out.push(SST_VERSION);
-        out.push(0u8); // flags
-        out.extend_from_slice(&key_count.to_le_bytes());
-        out.extend_from_slice(&(bloom.num_hashes as u32).to_le_bytes());
-        out.extend_from_slice(&(bloom_bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&bloom_bytes);
-        out.extend_from_slice(&(block_body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&block_body);
+        // v3 (LANE 1): shared framing — byte-identical to compact() and the SST-ingest path.
+        let out = encode_sst(key_count, &bloom, &block_body);
 
         // Write the SST and FSYNC it. sync_all (not the old buffer-only flush) is
         // MANDATORY before truncating the WAL — otherwise a crash between SST write
@@ -1717,18 +1744,8 @@ impl Database {
                 bloom.insert(k);
             }
             let block_body = builder.finish();
-            let bloom_bytes: Vec<u8> =
-                bloom.bits.iter().flat_map(|w| w.to_le_bytes()).collect();
-            let mut out = Vec::with_capacity(64 + bloom_bytes.len() + block_body.len());
-            out.extend_from_slice(&SST_MAGIC);
-            out.push(SST_VERSION);
-            out.push(0u8);
-            out.extend_from_slice(&(merged.len() as u64).to_le_bytes());
-            out.extend_from_slice(&(bloom.num_hashes as u32).to_le_bytes());
-            out.extend_from_slice(&(bloom_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(&bloom_bytes);
-            out.extend_from_slice(&(block_body.len() as u32).to_le_bytes());
-            out.extend_from_slice(&block_body);
+            // v3 (LANE 1): shared framing — byte-identical to flush() and the SST-ingest path.
+            let out = encode_sst(merged.len() as u64, &bloom, &block_body);
 
             let tmp_path = out_path.with_extension("sst.tmp");
             {

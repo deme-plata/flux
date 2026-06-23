@@ -174,6 +174,72 @@ impl<R: SkeletonRecord> SkeletonStore<R> {
         Ok(recs.len())
     }
 
+    /// Append a contiguous run that is **already serialized** in the on-disk WIDTH-stride
+    /// layout — e.g. raw bytes straight off the sync wire, where a fixed-width record's wire
+    /// encoding IS its on-disk encoding. Skips the per-record [`encode`](SkeletonRecord::encode)
+    /// that [`append`](Self::append) runs, so a verified prefix lands with **zero record
+    /// materialization** (no `Vec<R>`, no re-encode — the keystone of the raw-commit path).
+    /// 2-phase durable like [`append`]: write → fsync → advance the authoritative count.
+    ///
+    /// `bytes.len()` MUST be a whole multiple of `WIDTH`. Contiguity is guarded in O(1): only
+    /// the FIRST record is decoded to assert `seq == base + count`; the remaining records are
+    /// **trusted** contiguous because this path serves the externally-authenticated prefix (the
+    /// caller's snapshot verifier has already proved per-record height/linkage upstream).
+    /// For untrusted input use [`append`](Self::append), which gap-checks every record.
+    pub fn append_raw(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        let n = self.precheck_raw(bytes)?;
+        if n == 0 {
+            return Ok(0);
+        }
+        self.write_at_tail(bytes)?;
+        self.file
+            .sync_all()
+            .map_err(|e| format!("skeleton fsync: {e}"))?; // phase 1: data durable
+        self.count += n as u64; // phase 2: advance the authoritative count
+        Ok(n)
+    }
+
+    /// Like [`append_raw`](Self::append_raw) but **without fsync** — the maximum-throughput
+    /// bulk import of pre-serialized wire bytes. Pair many calls with one final
+    /// [`sync`](Self::sync). A crash before `sync` recovers to the last whole record via
+    /// [`open`](Self::open)'s torn-tail truncation.
+    pub fn append_raw_unsynced(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        let n = self.precheck_raw(bytes)?;
+        if n == 0 {
+            return Ok(0);
+        }
+        self.write_at_tail(bytes)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+
+    /// Shared validation for the raw append paths: whole-stride length + O(1) first-record
+    /// contiguity guard. Returns the record count (`bytes.len() / WIDTH`), or 0 for empty.
+    fn precheck_raw(&self, bytes: &[u8]) -> Result<usize, String> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let w = R::WIDTH;
+        if bytes.len() % w != 0 {
+            return Err(format!(
+                "append_raw: {} bytes is not a whole multiple of WIDTH {}",
+                bytes.len(),
+                w
+            ));
+        }
+        // O(1) contiguity guard: decode ONLY the first record to anchor the run at base+count.
+        let first = R::decode(&bytes[0..w])?;
+        let expect_first = self.base + self.count;
+        if first.seq() != expect_first {
+            return Err(format!(
+                "non-contiguous append_raw: got seq={} expected {}",
+                first.seq(),
+                expect_first
+            ));
+        }
+        Ok(bytes.len() / w)
+    }
+
     fn write_at_tail(&mut self, buf: &[u8]) -> Result<(), String> {
         self.file
             .seek(SeekFrom::Start(self.count * Self::rec()))
@@ -415,6 +481,68 @@ mod tests {
         let mut s = SkeletonStore::<Skel>::open(&p, 1).unwrap();
         assert_eq!(s.count(), 5000, "synced records survive reopen");
         assert_eq!(s.read_at(5000).unwrap().unwrap(), rec(5000));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn append_raw_is_byte_identical_to_append() {
+        let run: Vec<Skel> = (1..=777).map(rec).collect();
+
+        // reference: the per-record encode path
+        let p_ref = tmp("raw-ref");
+        let _ = std::fs::remove_file(&p_ref);
+        let (ref_root, ref_bytes) = {
+            let mut s = SkeletonStore::<Skel>::open(&p_ref, 1).unwrap();
+            s.append(&run).unwrap();
+            (s.archive_root().unwrap(), std::fs::read(&p_ref).unwrap())
+        };
+
+        // wire bytes as a caller holds them (== concat of each record's encode)
+        let mut wire = vec![0u8; run.len() * Skel::WIDTH];
+        for (i, r) in run.iter().enumerate() {
+            r.encode(&mut wire[i * Skel::WIDTH..(i + 1) * Skel::WIDTH]);
+        }
+
+        let p_raw = tmp("raw-new");
+        let _ = std::fs::remove_file(&p_raw);
+        let (raw_root, raw_count, raw_bytes) = {
+            let mut s = SkeletonStore::<Skel>::open(&p_raw, 1).unwrap();
+            let _ = s.append_raw(&wire).unwrap();
+            (s.archive_root().unwrap(), s.count(), std::fs::read(&p_raw).unwrap())
+        };
+
+        assert_eq!(raw_count, 777);
+        assert_eq!(raw_bytes, ref_bytes, "append_raw file == append file (zero-materialization)");
+        assert_eq!(raw_root, ref_root, "append_raw archive_root == append archive_root");
+        // and it still reads back through the normal O(1) path after reopen
+        let mut s = SkeletonStore::<Skel>::open(&p_raw, 1).unwrap();
+        assert_eq!(s.read_at(500).unwrap().unwrap(), rec(500));
+        let _ = std::fs::remove_file(&p_ref);
+        let _ = std::fs::remove_file(&p_raw);
+    }
+
+    #[test]
+    fn append_raw_rejects_bad_length_and_non_contiguous() {
+        let p = tmp("raw-bad");
+        let _ = std::fs::remove_file(&p);
+        let mut s = SkeletonStore::<Skel>::open(&p, 1).unwrap();
+        assert!(s.append_raw(&[0u8; 71]).is_err(), "partial record must fail");
+        let mut wrong = [0u8; 72];
+        rec(2).encode(&mut wrong);
+        assert!(s.append_raw(&wrong).is_err(), "non-contiguous first record must fail");
+        // empty is a no-op, not an error
+        assert_eq!(s.append_raw(&[]).unwrap(), 0);
+        // the correct first record lands, then unsynced bulk continues contiguously
+        let mut ok = [0u8; 72];
+        rec(1).encode(&mut ok);
+        assert_eq!(s.append_raw(&ok).unwrap(), 1);
+        let mut bulk = vec![0u8; 3 * 72];
+        for (i, h) in [2u64, 3, 4].iter().enumerate() {
+            rec(*h).encode(&mut bulk[i * 72..(i + 1) * 72]);
+        }
+        assert_eq!(s.append_raw_unsynced(&bulk).unwrap(), 3);
+        s.sync().unwrap();
+        assert_eq!(s.tip_seq(), Some(4));
         let _ = std::fs::remove_file(&p);
     }
 

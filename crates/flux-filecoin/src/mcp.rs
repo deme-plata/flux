@@ -11,39 +11,39 @@ use crate::{FilecoinNode, FilecoinConfig, StorageSearchQuery, StoredFile};
 pub fn register_tools() -> Vec<MCPTool> {
     vec![
         MCPTool {
-            name: "flux_filecoin_store",
-            description: "Store a file on the Flux Filecoin network. Args: name, data (base64), mime",
-            handler: "handle_store_file",
+            name: "flux_filecoin_store".into(),
+            description: "Store a file on the Flux Filecoin network. Args: name, data (base64), mime".into(),
+            handler: "handle_store_file".into(),
         },
         MCPTool {
-            name: "flux_filecoin_retrieve",
-            description: "Retrieve a file by CID. Args: cid (hex)",
-            handler: "handle_retrieve_file",
+            name: "flux_filecoin_retrieve".into(),
+            description: "Retrieve a file by CID. Args: cid (hex)".into(),
+            handler: "handle_retrieve_file".into(),
         },
         MCPTool {
-            name: "flux_filecoin_search",
-            description: "Search for files on the storage network. Args: query, max_results",
-            handler: "handle_search",
+            name: "flux_filecoin_search".into(),
+            description: "Search for files on the storage network. Args: query, max_results".into(),
+            handler: "handle_search".into(),
         },
         MCPTool {
-            name: "flux_filecoin_providers",
-            description: "List storage providers and their prices. Args: none",
-            handler: "handle_list_providers",
+            name: "flux_filecoin_providers".into(),
+            description: "List storage providers and their prices. Args: none".into(),
+            handler: "handle_list_providers".into(),
         },
         MCPTool {
-            name: "flux_filecoin_market",
-            description: "Show storage market statistics. Args: none",
-            handler: "handle_market_stats",
+            name: "flux_filecoin_market".into(),
+            description: "Show storage market statistics. Args: none".into(),
+            handler: "handle_market_stats".into(),
         },
         MCPTool {
-            name: "flux_filecoin_prove",
-            description: "Generate a proof-of-storage for a contract. Args: contract_id",
-            handler: "handle_generate_proof",
+            name: "flux_filecoin_prove".into(),
+            description: "Generate a proof-of-storage for a contract. Args: contract_id".into(),
+            handler: "handle_generate_proof".into(),
         },
         MCPTool {
-            name: "flux_filecoin_index",
-            description: "Index a stored file for search. Args: cid",
-            handler: "handle_index_file",
+            name: "flux_filecoin_index".into(),
+            description: "Index a stored file for search. Args: cid".into(),
+            handler: "handle_index_file".into(),
         },
     ]
 }

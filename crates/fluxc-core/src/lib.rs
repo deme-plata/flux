@@ -38,7 +38,7 @@ pub mod release_audit;
 
 use std::env;
 use std::path::PathBuf;
-use std::process::{self, Command};
+use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Build Configuration ──
@@ -977,7 +977,15 @@ pub fn self_build(config: BuildConfig) {
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
     if config.release { cmd.arg("--release"); }
-
+    let fluxc = env::current_exe().expect("current fluxc executable");
+    let real_rustc = env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    cmd.env("RUSTC_WRAPPER", fluxc);
+    cmd.env("FLUXC_WRAPPING", "1");
+    cmd.env("REAL_RUSTC", real_rustc);
+    // Cargo's target-info probe compiles `-` from stdin. Never let unrelated
+    // caller input become the probe source (a jq filter once poisoned
+    // target/.rustc_info.json and made every subsequent self-build fail).
+    cmd.stdin(Stdio::null());
 
     let status = cmd.status().expect("cargo");
     let elapsed_ms = start.elapsed().as_millis() as u64;

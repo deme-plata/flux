@@ -92,6 +92,8 @@ impl StorageMarket {
         duration: u64,
         file_size: u64,
     ) -> Result<StorageContract> {
+        anyhow::ensure!(duration > 0, "Contract duration must be greater than zero");
+
         let provider_info = self.providers.read().await;
         let provider = provider_info
             .get(&provider)
@@ -118,7 +120,7 @@ impl StorageMarket {
             client,
             start_time: now_secs(),
             duration,
-            price_per_second: total_price / duration,
+            price_per_second: total_price / u128::from(duration),
             provider_collateral: total_price / 2, // 50% collateral
             client_payment: total_price,
             status: ContractStatus::Pending,

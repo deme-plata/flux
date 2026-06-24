@@ -1,0 +1,103 @@
+{
+  "$comment": "Canonical machine-readable facts about Flux for programmatic analysis. Static docs/badges drift; regenerate this from live introspection (fluxc xray --json / flux_health_report) when stale. When this file disagrees with badges/CHANGELOG, this file + live introspection win.",
+  "schema_version": 1,
+  "generated": "2026-06-24",
+  "provenance": "Read read-only from epsilon:/home/storage/deepseek-codewhale/flux and the running fluxc on 2026-06-24; verified against an adversarial 4-lens standalone-compiler audit.",
+  "platform": {
+    "name": "Flux",
+    "version": "0.28.0",
+    "version_source_of_truth": ["Cargo.toml", "fluxc version", "flux_health_report"],
+    "repo": "epsilon:/home/storage/deepseek-codewhale/flux",
+    "github": "https://github.com/deme-plata/flux.git",
+    "github_org": "deme-plata",
+    "git_branch": "v0.5.2-dev",
+    "last_tag": "sigil-v0.8.1",
+    "crates": 143,
+    "loc": 155265,
+    "architecture_ideal_pct": 62.2,
+    "language": "Rust"
+  },
+  "what_it_is": "AI-native Rust build platform + an emerging native compiler (fluxc), plus the SIGIL/Quillon blockchain + agentic-money stack it builds.",
+  "compiler": {
+    "summary": "Hybrid compiler: owns its IR + a real Cranelift->ELF backend, borrows rustc for all parse-with-semantics and cc for linking, does not self-host.",
+    "standalone_pct_estimate": 33,
+    "owns": {
+      "ir": true,
+      "codegen_backend": "cranelift (flux-backend, ~621 LOC, emits native ELF objects, MIR-direct path handles loops/mutable-locals/CFG)",
+      "object_jit": "fluxc run: BLAKE3-cached object -> cc link -> execute",
+      "provenance_signing": "SQIsign-L5 + Ed25519 hybrid"
+    },
+    "borrows": {
+      "parse_with_semantics": "rustc (typecheck/borrowck/trait-resolution/monomorphization via `rustc --emit=mir`, MIR text parsed by flux-frontend/mir.rs)",
+      "simple_parser": "syn crate (parses but does NOT typecheck/borrowck)",
+      "linker": "cc (gcc/clang)"
+    },
+    "self_hosts": false,
+    "self_host_note": "fluxc itself is built by cargo+rustc; 'self-hosting' in the whitepaper/CHANGELOG is aspirational.",
+    "memory_safety_owner": "rustc (not Flux, yet)",
+    "source_paths": {
+      "frontend": "crates/flux-frontend (lib.rs 377 + mir.rs 722)",
+      "backend": "crates/flux-backend/src/lib.rs (621)",
+      "pipeline": "crates/fluxc-core/src/phase3.rs (1247)"
+    },
+    "phases": {
+      "1": { "command": "fluxc self", "desc": "cargo build with RUSTC_WRAPPER=self (DEFAULT workspace build)", "owns_compilation": false, "status": "red" },
+      "2": { "command": "fluxc build --no-cargo", "desc": "flux-graph drives rustc directly (no cargo)", "owns_compilation": false, "status": "partial" },
+      "3d": { "command": "fluxc compile | compile-native | run | heal", "desc": "the actual Flux compiler (syn or rustc-MIR -> Cranelift -> ELF -> cc)", "owns_compilation": true, "status": "works_mvp" }
+    },
+    "real": ["own IR", "cranelift ELF backend", "MIR-direct codegen (loops/mutable-locals/CFG)", "compile->cc-link->run JIT", "BLAKE3 object cache", "SQIsign provenance", "self-healing compile loop (heal)"],
+    "stub_or_tbd": ["typecheck/borrowck (delegated to rustc)", "own linker (uses cc)", "self-compilation", "type system i64-centric (no f64/i32/u*/bool/pointer ABI)", "external call sigs arity-guessed i64->i64 (rlib-metadata inference TBD)", "structs/enums/tuples/generics/traits in native path"]
+  },
+  "introspection_commands": {
+    "real_version": "./target/debug/fluxc version",
+    "workspace_status_json": "./target/debug/fluxc status --json",
+    "health_xray_json": "./target/debug/fluxc xray --json",
+    "mcp_health": "echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"flux_health_report\",\"arguments\":{}}}' | ./target/debug/fluxc mcp",
+    "mcp_tools_list": "echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}' | ./target/debug/fluxc mcp",
+    "note": "fluxc --version (double-dash) returns the wrapped rustc version (passthrough), NOT the fluxc version."
+  },
+  "mcp": { "command": "fluxc mcp", "tool_count_help": 162, "tool_count_live": 185, "count_needs_reconciliation": true },
+  "build_rules": [
+    "Never run raw `cargo` in the workspace; use fluxc / flux_* MCP tools.",
+    "Honest numbers only: run and read before quoting any metric.",
+    "All money moves are propose-only; a human signs (2-of-2)."
+  ],
+  "current_state_2026_06_24": {
+    "default_build": "GREEN (2026-06-24 14:17; was RED)",
+    "default_build_reason": "RESOLVED: the 'jq probe' failure was a POISONED cargo target-info cache (target/.rustc_info.json + .target-shared/.rustc_info.json cached a FAILED rustc probe whose stderr contained a stray jq compile error; cargo replayed the cached failure WITHOUT launching rustc). Fixed by quarantining those caches (regenerated clean) + restoring the real RUSTC_WRAPPER/FLUXC_WRAPPING/REAL_RUSTC env in fluxc-core::self_build (it previously only printed the claim). `fluxc self` now exits 0 (~102s cold / ~15s incremental). If it fails at 'target-specific information' again, grep */.rustc_info.json for a cached success:false entry before suspecting rustc/cargo.",
+    "flux_p2p_tests": "RED (E0282 type annotations needed in tests/two_node_gossipsub.rs + stale libflux_p2p rlib extern) -- next P0 item, not yet fixed",
+    "wrapper_cache_hit_rate_pct": 0.0,
+    "wrapper_cache_reason": "populates but apply_cached_outputs restores a dep-info marker not rmeta/rlib bytes; Patches 2+3 designed-not-implemented (docs/FLUXC_CACHE_GAP.md)",
+    "builds_recorded": 739,
+    "avg_build_ms": 66267,
+    "test_pass_pct": 92,
+    "confidence_pct": 36,
+    "weakest_crate": "fluxc-core (coupling 10%, ~18% test coverage, ~30% docs)",
+    "swot": { "strengths": 121, "weaknesses": 135, "opportunities": 4, "threats": 3 }
+  },
+  "do_not_confuse": {
+    "fcx": "flux-fcx* = TSX-dialect -> Slint UI transpiler (beat Electron). NOT the compiler.",
+    "sigil_top_version": "sigil-top 1.0.0-rc9 is an APP built by flux, not Flux's version (Flux = 0.28.0).",
+    "two_caches": "Phase-3 BLAKE3 object cache (temp/flux_jit, works) vs Phase-1 RUSTC_WRAPPER=self build cache (0% hit).",
+    "fluxc_dashdash_version": "`fluxc --version` is rustc passthrough; `fluxc version` is the real one."
+  },
+  "stale_signals_to_ignore": {
+    "README_badges": "beta_v0.22 / crates-111 / MCP_tools-130+",
+    "mcp_rs_571_hardcode": "fluxc 0.9.6 - MCP: 30 tools",
+    "changelog_top": "v0.6.0 - Self-Hosting Compiler (label, not verified state)",
+    "platform_status_doc": "v0.25",
+    "fix": "see STALE-SIGNALS-PUNCHLIST.md"
+  },
+  "governance": "FIP (Flux Improvement Proposal) process in docs/flux-standards-v0.md; SAP-100% quality gate; >=3 swarm-agent co-sponsors for Accepted.",
+  "roadmap_to_standalone": [
+    "1. Fix Phase-1 jq probe contamination (S)",
+    "2. Make wrapper cache hit: store+restore rmeta/rlib bytes (M)",
+    "3. Real signature inference from rlib metadata (M)",
+    "4. Backend type coverage beyond i64 (M-L)",
+    "5. Aggregate types: structs/enums/tuples (L)",
+    "6. Generics + trait dispatch in native path (L)",
+    "7. Decide frontend posture: own typeck/borrowck (XL) OR formalize rustc-as-frontend (S, doc)",
+    "8. Own/vendor the linker (M, via lld)",
+    "9. Self-host fluxc via Phase 3 (XL, gated on 3-7)"
+  ]
+}

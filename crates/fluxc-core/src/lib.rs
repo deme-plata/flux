@@ -733,11 +733,19 @@ pub fn wrapper_mode(args: &[String]) {
     // cached output blob was restored to the rustc-expected out_dir; on
     // false we fall through and run rustc for real.
     if !cache_key.is_empty() {
+        let trace = std::env::var("FLUX_CACHE_TRACE").is_ok();
+        let kp = &cache_key[..16.min(cache_key.len())];
+        let cn = rustc_args.iter().position(|a| a == "--crate-name")
+            .and_then(|i| rustc_args.get(i + 1)).map(|s| s.as_str()).unwrap_or("?");
         if let Some(entry) = flux_cache::lookup(&cache_key) {
             if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
+                if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
                 record_cache_event(true);
                 return;
             }
+            if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, std::path::Path::new("target/flux-cache/blobs").join(&entry.source_hash).exists()); }
+        } else if trace {
+            eprintln!("FLUXCACHE LOOKUPMISS {} key={}", cn, kp);
         }
         // Cacheable unit (real .rs source, non-empty key) with no usable cached output:
         // a genuine compilation-unit cache MISS. (Uncacheable probes returned earlier.)
@@ -793,8 +801,14 @@ fn normalize_args_for_cache_key(args: &[String]) -> Vec<String> {
                 i += 2;
             }
             "-L" if i + 1 < args.len() => {
-                out.push(a.clone());
-                out.push(substitute_name_eq_path(&args[i + 1], substitute_dir_listing));
+                // 0.33 FIX (the actual 0% cause): DROP -L from the cache key. -L is a
+                // volatile SEARCH path (target/debug/deps, whose directory listing
+                // changes on every build as crates accumulate / get cleaned), so
+                // hashing its listing made EVERY crate's cache_key unstable build-to-
+                // build -> 100% lookup-miss (traced: HIT=0 LOOKUPMISS=37 APPLYFAIL=0).
+                // The actual dependencies are already pinned content-addressably by
+                // --extern, so -L doesn't affect WHAT compiles, only WHERE rustc looks
+                // — exactly like --out-dir, which is dropped for the same reason.
                 i += 2;
             }
             "--out-dir" if i + 1 < args.len() => {

@@ -40,3 +40,12 @@ written. This FIP records the correct diagnosis and the minimal real fix.
 Informational. The minimal fix above is the recommended 0.33 once the instrumented experiment confirms the
 failure mode. Success gate: rustc-spawn count drops on a dirty rebuild AND restored artifacts pass downstream
 `cargo test`/link AND no epsilon OOM regression.
+
+## Empirical addendum (2026-06-25, measured on epsilon)
+Ran the instrumented experiment this FIP demanded (per-unit cache-event counters, `fluxc self`):
+- **DIRTY-populate** (touch flux-frontend, rebuild): rc=0, 467s, **0 hits / 37 misses** — first compile, real rustc, as expected.
+- **DIRTY-rehit** (revert, rebuild byte-identical): **1 hit / 36 misses (~3%)** — a rebuild that should hit ~100% hit essentially 0%.
+
+**Verdict (now empirical, not just analytic):** the wrapper IS invoked by cargo on dirty units (37 invocations), so the failure is NOT "cargo never calls the wrapper" for that case — it's that the wrapper's **lookup misses ~97% even for byte-identical recompiles**. That is **key instability** (cache_key derived from raw/normalized args desyncs run-to-run), exactly this FIP's root cause — NOT the doc's "store rmeta/rlib bytes" gap. **The minimal fix stands: stabilize the cache key (re-key on the normalized cache_key) + rewrite restored .d paths + fold rustc_version in.** Storing more bytes cannot help a cache that doesn't look up its own entries.
+
+**Infra blocker observed:** builds intermittently die at the cargo target-probe with `error: this file contains an unclosed delimiter / jq: 1 compile error` — the q-api/quillon feed pipeline's jq filter (`{height:.h, hash:(.tiphash//.hash//"")...}`) leaks into the rustc-probe stdin (`fluxc <rustc> - --print=...`). This corrupts ~half of build attempts and must be fixed (or q-api paused) before the cache fix can be implemented+verified reliably. See memory [[epsilon-cargo-build-broken]].

@@ -303,10 +303,19 @@ fn compile_mir_into_function(
                 if let Some(&fid) = func_ids.get(&cleaned) {
                     let func_ref = module.declare_func_in_func(fid, bc.func);
                     let inst = bc.ins().call(func_ref, &arg_vals);
-                    let res = bc.inst_results(inst).first().copied()
-                        .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+                    let results = bc.inst_results(inst).to_vec();
                     if let Some(dst_idx) = parse_mir_local_idx(dst) {
-                        if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, res); }
+                        if results.len() > 1 {
+                            // Aggregate (multi-value) return: distribute each result into the
+                            // dst's scalar-replaced fields.
+                            for (i, &r) in results.iter().enumerate() {
+                                if let Some(&var) = tuple_vars.get(&(dst_idx, i)) { bc.def_var(var, r); }
+                            }
+                        } else {
+                            let res = results.first().copied().unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+                            if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, res); }
+                            else if let Some(&var) = tuple_vars.get(&(dst_idx, 0)) { bc.def_var(var, res); }
+                        }
                     }
                 }
                 if let Some(&tgt) = blocks.get(target) { bc.ins().jump(tgt, &[]); }
@@ -999,5 +1008,33 @@ fn cl_type(ty: &TypeRef) -> Type {
         let mut ov = std::collections::HashMap::new();
         ov.insert("main".to_string(), mir);
         compile_unit_to_object_with_mir(&u, &ov, &tmp("struct.o")).expect("struct construct+read must verify");
+    }
+
+    // 0.32: call-site multi-result destructuring — `let p = mk(); p.0 + p.1` where mk returns a
+    // tuple. The callee's 2-element return sig + the caller distributing both results to p's fields.
+    #[test] fn test_tuple_returning_call_mir() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign { dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect() };
+        let mk = MirFunction {
+            name: "mk".into(), params: vec![], return_type: "(i64, i64)".into(),
+            locals: vec![ MirLocal{index:0,name:"_0".into(),ty:"(i64, i64)".into(),mutable:true} ],
+            blocks: vec![ MirBlock { label: "bb0".into(), statements: vec![ asg("_0","",&["const 3_i64","const 4_i64"]) ], terminator: Some(MirTerminator::Return) } ],
+        };
+        let main = MirFunction {
+            name: "main".into(), params: vec![], return_type: "i64".into(),
+            locals: vec![
+                MirLocal{index:0,name:"_0".into(),ty:"i64".into(),mutable:true},
+                MirLocal{index:1,name:"_1".into(),ty:"(i64, i64)".into(),mutable:true},
+            ],
+            blocks: vec![
+                MirBlock { label: "bb0".into(), statements: vec![], terminator: Some(MirTerminator::Call{ func:"mk".into(), args: vec![], dst:"_1".into(), target:"bb1".into() }) },
+                MirBlock { label: "bb1".into(), statements: vec![ asg("_0","Add",&["_1.0","_1.1"]) ], terminator: Some(MirTerminator::Return) },
+            ],
+        };
+        let u = flux_frontend::parse_source("fn mk() -> i64 { return 0 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("mk".to_string(), mk);
+        ov.insert("main".to_string(), main);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("call.o")).expect("tuple-returning call must verify (multi-result destructure)");
     }
 }

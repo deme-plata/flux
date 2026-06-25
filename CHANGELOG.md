@@ -1,5 +1,15 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.32.0 — Real call signatures: aggregate-returning calls (2026-06-25)
+
+### Added
+- **Call-site multi-result destructuring**: a function returning a tuple (multi-value return signature) can now be called and its result destructured — the caller distributes each return value into the destination's scalar-replaced fields (previously only `inst_results[0]` was bound). Completes the aggregate-by-value call story.
+
+### Notes
+- Known/internal calls already use their real declared signatures (via `func_sigs`); external calls remain conservatively arity-guessed `i64->i64` (guessing external sigs is link-but-crash territory).
+- Enums (`SetDiscriminant` + downcast) are the next milestone.
+
+
 ## v0.31.0 — Aggregates: tuples & structs (2026-06-25)
 
 The native Phase-3 path now compiles flat tuples and structs — the first "real programs" milestone.

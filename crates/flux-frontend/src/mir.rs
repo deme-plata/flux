@@ -59,6 +59,27 @@ pub enum MirTerminator {
     SwitchInt { discr: String, targets: Vec<(String, String)>, otherwise: String },
 }
 
+/// FIP-0001 keep-A-open #3: the swap-point between "produce Flux MIR" and the rest of the compiler.
+///
+/// Today the only Frontend is `RustcMirFrontend`, which parses rustc's `--emit=mir` text (Option B, the
+/// version-pinned contracted frontend). A future native frontend (Option A) implements this same trait to
+/// emit `MirFunction` directly from a `syn` AST — with zero changes anywhere downstream, because the
+/// pipeline depends on `Frontend`, not on where the MIR came from. This is a zero-cost abstraction
+/// (static dispatch); it exists to mark the intent and give the native parser a clean injection point.
+pub trait Frontend {
+    /// Produce Flux MIR for a translation unit from this frontend's source form.
+    fn to_mir(&self, source: &str) -> Result<Vec<MirFunction>, String>;
+}
+
+/// The default, contracted frontend: parse rustc's `--emit=mir` textual output.
+pub struct RustcMirFrontend;
+
+impl Frontend for RustcMirFrontend {
+    fn to_mir(&self, mir_text: &str) -> Result<Vec<MirFunction>, String> {
+        parse_mir(mir_text)
+    }
+}
+
 /// Parse MIR text output from rustc --emit=mir.
 pub fn parse_mir(mir_text: &str) -> Result<Vec<MirFunction>, String> {
     let mut functions = Vec::new();
@@ -745,6 +766,26 @@ mod tests {
             "return_type must be clean, got {:?}", funcs[0].return_type);
         assert!(!funcs[0].return_type.contains("->"),
             "no arrow may survive in return_type");
+    }
+
+    #[test]
+    fn frontend_trait_default_matches_parse_mir() {
+        // FIP-0001 #3: the default RustcMirFrontend must be a transparent wrapper over parse_mir,
+        // so swapping in a native (Option A) frontend later changes nothing downstream.
+        let mir = "fn add(_1: i64, _2: i64) -> i64 {\n    let mut _0: i64;\n    bb0: {\n        _0 = Add(_1, _2);\n        return;\n    }\n}";
+        let via_trait = RustcMirFrontend.to_mir(mir).unwrap();
+        let via_fn = parse_mir(mir).unwrap();
+        assert_eq!(via_trait.len(), via_fn.len());
+        assert_eq!(via_trait[0].name, "add");
+        assert_eq!(via_trait[0].name, via_fn[0].name);
+    }
+
+    #[test]
+    fn ir_version_frozen() {
+        // FIP-0001 #1: this guards the FROZEN IR. If a change to the public IR types is intended,
+        // bump crate::IR_VERSION and update this assertion in the same commit — never silently.
+        assert_eq!(crate::IR_VERSION, 1,
+            "flux-frontend IR changed: bump IR_VERSION intentionally (FIP-0001 frozen-IR contract)");
     }
 
     #[test]

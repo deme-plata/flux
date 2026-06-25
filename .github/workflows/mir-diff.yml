@@ -1,0 +1,22 @@
+# FIP-0001 keep-A-open #2: enforce the rustc --emit=mir "contracted frontend".
+# Regenerates MIR for mir-corpus/ against the pinned RUSTC_VERSION and fails on any dialect drift,
+# so an upstream rustc change that would break flux-frontend::mir::parse_mir is caught immediately.
+name: mir-diff
+on:
+  push:
+    branches: [main, v0.5.2-dev]
+    paths: ['mir-corpus/**', 'crates/flux-frontend/src/mir.rs', '.github/workflows/mir-diff.yml']
+  schedule:
+    - cron: '0 3 * * 1'   # weekly drift check
+  workflow_dispatch: {}
+jobs:
+  mir-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Toolchain MUST match flux_driver::RUSTC_VERSION (currently 1.93.1).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.1'
+      - name: MIR drift check
+        run: bash mir-corpus/check.sh

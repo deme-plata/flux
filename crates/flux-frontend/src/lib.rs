@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 pub mod mir;
 use std::path::Path;
 
+// ── FROZEN IR (FIP-0001 keep-A-open #1) ──
+//
+// The public IR types below (TranslationUnit, FunctionDef, Expr, TypeRef, BinOp, UnOp) are Flux's
+// STABLE intermediate representation. Per FIP-0001 (Option B, accepted 2026-06-26), the rustc `--emit=mir`
+// text dialect is known to exactly ONE place — `mir::parse_mir`. A future native frontend (Option A)
+// emits this same IR directly, so the rest of the pipeline never learns whether MIR came from rustc or
+// from Flux's own parser. Any breaking change to these types MUST bump IR_VERSION (and update the
+// ir_version_frozen snapshot test), so a frontend swap stays a contained, intentional event.
+pub const IR_VERSION: u32 = 1;
+
 // ── High-Level IR ──
 
 /// A compiled translation unit (one .rs file).

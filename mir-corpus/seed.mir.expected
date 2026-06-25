@@ -1,0 +1,89 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn mk() -> P {
+    let mut _0: P;
+
+    bb0: {
+        _0 = P { x: const 6_i64, y: const 7_i64 };
+        return;
+    }
+}
+
+fn tup() -> (i64, i64) {
+    let mut _0: (i64, i64);
+
+    bb0: {
+        _0 = (const 3_i64, const 4_i64);
+        return;
+    }
+}
+
+fn add(_1: i64, _2: i64) -> i64 {
+    debug a => _1;
+    debug b => _2;
+    let mut _0: i64;
+    let mut _3: (i64, bool);
+
+    bb0: {
+        _3 = AddWithOverflow(copy _1, copy _2);
+        assert(!move (_3.1: bool), "attempt to compute `{} + {}`, which would overflow", copy _1, copy _2) -> [success: bb1, unwind continue];
+    }
+
+    bb1: {
+        _0 = move (_3.0: i64);
+        return;
+    }
+}
+
+fn calc() -> i64 {
+    let mut _0: i64;
+    let _1: P;
+    let mut _3: i64;
+    let mut _4: i64;
+    let mut _5: i64;
+    let mut _6: (i64, bool);
+    let mut _7: i64;
+    let mut _8: i64;
+    let mut _9: i64;
+    let mut _10: (i64, bool);
+    scope 1 {
+        debug p => _1;
+        let _2: (i64, i64);
+        scope 2 {
+            debug t => _2;
+        }
+    }
+
+    bb0: {
+        _1 = mk() -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _2 = tup() -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _4 = copy (_1.0: i64);
+        _5 = copy (_1.1: i64);
+        _6 = MulWithOverflow(copy _4, copy _5);
+        assert(!move (_6.1: bool), "attempt to compute `{} * {}`, which would overflow", move _4, move _5) -> [success: bb3, unwind continue];
+    }
+
+    bb3: {
+        _3 = move (_6.0: i64);
+        _8 = copy (_2.0: i64);
+        _9 = copy (_2.1: i64);
+        _10 = AddWithOverflow(copy _8, copy _9);
+        assert(!move (_10.1: bool), "attempt to compute `{} + {}`, which would overflow", move _8, move _9) -> [success: bb4, unwind continue];
+    }
+
+    bb4: {
+        _7 = move (_10.0: i64);
+        _0 = add(move _3, move _7) -> [return: bb5, unwind continue];
+    }
+
+    bb5: {
+        return;
+    }
+}

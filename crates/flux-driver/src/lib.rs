@@ -26,6 +26,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// FIP-0001 keep-A-open #2: the pinned rustc whose `--emit=mir` dialect Flux parses and whose std
+/// rlibs the cache is keyed to. This is the operational half of the "contracted frontend" — a single
+/// source of truth instead of a magic string. The CI MIR-diff job (.github/workflows/mir-diff.yml)
+/// regenerates MIR for a fixed corpus against THIS version and fails the build on any dialect drift,
+/// turning the rustc dependency into an enforced contract rather than an implicit assumption.
+pub const RUSTC_VERSION: &str = "1.93.1";
+
 /// Where blobs live for a given source-hash key. Relative to current
 /// working directory's `target/` — matches `flux_cache::clean`'s convention.
 fn blob_dir_for(source_hash: &str) -> PathBuf {
@@ -175,7 +182,7 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
         source_hash: source_hash.clone(),
         args_hash: source_hash,
         outputs,
-        rustc_version: "1.93.1".into(),
+        rustc_version: RUSTC_VERSION.into(),
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -354,7 +361,7 @@ mod tests {
             source_hash: "fakehash".into(),
             args_hash: "fakehash".into(),
             outputs: vec![("rmeta".into(), "libdemo-xyz.rmeta".into())].into_iter().collect(),
-            rustc_version: "1.93.1".into(),
+            rustc_version: RUSTC_VERSION.into(),
             timestamp: 0,
         };
         let applied = apply_cached_outputs(&entry, &args);
@@ -371,7 +378,7 @@ mod tests {
             source_hash: "".into(),
             args_hash: "".into(),
             outputs: HashMap::new(),
-            rustc_version: "1.93.1".into(),
+            rustc_version: RUSTC_VERSION.into(),
             timestamp: 0,
         };
         assert!(!apply_cached_outputs(&entry, &args));

@@ -295,6 +295,19 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
         let target = rhs[pos + 4..].trim().split_whitespace().next().unwrap_or("").to_string();
         return ("as".to_string(), vec![operand, target]);
     }
+    // Struct construction: `P { x: const 3_i64, y: move _2 }` -> aggregate (op="") of field values,
+    // positional (declaration order), reusing the tuple scalar-replacement path.
+    if let Some(brace) = rhs.find('{') {
+        let inner = &rhs[brace + 1..];
+        if let Some(close) = inner.rfind('}') {
+            let args: Vec<String> = inner[..close].split(',')
+                .filter_map(|f| f.split_once(':').map(|(_, v)|
+                    v.trim().trim_start_matches("copy ").trim_start_matches("move ").trim().to_string()))
+                .filter(|v| !v.is_empty())
+                .collect();
+            if !args.is_empty() { return (String::new(), args); }
+        }
+    }
     if let Some(paren) = rhs.find('(') {
         let op = rhs[..paren].trim().to_string();
         let args_str = &rhs[paren+1..];

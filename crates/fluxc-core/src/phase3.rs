@@ -184,7 +184,9 @@ pub fn compile_run(path: &str, args: &[String]) -> i32 {
         let unit = flux_frontend::TranslationUnit {
             file_path: path.to_string(),
             functions: ir_funcs,
-            structs: vec![],
+            // Pull struct definitions from the source (the MIR-only unit carries none) so the
+            // backend can resolve named-struct field layouts for scalar replacement.
+            structs: flux_frontend::parse_source(&src, path).map(|u| u.structs).unwrap_or_default(),
             imports: vec![],
         };
 
@@ -632,7 +634,7 @@ fn build_mir_overrides(funcs: &[flux_frontend::mir::MirFunction])
     -> std::collections::HashMap<String, flux_frontend::mir::MirFunction>
 {
     funcs.iter()
-        .filter(|f| has_cycles(f) || has_complex_switch(f) || has_tuples(f))
+        .filter(|f| has_cycles(f) || has_complex_switch(f) || has_tuples(f) || has_structs(f))
         .map(|f| (f.name.clone(), f.clone()))
         .collect()
 }
@@ -642,6 +644,18 @@ fn build_mir_overrides(funcs: &[flux_frontend::mir::MirFunction])
 fn has_tuples(mir: &flux_frontend::mir::MirFunction) -> bool {
     mir.locals.iter().any(|l| l.ty.trim().starts_with('('))
         || mir.params.iter().any(|p| p.ty.trim().starts_with('('))
+}
+
+/// True if any local/param is a named struct (a capitalized type name that isn't a tuple,
+/// ref, or primitive). Struct support — like tuples — lives only in the MIR-direct path.
+fn has_structs(mir: &flux_frontend::mir::MirFunction) -> bool {
+    let is_struct = |t: &str| {
+        let t = t.trim();
+        !t.is_empty() && !t.starts_with('(') && !t.starts_with('&') && !t.starts_with('*')
+            && !matches!(t, "i8"|"i16"|"i32"|"i64"|"u8"|"u16"|"u32"|"u64"|"usize"|"isize"|"bool"|"f32"|"f64"|"()"|"!")
+            && t.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+    };
+    mir.locals.iter().chain(mir.params.iter()).any(|l| is_struct(&l.ty))
 }
 
 /// True if any block ends with a SwitchInt that has more than one explicit target

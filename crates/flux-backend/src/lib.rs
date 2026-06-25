@@ -43,13 +43,24 @@ pub fn compile_unit_to_object_with_mir(
         .map_err(|e| format!("ObjectBuilder: {}", e))?;
     let mut module = ObjectModule::new(builder);
 
+    // Struct layout table (name -> field type-strings), from the source's struct defs. Lets
+    // a named-struct local be scalar-replaced into per-field Variables, like a tuple.
+    let struct_layout: HashMap<String, Vec<String>> = unit.structs.iter()
+        .map(|s| (s.name.clone(), s.fields.iter().map(|f| typeref_str(&f.ty)).collect()))
+        .collect();
+
     // Pass 1: declare every function so Call expressions can resolve by name.
     let mut func_ids: HashMap<String, FuncId> = HashMap::with_capacity(unit.functions.len());
     let mut func_sigs: HashMap<String, Signature> = HashMap::with_capacity(unit.functions.len());
     for func in &unit.functions {
         let mut sig = module.make_signature();
         for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); }
-        sig.returns.push(AbiParam::new(cl_type(&func.return_type)));
+        // Aggregate (tuple) by-value return: one AbiParam per field, taken from the MIR
+        // override's type string (TypeRef can't express tuples). Else a single scalar return.
+        match mir_overrides.get(&func.name).and_then(|m| parse_tuple_type(&m.return_type)) {
+            Some(fields) => for f in &fields { sig.returns.push(AbiParam::new(mir_type_to_cl(f))); },
+            None => sig.returns.push(AbiParam::new(cl_type(&func.return_type))),
+        }
         let id = module.declare_function(&func.name, Linkage::Export, &sig)
             .map_err(|e| format!("declare {}: {}", func.name, e))?;
         func_ids.insert(func.name.clone(), id);
@@ -80,7 +91,7 @@ pub fn compile_unit_to_object_with_mir(
         let sig = func_sigs.remove(&func.name).unwrap();
 
         let func_ir = if let Some(mir) = mir_overrides.get(&func.name) {
-            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids)?
+            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids, &struct_layout)?
         } else {
             compile_expr_into_function(func, func_id, sig, &mut module, &func_ids)?
         };
@@ -130,6 +141,7 @@ fn compile_mir_into_function(
     sig: Signature,
     module: &mut ObjectModule,
     func_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
+    structs: &std::collections::HashMap<String, Vec<String>>,
 ) -> Result<Function, String> {
     use std::collections::HashSet;
 
@@ -174,9 +186,9 @@ fn compile_mir_into_function(
         std::collections::HashMap::new();
     for &idx in &all_locals {
         let ty_str = mir_type_strs.get(&idx).cloned().unwrap_or_default();
-        if let Some(fields) = parse_tuple_type(&ty_str) {
-            // Tuple — declare one Variable per field; IDs in a separate range to avoid
-            // collisions with single-i64 locals.
+        if let Some(fields) = aggregate_fields(&ty_str, structs) {
+            // Tuple or struct — declare one Variable per field; IDs in a separate range to
+            // avoid collisions with single-i64 locals.
             for (fi, field_ty) in fields.iter().enumerate() {
                 let var_id = 1_000_000u32 + (idx as u32) * 32 + fi as u32;
                 let v = Variable::from_u32(var_id);
@@ -244,7 +256,7 @@ fn compile_mir_into_function(
                         let want = mir_type_to_cl(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default());
                         let val = coerce_int_width(&mut bc, val, want);
                         bc.def_var(var, val);
-                    } else if let Some(fields) = parse_tuple_type(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default()) {
+                    } else if let Some(fields) = aggregate_fields(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default(), structs) {
                         // Single-arg op writing into a tuple: forward to field 0.
                         if !fields.is_empty() {
                             if let Some(&var) = tuple_vars.get(&(dst_idx, 0)) {
@@ -258,13 +270,22 @@ fn compile_mir_into_function(
 
         match &mir_block.terminator {
             Some(MirTerminator::Return) => {
-                let ret_val = vars.get(&0)
-                    .map(|&v| bc.use_var(v))
-                    .or_else(|| tuple_vars.get(&(0, 0)).map(|&v| bc.use_var(v)))
-                    .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
-                let rt = mir_type_to_cl(&mir.return_type);
-                let ret_val = coerce_int_width(&mut bc, ret_val, rt);
-                bc.ins().return_(&[ret_val]);
+                if let Some(fields) = parse_tuple_type(&mir.return_type) {
+                    // Aggregate-by-value return: return every scalar-replaced field of _0.
+                    let vals: Vec<Value> = (0..fields.len())
+                        .map(|i| tuple_vars.get(&(0, i)).map(|&v| bc.use_var(v))
+                            .unwrap_or_else(|| bc.ins().iconst(mir_type_to_cl(&fields[i]), 0)))
+                        .collect();
+                    bc.ins().return_(&vals);
+                } else {
+                    let ret_val = vars.get(&0)
+                        .map(|&v| bc.use_var(v))
+                        .or_else(|| tuple_vars.get(&(0, 0)).map(|&v| bc.use_var(v)))
+                        .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+                    let rt = mir_type_to_cl(&mir.return_type);
+                    let ret_val = coerce_int_width(&mut bc, ret_val, rt);
+                    bc.ins().return_(&[ret_val]);
+                }
             }
             Some(MirTerminator::Goto(target)) => {
                 if let Some(&tgt) = blocks.get(target) { bc.ins().jump(tgt, &[]); }
@@ -339,6 +360,21 @@ fn parse_tuple_type(ty: &str) -> Option<Vec<String>> {
     if inner.is_empty() { return None; }
     // Quick depth-balanced split on top-level commas (no nested tuples for now).
     Some(inner.split(',').map(|s| s.trim().to_string()).collect())
+}
+
+/// Field type-strings of an aggregate local: a tuple `(i64,i64)` via parse_tuple_type, or a named
+/// struct resolved through the layout table built from the source's struct definitions. Structs are
+/// "named tuples" — same scalar-replacement, just resolved by name.
+fn aggregate_fields(ty: &str, structs: &std::collections::HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    parse_tuple_type(ty).or_else(|| structs.get(ty.trim()).cloned())
+}
+
+/// TypeRef -> the type string mir_type_to_cl understands (for the struct layout table).
+fn typeref_str(t: &TypeRef) -> String {
+    match t {
+        TypeRef::I32 => "i32", TypeRef::I64 => "i64", TypeRef::U32 => "u32", TypeRef::U64 => "u64",
+        TypeRef::Bool => "bool", TypeRef::F32 => "f32", TypeRef::F64 => "f64", _ => "i64",
+    }.to_string()
 }
 
 fn mir_type_to_cl(t: &str) -> Type {
@@ -899,5 +935,69 @@ fn cl_type(ty: &TypeRef) -> Type {
     #[test] fn test_paren_lowering() {
         let c = clif_of("fn p(a: i64) -> i64 { return (a + 1) * 2 }");
         assert!(c.contains("iadd") && c.contains("imul"), "parens dropped:\n{}", c);
+    }
+
+    // 0.31 foundation: the existing scalar-replacement scaffolding must already construct a flat
+    // (i64,i64) tuple and read both fields. Hand-build the MIR for `let t=(10,20); t.0 + t.1`.
+    #[test] fn test_tuple_construct_read_mir() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign { dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect() };
+        let mir = MirFunction {
+            name: "tup".into(), params: vec![], return_type: "i64".into(),
+            locals: vec![
+                MirLocal{index:0,name:"_0".into(),ty:"i64".into(),mutable:true},
+                MirLocal{index:1,name:"_1".into(),ty:"(i64, i64)".into(),mutable:true},
+            ],
+            blocks: vec![ MirBlock { label: "bb0".into(), statements: vec![
+                asg("_1", "", &["const 10_i64", "const 20_i64"]),
+                asg("_0", "Add", &["_1.0", "_1.1"]),
+            ], terminator: Some(MirTerminator::Return) } ],
+        };
+        let u = flux_frontend::parse_source("fn tup() -> i64 { return 0 }", "t").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("tup".to_string(), mir);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("tup.o")).expect("flat tuple construct+read must verify");
+    }
+
+    // 0.31 step 2: aggregate-by-value RETURN — `fn mk() -> (i64,i64) { (10,20) }` returns a
+    // 2-element signature; the verifier rejects a return-arity mismatch, so green == correct ABI.
+    #[test] fn test_tuple_return_mir() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign { dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect() };
+        let mir = MirFunction {
+            name: "mk".into(), params: vec![], return_type: "(i64, i64)".into(),
+            locals: vec![ MirLocal{index:0,name:"_0".into(),ty:"(i64, i64)".into(),mutable:true} ],
+            blocks: vec![ MirBlock { label: "bb0".into(), statements: vec![
+                asg("_0", "", &["const 10_i64", "const 20_i64"]),
+            ], terminator: Some(MirTerminator::Return) } ],
+        };
+        let u = flux_frontend::parse_source("fn mk() -> i64 { return 0 }", "t").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("mk".to_string(), mir);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("mk.o")).expect("tuple by-value return must verify (2-element return sig)");
+    }
+
+    // 0.31 step 3: STRUCTS as named tuples — construct `P { x, y }` (scalar-replaced via the layout
+    // table from unit.structs), read both fields, sum. Before the layout table, `_1: P` declared a
+    // single var and the construction silently produced 0.
+    #[test] fn test_struct_construct_read_mir() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign { dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect() };
+        let mir = MirFunction {
+            name: "main".into(), params: vec![], return_type: "i64".into(),
+            locals: vec![
+                MirLocal{index:0,name:"_0".into(),ty:"i64".into(),mutable:true},
+                MirLocal{index:1,name:"_1".into(),ty:"P".into(),mutable:true},
+            ],
+            blocks: vec![ MirBlock { label: "bb0".into(), statements: vec![
+                asg("_1", "", &["const 3_i64", "const 4_i64"]),
+                asg("_0", "Add", &["_1.0", "_1.1"]),
+            ], terminator: Some(MirTerminator::Return) } ],
+        };
+        let u = flux_frontend::parse_source("struct P { x: i64, y: i64 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        assert_eq!(u.structs.len(), 1, "struct P must be parsed into the unit");
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("main".to_string(), mir);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("struct.o")).expect("struct construct+read must verify");
     }
 }

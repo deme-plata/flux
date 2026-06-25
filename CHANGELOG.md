@@ -1,5 +1,19 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.31.0 — Aggregates: tuples & structs (2026-06-25)
+
+The native Phase-3 path now compiles flat tuples and structs — the first "real programs" milestone.
+
+### Added
+- **Structs** as named tuples: `P { x, y }` construction + `p.x`/`p.y` field access, scalar-replaced into per-field Cranelift Variables via a struct-layout table built from the source's struct defs (`unit.structs`, parsed but never read until now). Field access reuses the tuple `_N.M` projection path.
+- **Aggregate-by-value return ABI**: tuple-returning functions emit a multi-value return signature (one AbiParam per field).
+- Routing: `has_structs` joins `has_tuples` in selecting the MIR-direct path; `parse_rhs` learns the `Name { field: val }` struct-construction rvalue.
+
+### Notes
+- Tuples (construct/read/multi-field/arithmetic) already worked via the MIR-direct path (verified live: `(10,20).0+.1`=30, 3-tuples, sum-of-squares); this release adds structs + the aggregate-return ABI and locks both with tests.
+- Scope: flat (single-level) aggregates of scalar fields. Nested aggregates, enums, and struct-by-value returns are follow-ups (enums -> 0.32).
+
+
 ## v0.30.0 — Scalar Completeness (2026-06-25)
 
 Native Phase-3 backend now compiles **any program built from Rust's scalar primitives** — every integer width, both signs, unary operators, and numeric casts — correctly and verifier-clean.

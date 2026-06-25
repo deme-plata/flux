@@ -118,7 +118,7 @@ fn restore_output_from_blob(blob_dir: &Path, out_dir: &Path, file_name: &str) ->
 ///
 /// MUST be called AFTER rustc has run successfully (the function reads the
 /// files rustc just emitted).
-pub fn collect_outputs(rustc_args: &[String]) -> flux_cache::CacheEntry {
+pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::CacheEntry {
     let raw_args: Vec<String> = rustc_args.to_vec();
 
     // Find source file (positional .rs arg).
@@ -133,7 +133,16 @@ pub fn collect_outputs(rustc_args: &[String]) -> flux_cache::CacheEntry {
     let mut outputs = HashMap::new();
 
     if !source_file.is_empty() && !crate_name.is_empty() && !out_dir.is_empty() {
-        let source_hash = flux_cache::compute_hash(Some(&source_file), &raw_args);
+        // 0.33: key blobs on the wrapper's STABLE normalized cache_key (same key the
+        // entry is stored/looked-up under), not a raw-args hash that embeds absolute
+        // --extern/-L/--out-dir paths. The raw-args fallback fires only for keyless
+        // direct callers (the unit tests). This is the fix that makes apply_cached_
+        // outputs actually find its blobs (was 0% effective over 753 builds).
+        let source_hash = if !cache_key.is_empty() {
+            cache_key.to_string()
+        } else {
+            flux_cache::compute_hash(Some(&source_file), &raw_args)
+        };
         if !source_hash.is_empty() {
             let blob_dir = blob_dir_for(&source_hash);
             let out_dir_path = PathBuf::from(&out_dir);
@@ -152,7 +161,11 @@ pub fn collect_outputs(rustc_args: &[String]) -> flux_cache::CacheEntry {
         }
     }
 
-    let source_hash = if !source_file.is_empty() {
+    // entry.source_hash is what apply_cached_outputs uses to reconstruct the blob
+    // dir on a hit — it MUST equal the key the blobs were written under (cache_key).
+    let source_hash = if !cache_key.is_empty() {
+        cache_key.to_string()
+    } else if !source_file.is_empty() {
         flux_cache::compute_hash(Some(&source_file), &raw_args)
     } else {
         String::new()
@@ -258,8 +271,10 @@ mod tests {
             src_file.to_string_lossy().to_string(),
         ];
 
-        let entry = collect_outputs(&args);
+        let key = flux_cache::compute_hash(Some(&src_file.to_string_lossy()), &args);
+        let entry = collect_outputs(&args, &key);
         assert!(!entry.source_hash.is_empty(), "entry has no source_hash");
+        assert_eq!(entry.source_hash, key, "0.33: entry.source_hash must equal the cache_key");
         assert_eq!(entry.outputs.len(), 2, "expected 2 outputs, got {:?}", entry.outputs);
 
         // Clear the out_dir to prove apply actually restores.
@@ -271,6 +286,54 @@ mod tests {
         assert!(applied, "apply_cached_outputs returned false");
         assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rmeta")).unwrap(), rmeta_content);
         assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rlib")).unwrap(), rlib_content);
+
+        std::env::set_current_dir(&orig_cwd).unwrap();
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn stable_key_survives_volatile_args() {
+        // 0.33 core property: blobs+entry are keyed on the STABLE cache_key, so a
+        // hit succeeds even when the raw rustc args differ (e.g. a different absolute
+        // --extern path) — the cross-workspace / post-clean reuse case. Pre-fix the
+        // blob dir was keyed on a raw-args hash that embedded those paths, so apply
+        // could never find the blobs when the args varied.
+        let workspace = tmp_dir("stablekey");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"// x").unwrap();
+        fs::write(out_dir.join("libdemo-deadbeef.rmeta"), b"meta").unwrap();
+        fs::write(out_dir.join("libdemo-deadbeef.rlib"), b"lib").unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workspace).unwrap();
+
+        let args1: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--extern".into(), "serde=/ws1/target/libserde-AAAA.rlib".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_file.to_string_lossy().to_string(),
+        ];
+        // Same logical compile, DIFFERENT absolute --extern path (a second workspace).
+        let args2: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--extern".into(), "serde=/ws2/target/libserde-BBBB.rlib".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_file.to_string_lossy().to_string(),
+        ];
+        const STABLE: &str = "stable-cache-key-deadbeef";
+        let entry = collect_outputs(&args1, STABLE);
+        assert_eq!(entry.source_hash, STABLE);
+        assert!(blob_dir_for(STABLE).exists(), "blobs must live under the stable key");
+
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        // apply with args2 (different abs paths) — succeeds because the blob dir is
+        // keyed on entry.source_hash == STABLE, independent of the raw args.
+        assert!(apply_cached_outputs(&entry, &args2),
+            "stable-key hit must restore regardless of volatile raw args");
+        assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rmeta")).unwrap(), b"meta");
 
         std::env::set_current_dir(&orig_cwd).unwrap();
         fs::remove_dir_all(&workspace).ok();

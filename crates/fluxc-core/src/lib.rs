@@ -693,6 +693,21 @@ pub fn wrapper_mode(args: &[String]) {
         for a in &rustc_args {
             cmd.arg(a);
         }
+        // ROOT-CAUSE FIX (build reliability): info probes (`--print=…`, `-vV`,
+        // `--version`) read NO real source — the `-` positional is a placeholder
+        // and cargo only parses our stdout. But cargo connects this probe's stdin
+        // to a pipe, and on this box a concurrent status-feed `jq` races onto that
+        // fd and injects its filter, which rustc then tries to parse as source
+        // ("error: this file contains an unclosed delimiter" / "jq: 1 compile
+        // error") → the probe dies → cargo aborts the whole build with "failed to
+        // run `rustc` to learn about target-specific information". Detaching the
+        // probe's stdin makes the toolchain query immune to that fd pollution.
+        let is_print_probe = rustc_args.iter().any(|a| {
+            a == "--print" || a.starts_with("--print=") || a == "-vV" || a == "-V" || a == "--version"
+        });
+        if is_print_probe {
+            cmd.stdin(std::process::Stdio::null());
+        }
         match cmd.status() {
             Ok(s) => process::exit(s.code().unwrap_or(0)),
             Err(e) => {
@@ -739,7 +754,7 @@ pub fn wrapper_mode(args: &[String]) {
             // rmeta/rlib/dep-info files rustc just produced; store with the
             // content hash as key.
             if !cache_key.is_empty() {
-                let entry = flux_driver::collect_outputs(&rustc_args);
+                let entry = flux_driver::collect_outputs(&rustc_args, &cache_key);
                 if !entry.source_hash.is_empty() {
                     flux_cache::store(&cache_key, &entry);
                 }
@@ -1048,8 +1063,17 @@ pub fn run_tests(package: Option<&str>) {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["-p", pkg]); }
+    let fluxc = env::current_exe().expect("current fluxc executable");
+    let real_rustc = env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    cmd.env("RUSTC_WRAPPER", fluxc);
+    cmd.env("FLUXC_WRAPPING", "1");
+    cmd.env("REAL_RUSTC", real_rustc);
+    cmd.stdin(Stdio::null());
     let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
-    if !status.success() { eprintln!("Some tests failed"); }
+    if !status.success() {
+        eprintln!("Some tests failed");
+        process::exit(status.code().unwrap_or(1));
+    }
 }
 
 pub fn version() -> String {
@@ -1161,6 +1185,10 @@ pub fn parse_args(raw: &[String]) -> (BuildConfig, Vec<String>) {
                     eprintln!("error: --package requires a value");
                     process::exit(1);
                 }
+            }
+            arg if arg.starts_with("--package=") => {
+                config.package = Some(arg["--package=".len()..].to_string());
+                i += 1;
             }
             _ => { rest.push(raw[i].clone()); i += 1; }
         }
@@ -1324,6 +1352,22 @@ mod tests {
         let n = normalize_args_for_cache_key(&args);
         assert!(n[1].starts_with("dependency=<dir:"), "got {}", n[1]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_args_extracts_separate_package_flag() {
+        let raw = vec!["test".into(), "-p".into(), "flux-p2p".into()];
+        let (config, rest) = parse_args(&raw);
+        assert_eq!(config.package.as_deref(), Some("flux-p2p"));
+        assert_eq!(rest, vec!["test"]);
+    }
+
+    #[test]
+    fn parse_args_extracts_equals_package_flag() {
+        let raw = vec!["test".into(), "--package=flux-p2p".into()];
+        let (config, rest) = parse_args(&raw);
+        assert_eq!(config.package.as_deref(), Some("flux-p2p"));
+        assert_eq!(rest, vec!["test"]);
     }
 
     #[test]

@@ -73,6 +73,8 @@ pub enum Expr {
     Literal(Literal),
     Variable(String),
     BinaryOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    Unary { op: UnOp, operand: Box<Expr> },
+    Cast { value: Box<Expr>, target: TypeRef },
     Call { func: String, args: Vec<Expr> },
     Return(Box<Expr>),
     Let { name: String, value: Box<Expr> },
@@ -88,6 +90,9 @@ pub enum Literal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinOp { Add, Sub, Mul, Div, Rem, Eq, Neq, Lt, Gt, Le, Ge, And, Or, BitXor, Shl, Shr }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UnOp { Neg, Not }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Visibility { Public, Private }
@@ -242,6 +247,15 @@ fn lower_expr(expr: &syn::Expr) -> Expr {
                 right: Box::new(lower_expr(&bin.right)),
             }
         }
+        syn::Expr::Unary(un) => match &un.op {
+            syn::UnOp::Neg(_) => Expr::Unary { op: UnOp::Neg, operand: Box::new(lower_expr(&un.expr)) },
+            syn::UnOp::Not(_) => Expr::Unary { op: UnOp::Not, operand: Box::new(lower_expr(&un.expr)) },
+            _ => Expr::Empty, // deref etc. unsupported
+        },
+        syn::Expr::Cast(c) => Expr::Cast {
+            value: Box::new(lower_expr(&c.expr)),
+            target: lower_type(&c.ty),
+        },
         syn::Expr::Call(call) => {
             let func_name = if let syn::Expr::Path(p) = &*call.func {
                 p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
@@ -268,6 +282,7 @@ fn lower_expr(expr: &syn::Expr) -> Expr {
             }
         }
         syn::Expr::Block(block) => lower_block(&block.block),
+        syn::Expr::Paren(p) => lower_expr(&p.expr),
         _ => Expr::Empty,
     }
 }

@@ -289,6 +289,12 @@ where I: Iterator<Item = &'a str>
 }
 
 fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
+    // Cast rvalue: "move _1 as i64 (IntToInt)" / "_1 as f64 (IntToFloat)" — capture operand + target type.
+    if let Some(pos) = rhs.find(" as ") {
+        let operand = rhs[..pos].trim().to_string();
+        let target = rhs[pos + 4..].trim().split_whitespace().next().unwrap_or("").to_string();
+        return ("as".to_string(), vec![operand, target]);
+    }
     if let Some(paren) = rhs.find('(') {
         let op = rhs[..paren].trim().to_string();
         let args_str = &rhs[paren+1..];
@@ -572,6 +578,9 @@ fn lower_mir_op(op: &str, args: &[String], pn: &[String]) -> crate::Expr {
         "BitXor"                             if args.len() >= 2 => binop(BinOp::BitXor, args),
         "Shl" | "ShlUnchecked"               if args.len() >= 2 => binop(BinOp::Shl, args),
         "Shr" | "ShrUnchecked"               if args.len() >= 2 => binop(BinOp::Shr, args),
+        "Neg"                                if args.len() >= 1 => crate::Expr::Unary { op: crate::UnOp::Neg, operand: Box::new(lower_operand(&args[0], pn)) },
+        "Not"                                if args.len() >= 1 => crate::Expr::Unary { op: crate::UnOp::Not, operand: Box::new(lower_operand(&args[0], pn)) },
+        "as"                                 if args.len() >= 2 => crate::Expr::Cast { value: Box::new(lower_operand(&args[0], pn)), target: mir_type_to_ir(&args[1]) },
         "copy" | "move" | "Use" | "const"    if args.len() >= 1 => lower_operand(&args[0], pn),
         _ => Expr::Empty,
     }
@@ -581,7 +590,11 @@ fn lower_operand(op: &str, pn: &[String]) -> crate::Expr {
     let c = op.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
     // Tuple-projection like `(_3.0: i64)` → use _3 as the carrier; tuple unpacking proper TBD.
     let c = c.trim_start_matches('(').trim_end_matches(')');
-    let c = if let Some(dot) = c.find('.') { &c[..dot] } else { c };
+    // Strip the projection suffix ONLY for locals (`_3.0` -> `_3`). A const literal like
+    // `2.5f64` must keep its decimal point, or it truncates to the integer `2`.
+    let c = if c.starts_with('_') {
+        if let Some(dot) = c.find('.') { &c[..dot] } else { c }
+    } else { c };
     if c.starts_with('_') && c.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
         let n: String = c.chars().skip(1).take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(i) = n.parse::<usize>() {
@@ -633,6 +646,14 @@ fn substitute_locals(expr: crate::Expr, stmts: &[crate::Expr]) -> crate::Expr {
             op,
             left: Box::new(substitute_locals(*left, stmts)),
             right: Box::new(substitute_locals(*right, stmts)),
+        },
+        Expr::Unary { op, operand } => Expr::Unary {
+            op,
+            operand: Box::new(substitute_locals(*operand, stmts)),
+        },
+        Expr::Cast { value, target } => Expr::Cast {
+            value: Box::new(substitute_locals(*value, stmts)),
+            target,
         },
         Expr::Call { func, args } => Expr::Call {
             func,

@@ -1,5 +1,22 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.30.0 — Scalar Completeness (2026-06-25)
+
+Native Phase-3 backend now compiles **any program built from Rust's scalar primitives** — every integer width, both signs, unary operators, and numeric casts — correctly and verifier-clean.
+
+### Added
+- **Integer width correctness**: constants/results coerced to their declared width (i8/i16/i32/i64) via sextend/ireduce; a `coerce_int_width`/`unify_int_width` seam threads declared types through the value helpers so non-i64 arithmetic/comparison no longer mismatches widths.
+- **Signedness**: u32/u64 select unsigned ops (udiv/urem/ushr + unsigned compares); signed types keep sdiv/srem/sshr + signed compares.
+- **Unary operators**: `-x` (ineg/fneg) and `!x` (bnot for ints, low-bit flip for bools).
+- **Numeric casts** (`as`): int widen/narrow (sextend/ireduce), int↔float (fcvt_from_sint / fcvt_to_sint_sat), f32↔f64 (fpromote/fdemote).
+
+### Verified
+- 30 verifier-backed unit tests (object emission via define_function) incl. i64/float non-regression controls; end-to-end on epsilon's rustc 1.93 via `fluxc run`.
+
+### Notes
+- Unsigned widening / int→float use signed conversions by default (correct for the common signed case; full unsigned-conversion refinement is a follow-up). The IR distinguishes u32/u64 (not u8/u16/usize) for signedness.
+
+
 ## v0.29.0 — Numeric & Bitwise Codegen (2026-06-25)
 
 Native Phase-3 backend (`flux-backend`) now compiles the full set of scalar **binary** operators correctly and verifier-clean.

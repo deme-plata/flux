@@ -2,7 +2,7 @@
 // Takes flux-frontend IR, generates Cranelift IR text.
 // Runs on any architecture. Native codegen via clif-util or future JIT.
 
-use flux_frontend::{FunctionDef, TypeRef, Expr, Literal, BinOp, TranslationUnit};
+use flux_frontend::{FunctionDef, TypeRef, Expr, Literal, BinOp, UnOp, TranslationUnit};
 use flux_frontend::mir::{MirFunction, MirStmt, MirTerminator};
 use cranelift_codegen::ir::{types, Type, AbiParam, Block, UserFuncName, Function, Signature, InstBuilder, Value};
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
@@ -113,6 +113,8 @@ fn compile_expr_into_function(
     bc.append_block_params_for_function_params(entry);
     let param_vals: Vec<Value> = bc.block_params(entry).to_vec();
     let val = compile_expr_with_calls(&mut bc, module, &func.body, &func.params, &param_vals, func_ids);
+    let rt = cl_type(&func.return_type);
+    let val = coerce_int_width(&mut bc, val, rt);
     bc.ins().return_(&[val]);
     bc.seal_all_blocks();
     bc.finalize();
@@ -236,8 +238,11 @@ fn compile_mir_into_function(
                         }
                         continue;
                     }
-                    let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, &mut bc);
+                    let unsigned = operand_is_unsigned(args.first().map(|s| s.as_str()).unwrap_or(""), &mir_type_strs);
+                    let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, unsigned, &mut bc);
                     if let Some(&var) = vars.get(&dst_idx) {
+                        let want = mir_type_to_cl(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default());
+                        let val = coerce_int_width(&mut bc, val, want);
                         bc.def_var(var, val);
                     } else if let Some(fields) = parse_tuple_type(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default()) {
                         // Single-arg op writing into a tuple: forward to field 0.
@@ -257,6 +262,8 @@ fn compile_mir_into_function(
                     .map(|&v| bc.use_var(v))
                     .or_else(|| tuple_vars.get(&(0, 0)).map(|&v| bc.use_var(v)))
                     .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+                let rt = mir_type_to_cl(&mir.return_type);
+                let ret_val = coerce_int_width(&mut bc, ret_val, rt);
                 bc.ins().return_(&[ret_val]);
             }
             Some(MirTerminator::Goto(target)) => {
@@ -426,11 +433,82 @@ fn val_is_float(bc: &mut FunctionBuilder, v: Value) -> bool {
     matches!(bc.func.dfg.value_type(v), types::F64 | types::F32)
 }
 
+/// Coerce an integer Value to a target int width via sextend/ireduce. No-op for equal width
+/// or non-int operands. Signed extension by default; unsigned widening is refined later.
+fn coerce_int_width(bc: &mut FunctionBuilder, v: Value, want: Type) -> Value {
+    let have = bc.func.dfg.value_type(v);
+    if have == want || !have.is_int() || !want.is_int() { return v; }
+    if want.bits() > have.bits() { bc.ins().sextend(want, v) } else { bc.ins().ireduce(want, v) }
+}
+
+/// Bring two int operands to a common width (the wider) so iadd/icmp/... typecheck. Leaves
+/// floats / mixed operands untouched (the float dispatch handles those).
+fn unify_int_width(bc: &mut FunctionBuilder, a: Value, b: Value) -> (Value, Value) {
+    let (ta, tb) = (bc.func.dfg.value_type(a), bc.func.dfg.value_type(b));
+    if ta == tb || !ta.is_int() || !tb.is_int() { return (a, b); }
+    let want = if ta.bits() >= tb.bits() { ta } else { tb };
+    (coerce_int_width(bc, a, want), coerce_int_width(bc, b, want))
+}
+
+/// Whether a MIR operand is an unsigned integer — from a `const N_u32` suffix or, for a
+/// `_N` local, its declared type. Drives the udiv/urem/ushr/unsigned-compare choice (the
+/// Cranelift Value type carries width but not sign, so we recover sign from the MIR type).
+fn operand_is_unsigned(s: &str, types: &std::collections::HashMap<usize, String>) -> bool {
+    let c = s.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
+    if let Some(rest) = c.strip_prefix("const ") {
+        return rest.contains("u8") || rest.contains("u16") || rest.contains("u32")
+            || rest.contains("u64") || rest.contains("usize");
+    }
+    if let Some(idx) = parse_mir_local_idx(c) {
+        if let Some(t) = types.get(&idx) {
+            return matches!(t.trim(), "u8" | "u16" | "u32" | "u64" | "usize");
+        }
+    }
+    false
+}
+
+/// Expr-path signedness: an operand is unsigned if it's a u32/u64-typed parameter (the only
+/// unsigned widths the IR TypeRef distinguishes). Recurses left for nested binary ops.
+fn expr_is_unsigned(e: &Expr, params: &[flux_frontend::Param]) -> bool {
+    match e {
+        Expr::Variable(name) => params.iter().find(|p| &p.name == name)
+            .map_or(false, |p| matches!(p.ty, TypeRef::U32 | TypeRef::U64)),
+        Expr::BinaryOp { left, .. } => expr_is_unsigned(left, params),
+        _ => false,
+    }
+}
+
+/// Expr-path bool detection for `!` lowering: a bool gets logical-not (flip the low bit), an
+/// integer gets bitwise-not (bnot). Comparison results, bool params, and bool literals are bool.
+fn expr_is_bool(e: &Expr, params: &[flux_frontend::Param]) -> bool {
+    match e {
+        Expr::Variable(name) => params.iter().find(|p| &p.name == name)
+            .map_or(false, |p| matches!(p.ty, TypeRef::Bool)),
+        Expr::Literal(Literal::Bool(_)) => true,
+        Expr::BinaryOp { op, .. } => matches!(op, BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge),
+        _ => false,
+    }
+}
+
+/// Numeric cast (`as`): int<->int (width coerce), int<->float (fcvt), f32<->f64
+/// (fpromote/fdemote). Signed conversions by default, matching this milestone's signed default.
+fn cast_value(bc: &mut FunctionBuilder, v: Value, want: Type) -> Value {
+    let have = bc.func.dfg.value_type(v);
+    if have == want { return v; }
+    match (have.is_int(), want.is_int()) {
+        (true, true)   => coerce_int_width(bc, v, want),
+        (true, false)  => bc.ins().fcvt_from_sint(want, v),
+        (false, true)  => bc.ins().fcvt_to_sint_sat(want, v),
+        (false, false) => if want.bits() > have.bits() { bc.ins().fpromote(want, v) } else { bc.ins().fdemote(want, v) },
+    }
+}
+
 fn compile_mir_op_to_value(
     op: &str,
     args: &[String],
     vars: &std::collections::HashMap<usize, Variable>,
     tuple_vars: &std::collections::HashMap<(usize, usize), Variable>,
+    unsigned: bool,
     bc: &mut FunctionBuilder,
 ) -> Value {
     let two_args = |bc: &mut FunctionBuilder| -> (Value, Value) {
@@ -438,25 +516,28 @@ fn compile_mir_op_to_value(
             .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
         let b = args.get(1).map(|a| resolve_mir_operand_to_value(a, vars, tuple_vars, bc))
             .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
-        (a, b)
+        unify_int_width(bc, a, b)
     };
     match op {
         "AddWithOverflow" | "Add" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fadd(a, b) } else { bc.ins().iadd(a, b) } }
         "SubWithOverflow" | "Sub" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fsub(a, b) } else { bc.ins().isub(a, b) } }
         "MulWithOverflow" | "Mul" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fmul(a, b) } else { bc.ins().imul(a, b) } }
-        "Div"                     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fdiv(a, b) } else { bc.ins().sdiv(a, b) } }
+        "Div"                     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fdiv(a, b) } else if unsigned { bc.ins().udiv(a, b) } else { bc.ins().sdiv(a, b) } }
         "Eq"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::Equal, a, b) } else { bc.ins().icmp(IntCC::Equal, a, b) } }
         "Ne"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::NotEqual, a, b) } else { bc.ins().icmp(IntCC::NotEqual, a, b) } }
-        "Lt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThan, a, b) } else { bc.ins().icmp(IntCC::SignedLessThan, a, b) } }
-        "Gt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThan, a, b) } else { bc.ins().icmp(IntCC::SignedGreaterThan, a, b) } }
-        "Le"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThanOrEqual, a, b) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, a, b) } }
-        "Ge"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, a, b) } }
+        "Lt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThan, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedLessThan } else { IntCC::SignedLessThan }, a, b) } }
+        "Gt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThan, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan }, a, b) } }
+        "Le"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThanOrEqual, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedLessThanOrEqual } else { IntCC::SignedLessThanOrEqual }, a, b) } }
+        "Ge"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedGreaterThanOrEqual } else { IntCC::SignedGreaterThanOrEqual }, a, b) } }
         "BitAnd" => { let (a, b) = two_args(bc); bc.ins().band(a, b) }
         "BitOr"  => { let (a, b) = two_args(bc); bc.ins().bor(a, b) }
-        "Rem"    => { let (a, b) = two_args(bc); bc.ins().srem(a, b) }
+        "Rem"    => { let (a, b) = two_args(bc); if unsigned { bc.ins().urem(a, b) } else { bc.ins().srem(a, b) } }
         "BitXor" => { let (a, b) = two_args(bc); bc.ins().bxor(a, b) }
         "Shl" | "ShlUnchecked" => { let (a, b) = two_args(bc); bc.ins().ishl(a, b) }
-        "Shr" | "ShrUnchecked" => { let (a, b) = two_args(bc); bc.ins().sshr(a, b) }
+        "Shr" | "ShrUnchecked" => { let (a, b) = two_args(bc); if unsigned { bc.ins().ushr(a, b) } else { bc.ins().sshr(a, b) } }
+        "Neg" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); if val_is_float(bc, a) { bc.ins().fneg(a) } else { bc.ins().ineg(a) } }
+        "Not" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); bc.ins().bnot(a) }
+        "as" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); let want = mir_type_to_cl(args.get(1).map(|s| s.as_str()).unwrap_or("i64")); cast_value(bc, a, want) }
         "copy" | "move" | "Use" | "const" => {
             args.first().map(|a| resolve_mir_operand_to_value(a, vars, tuple_vars, bc))
                 .unwrap_or_else(|| bc.ins().iconst(types::I64, 0))
@@ -478,6 +559,8 @@ fn collect_call_arities(expr: &Expr, out: &mut std::collections::HashMap<String,
             collect_call_arities(left, out);
             collect_call_arities(right, out);
         }
+        Expr::Unary { operand, .. } => collect_call_arities(operand, out),
+        Expr::Cast { value, .. } => collect_call_arities(value, out),
         Expr::Return(v) => collect_call_arities(v, out),
         Expr::Let { value, .. } => collect_call_arities(value, out),
         Expr::Block(stmts) => for s in stmts { collect_call_arities(s, out); },
@@ -516,24 +599,37 @@ fn compile_expr_with_calls(
         Expr::BinaryOp { op, left, right } => {
             let l = compile_expr_with_calls(bc, module, left, params, param_vals, func_ids);
             let r = compile_expr_with_calls(bc, module, right, params, param_vals, func_ids);
+            let (l, r) = unify_int_width(bc, l, r);
             let f = val_is_float(bc, l);
+            let u = expr_is_unsigned(left, params);
             match op {
                 BinOp::Add => if f { bc.ins().fadd(l, r) } else { bc.ins().iadd(l, r) },
                 BinOp::Sub => if f { bc.ins().fsub(l, r) } else { bc.ins().isub(l, r) },
                 BinOp::Mul => if f { bc.ins().fmul(l, r) } else { bc.ins().imul(l, r) },
-                BinOp::Div => if f { bc.ins().fdiv(l, r) } else { bc.ins().sdiv(l, r) },
+                BinOp::Div => if f { bc.ins().fdiv(l, r) } else if u { bc.ins().udiv(l, r) } else { bc.ins().sdiv(l, r) },
                 BinOp::Eq => if f { bc.ins().fcmp(FloatCC::Equal, l, r) } else { bc.ins().icmp(IntCC::Equal, l, r) },
                 BinOp::Neq => if f { bc.ins().fcmp(FloatCC::NotEqual, l, r) } else { bc.ins().icmp(IntCC::NotEqual, l, r) },
-                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(IntCC::SignedLessThan, l, r) },
-                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThan, l, r) },
-                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, l, r) },
-                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r) },
+                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedLessThan } else { IntCC::SignedLessThan }, l, r) },
+                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan }, l, r) },
+                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedLessThanOrEqual } else { IntCC::SignedLessThanOrEqual }, l, r) },
+                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedGreaterThanOrEqual } else { IntCC::SignedGreaterThanOrEqual }, l, r) },
                 BinOp::And => bc.ins().band(l, r), BinOp::Or => bc.ins().bor(l, r),
-                BinOp::Rem => bc.ins().srem(l, r),
+                BinOp::Rem => if u { bc.ins().urem(l, r) } else { bc.ins().srem(l, r) },
                 BinOp::BitXor => bc.ins().bxor(l, r),
                 BinOp::Shl => bc.ins().ishl(l, r),
-                BinOp::Shr => bc.ins().sshr(l, r),
+                BinOp::Shr => if u { bc.ins().ushr(l, r) } else { bc.ins().sshr(l, r) },
             }
+        }
+        Expr::Unary { op, operand } => {
+            let v = compile_expr_with_calls(bc, module, operand, params, param_vals, func_ids);
+            match op {
+                UnOp::Neg => if val_is_float(bc, v) { bc.ins().fneg(v) } else { bc.ins().ineg(v) },
+                UnOp::Not => if expr_is_bool(operand, params) { bc.ins().bxor_imm(v, 1) } else { bc.ins().bnot(v) },
+            }
+        }
+        Expr::Cast { value, target } => {
+            let v = compile_expr_with_calls(bc, module, value, params, param_vals, func_ids);
+            cast_value(bc, v, cl_type(target))
         }
         Expr::Call { func, args } => {
             let arg_vals: Vec<Value> = args.iter()
@@ -602,6 +698,8 @@ pub fn compile_to_clif(func: &FunctionDef) -> Result<String, String> {
     bc.switch_to_block(entry);
     bc.append_block_params_for_function_params(entry);
     let val = compile_expr(&mut bc, &func.body, &func.params);
+    let rt = cl_type(&func.return_type);
+    let val = coerce_int_width(&mut bc, val, rt);
     bc.ins().return_(&[val]);
     bc.seal_all_blocks();
     bc.finalize();
@@ -624,24 +722,37 @@ fn compile_expr(bc: &mut FunctionBuilder, expr: &Expr, params: &[flux_frontend::
         Expr::BinaryOp { op, left, right } => {
             let l = compile_expr(bc, left, params);
             let r = compile_expr(bc, right, params);
+            let (l, r) = unify_int_width(bc, l, r);
             let f = val_is_float(bc, l);
+            let u = expr_is_unsigned(left, params);
             match op {
                 BinOp::Add => if f { bc.ins().fadd(l, r) } else { bc.ins().iadd(l, r) },
                 BinOp::Sub => if f { bc.ins().fsub(l, r) } else { bc.ins().isub(l, r) },
                 BinOp::Mul => if f { bc.ins().fmul(l, r) } else { bc.ins().imul(l, r) },
-                BinOp::Div => if f { bc.ins().fdiv(l, r) } else { bc.ins().sdiv(l, r) },
+                BinOp::Div => if f { bc.ins().fdiv(l, r) } else if u { bc.ins().udiv(l, r) } else { bc.ins().sdiv(l, r) },
                 BinOp::Eq => if f { bc.ins().fcmp(FloatCC::Equal, l, r) } else { bc.ins().icmp(IntCC::Equal, l, r) },
                 BinOp::Neq => if f { bc.ins().fcmp(FloatCC::NotEqual, l, r) } else { bc.ins().icmp(IntCC::NotEqual, l, r) },
-                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(IntCC::SignedLessThan, l, r) },
-                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThan, l, r) },
-                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, l, r) },
-                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r) },
+                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedLessThan } else { IntCC::SignedLessThan }, l, r) },
+                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan }, l, r) },
+                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedLessThanOrEqual } else { IntCC::SignedLessThanOrEqual }, l, r) },
+                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(if u { IntCC::UnsignedGreaterThanOrEqual } else { IntCC::SignedGreaterThanOrEqual }, l, r) },
                 BinOp::And => bc.ins().band(l, r), BinOp::Or => bc.ins().bor(l, r),
-                BinOp::Rem => bc.ins().srem(l, r),
+                BinOp::Rem => if u { bc.ins().urem(l, r) } else { bc.ins().srem(l, r) },
                 BinOp::BitXor => bc.ins().bxor(l, r),
                 BinOp::Shl => bc.ins().ishl(l, r),
-                BinOp::Shr => bc.ins().sshr(l, r),
+                BinOp::Shr => if u { bc.ins().ushr(l, r) } else { bc.ins().sshr(l, r) },
             }
+        }
+        Expr::Unary { op, operand } => {
+            let v = compile_expr(bc, operand, params);
+            match op {
+                UnOp::Neg => if val_is_float(bc, v) { bc.ins().fneg(v) } else { bc.ins().ineg(v) },
+                UnOp::Not => if expr_is_bool(operand, params) { bc.ins().bxor_imm(v, 1) } else { bc.ins().bnot(v) },
+            }
+        }
+        Expr::Cast { value, target } => {
+            let v = compile_expr(bc, value, params);
+            cast_value(bc, v, cl_type(target))
         }
         Expr::Return(v) => compile_expr(bc, v, params),
         Expr::Block(stmts) => { let mut last = bc.ins().iconst(types::I64, 0); for s in stmts { last = compile_expr(bc, s, params); } last }
@@ -744,4 +855,49 @@ fn cl_type(ty: &TypeRef) -> Type {
     #[test] fn test_shl()            { assert!(clif_of("fn sl(a: i64, b: i64) -> i64 { return a << b }").contains("ishl")); }
     #[test] fn test_shr()            { assert!(clif_of("fn sr(a: i64, b: i64) -> i64 { return a >> b }").contains("sshr")); }
     #[test] fn test_signed_div_fix() { let c = clif_of("fn d(a: i64, b: i64) -> i64 { return a / b }"); assert!(c.contains("sdiv") && !c.contains("udiv"), "/ must be sdiv not udiv:\n{}", c); }
+
+    // ── 0.30.0 integer-width coercion: a non-i64 var mixed with an i64-default const must
+    // unify widths (the verifier rejects iadd/icmp on mismatched widths — same class as floats). ──
+    #[test] fn test_i32_const_width() { let u = flux_frontend::parse_source("fn f(a: i32) -> i32 { return a + 5 }", "t.rs").unwrap(); compile_unit_to_object(&u, &tmp("flux_i32c.o")).expect("i32 + const must verify (width-coerced)"); }
+    #[test] fn test_i16_const_width() { let u = flux_frontend::parse_source("fn f(a: i16) -> i16 { return a - 1 }", "t.rs").unwrap(); compile_unit_to_object(&u, &tmp("flux_i16c.o")).expect("i16 - const must verify"); }
+    #[test] fn test_i32_cmp_width()   { let u = flux_frontend::parse_source("fn f(a: i32) -> bool { return a < 5 }", "t.rs").unwrap(); compile_unit_to_object(&u, &tmp("flux_i32cmp.o")).expect("i32 compare with const must verify"); }
+    #[test] fn test_i64_width_noop()  { let u = flux_frontend::parse_source("fn f(a: i64) -> i64 { return a + 5 }", "t.rs").unwrap(); let c = compile_to_clif(&u.functions[0]).unwrap(); assert!(!c.contains("sextend") && !c.contains("ireduce"), "i64 path must stay coercion-free:\n{}", c); }
+
+    // ── 0.30.0 signedness: u32/u64 select unsigned ops; signed types stay signed ──
+    #[test] fn test_u32_div_unsigned()    { let c = clif_of("fn du(a: u32, b: u32) -> u32 { return a / b }"); assert!(c.contains("udiv") && !c.contains("sdiv"), "u32 / must be udiv:\n{}", c); }
+    #[test] fn test_u64_rem_unsigned()    { let c = clif_of("fn ru(a: u64, b: u64) -> u64 { return a % b }"); assert!(c.contains("urem") && !c.contains("srem"), "u64 % must be urem:\n{}", c); }
+    #[test] fn test_u32_cmp_unsigned()    { let c = clif_of("fn cu(a: u32, b: u32) -> bool { return a < b }"); assert!(c.contains("ult"), "u32 < must be unsigned (icmp ult):\n{}", c); }
+    #[test] fn test_i32_div_still_signed(){ let c = clif_of("fn ds(a: i32, b: i32) -> i32 { return a / b }"); assert!(c.contains("sdiv") && !c.contains("udiv"), "i32 / must stay sdiv:\n{}", c); }
+
+    // ── 0.30.0 unary operators: -x (ineg/fneg), !x (bnot for int, low-bit flip for bool) ──
+    #[test] fn test_neg_int()   { assert!(clif_of("fn ng(a: i64) -> i64 { return -a }").contains("ineg")); }
+    #[test] fn test_neg_float() { assert!(clif_of("fn nf(a: f64) -> f64 { return -a }").contains("fneg")); }
+    #[test] fn test_not_int()   { assert!(clif_of("fn ni(a: i64) -> i64 { return !a }").contains("bnot")); }
+    #[test] fn test_not_bool()  { let c = clif_of("fn nb(a: bool) -> bool { return !a }"); assert!(c.contains("bxor"), "bool ! must flip the low bit (bxor_imm), not bnot:\n{}", c); }
+
+    // ── 0.30.0 numeric casts (`as`): int widen/narrow, int<->float, f64->f32 ──
+    #[test] fn test_cast_widen()   { assert!(clif_of("fn ci(a: i32) -> i64 { return a as i64 }").contains("sextend")); }
+    #[test] fn test_cast_narrow()  { assert!(clif_of("fn cn(a: i64) -> i32 { return a as i32 }").contains("ireduce")); }
+    #[test] fn test_cast_int_flt() { assert!(clif_of("fn cf(a: i64) -> f64 { return a as f64 }").contains("fcvt_from_sint")); }
+    #[test] fn test_cast_flt_int() { assert!(clif_of("fn fi(a: f64) -> i64 { return a as i64 }").contains("fcvt_to_sint")); }
+    #[test] fn test_cast_f64_f32() { assert!(clif_of("fn fd(a: f64) -> f32 { return a as f32 }").contains("fdemote")); }
+
+    // Regression: a fractional float const `2.5f64` must lower to Float through the MIR (Expr)
+    // path, not truncate at the decimal to Int(2) — which produced imul(i64,f64) and a verifier
+    // reject. Replicates the exact fluxc-run path (parse_mir -> lower_mir_to_ir -> codegen).
+    #[test] fn test_cast_of_float_arith_mir() {
+        let mir = "fn main() -> i64 {\n    let mut _0: i64;\n    let mut _1: f64;\n    let mut _2: f64;\n    bb0: {\n        _2 = const 2.5f64;\n        _1 = Mul(move _2, const 4f64);\n        _0 = move _1 as i64 (FloatToInt);\n        return;\n    }\n}";
+        let funcs = flux_frontend::mir::parse_mir(mir).unwrap();
+        let fd = flux_frontend::mir::lower_mir_to_ir(&funcs[0]);
+        let u = flux_frontend::TranslationUnit { file_path: "t".into(), functions: vec![fd], structs: vec![], imports: vec![] };
+        compile_unit_to_object(&u, &tmp("cast_mir.o")).expect("cast of float-mul (MIR path) must verify");
+        let c = compile_to_clif(&u.functions[0]).unwrap();
+        assert!(c.contains("fmul") && c.contains("fcvt_to_sint_sat") && !c.contains("imul"), "expected fmul+fcvt, got:\n{}", c);
+    }
+
+    // Regression: parenthesized expressions must lower (syn::Expr::Paren), not become Empty -> 0.
+    #[test] fn test_paren_lowering() {
+        let c = clif_of("fn p(a: i64) -> i64 { return (a + 1) * 2 }");
+        assert!(c.contains("iadd") && c.contains("imul"), "parens dropped:\n{}", c);
+    }
 }

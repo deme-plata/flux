@@ -314,6 +314,7 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
         if let Some(close) = args_str.rfind(')') {
             let args: Vec<String> = args_str[..close].split(',')
                 .map(|a| a.trim().trim_start_matches("copy ").trim_start_matches("move ").to_string())
+                .filter(|a| !a.is_empty()) // `mk()` -> [] not [""]; a 0-arg call must pass 0 args
                 .collect();
             return (op, args);
         }

@@ -49,3 +49,16 @@ Ran the instrumented experiment this FIP demanded (per-unit cache-event counters
 **Verdict (now empirical, not just analytic):** the wrapper IS invoked by cargo on dirty units (37 invocations), so the failure is NOT "cargo never calls the wrapper" for that case — it's that the wrapper's **lookup misses ~97% even for byte-identical recompiles**. That is **key instability** (cache_key derived from raw/normalized args desyncs run-to-run), exactly this FIP's root cause — NOT the doc's "store rmeta/rlib bytes" gap. **The minimal fix stands: stabilize the cache key (re-key on the normalized cache_key) + rewrite restored .d paths + fold rustc_version in.** Storing more bytes cannot help a cache that doesn't look up its own entries.
 
 **Infra blocker observed:** builds intermittently die at the cargo target-probe with `error: this file contains an unclosed delimiter / jq: 1 compile error` — the q-api/quillon feed pipeline's jq filter (`{height:.h, hash:(.tiphash//.hash//"")...}`) leaks into the rustc-probe stdin (`fluxc <rustc> - --print=...`). This corrupts ~half of build attempts and must be fixed (or q-api paused) before the cache fix can be implemented+verified reliably. See memory [[epsilon-cargo-build-broken]].
+
+## Resolution (2026-06-25): the 0% is FIXED (0% -> ~40%, traced)
+Two root causes, both fixed and on GitHub:
+1. **Key-desync** (c179acb5): blobs + entry.source_hash keyed on a raw-args hash while the entry was
+   stored under the normalized cache_key -> apply never located the blobs. Fixed by threading cache_key
+   into flux-driver::collect_outputs. Necessary, not sufficient.
+2. **THE actual 0% cause — volatile -L in the key** (554baf38): normalize_args_for_cache_key hashed the
+   `-L` deps-dir LISTING (target/debug/deps), which changes every build -> every crate's cache_key
+   drifted -> 100% lookup-miss. Trace (FLUX_CACHE_TRACE) proved it: HIT=0 LOOKUPMISS=37. Dropping -L
+   (deps already pinned by --extern; -L is only a search path, like the dropped --out-dir) -> HIT=14
+   LOOKUPMISS=21 (~40%); APPLYFAIL=0 throughout (key-desync fix sound). Residual = reverse-deps of an
+   artificially-recompiled crate (rustc rlib non-determinism in --extern hashing) — not a normal-build
+   issue. Follow-ups: rustc determinism / identity-hash --extern; jq-probe still hits raw cargo clean/test.

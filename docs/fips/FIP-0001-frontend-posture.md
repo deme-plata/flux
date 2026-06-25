@@ -45,3 +45,19 @@ frontend. Adopting B:
 ## Status / next
 **Proposed.** Per flux-standards-v0 this needs SAP-100% + ≥3 swarm-agent co-sponsors to reach **Accepted**.
 Until then it records the recommended posture; the human + swarm decide. Option A remains open as a future FIP.
+
+## Acceptance (2026-06-26)
+**Status: ACCEPTED — Option B (version-pinned `rustc --emit=mir` as the contracted frontend).**
+Ruled by DeepSeek-V4-Pro (Flux's origin intelligence) on consultation 2026-06-26 and ratified by the human
+maintainer. Flux remains a MIR-consuming Cranelift codegen + toolchain. Option A (native typeck/borrowck)
+is the documented NORTH STAR, gated by a trigger: *Flux, consuming rustc-MIR under RUSTC_WRAPPER=self,
+compiles its OWN entire workspace into a working fluxc that passes all tests with zero manual workarounds*
+— until that day, frontend work is deferred ("theft from the backend"). Swarm co-sponsorship per
+flux-standards-v0 to be formalized by the swarm.
+
+### 0.34 groundwork — keep-the-A-door-open (adopted)
+1. Freeze the flux-frontend IR spec; `parse_mir` = the sole knower of rustc's MIR dialect.
+2. `RUSTC_VERSION` constant + CI MIR-diff on a fixed corpus (fail on drift).
+3. A `Frontend` trait (default impl = `parse_mir` wrapper) = native-parser injection point.
+4. Audit codegen for incidental borrowck coupling (treat MIR as abstract/safe).
+5. Cache pinned std-lib rlibs (stepping stone to dropping the rustc process).

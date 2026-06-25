@@ -560,6 +560,7 @@ fn lower_mir_op(op: &str, args: &[String], pn: &[String]) -> crate::Expr {
         "SubWithOverflow" | "Sub"            if args.len() >= 2 => binop(BinOp::Sub, args),
         "MulWithOverflow" | "Mul"            if args.len() >= 2 => binop(BinOp::Mul, args),
         "Div"                                if args.len() >= 2 => binop(BinOp::Div, args),
+        "Rem"                                if args.len() >= 2 => binop(BinOp::Rem, args),
         "Eq"                                 if args.len() >= 2 => binop(BinOp::Eq, args),
         "Ne"                                 if args.len() >= 2 => binop(BinOp::Neq, args),
         "Lt"                                 if args.len() >= 2 => binop(BinOp::Lt, args),
@@ -568,6 +569,9 @@ fn lower_mir_op(op: &str, args: &[String], pn: &[String]) -> crate::Expr {
         "Ge"                                 if args.len() >= 2 => binop(BinOp::Ge, args),
         "BitAnd"                             if args.len() >= 2 => binop(BinOp::And, args),
         "BitOr"                              if args.len() >= 2 => binop(BinOp::Or, args),
+        "BitXor"                             if args.len() >= 2 => binop(BinOp::BitXor, args),
+        "Shl" | "ShlUnchecked"               if args.len() >= 2 => binop(BinOp::Shl, args),
+        "Shr" | "ShrUnchecked"               if args.len() >= 2 => binop(BinOp::Shr, args),
         "copy" | "move" | "Use" | "const"    if args.len() >= 1 => lower_operand(&args[0], pn),
         _ => Expr::Empty,
     }
@@ -589,17 +593,18 @@ fn lower_operand(op: &str, pn: &[String]) -> crate::Expr {
         }
         crate::Expr::Variable(c.to_string())
     } else if let Some(rest) = c.strip_prefix("const ") {
-        // MIR literals: "const 2_i64", "const -5_i32", "const 1u8", "const 0.5_f64".
-        let head = rest.split('_').next().unwrap_or("")
-            .trim_end_matches(|c: char| c.is_ascii_alphabetic());
-        if let Ok(i) = head.parse::<i64>() {
-            crate::Expr::Literal(crate::Literal::Int(i))
-        } else if let Ok(f) = head.parse::<f64>() {
-            crate::Expr::Literal(crate::Literal::Float(f))
-        } else if rest == "true" {
+        // MIR literals: ints "const 2_i64", "const -5_i32" (underscore + suffix);
+        // floats "const 0f64", "const 1.5f64" (suffix attached, NO underscore); "const true".
+        let r = rest.trim();
+        if r == "true" {
             crate::Expr::Literal(crate::Literal::Bool(true))
-        } else if rest == "false" {
+        } else if r == "false" {
             crate::Expr::Literal(crate::Literal::Bool(false))
+        } else if let Some(num) = r.strip_suffix("f64").or_else(|| r.strip_suffix("f32")) {
+            crate::Expr::Literal(crate::Literal::Float(num.trim_end_matches('_').parse().unwrap_or(0.0)))
+        } else if let Ok(i) = r.split('_').next().unwrap_or("")
+            .trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse::<i64>() {
+            crate::Expr::Literal(crate::Literal::Int(i))
         } else {
             crate::Expr::Empty
         }

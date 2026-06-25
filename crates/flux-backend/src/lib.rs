@@ -5,7 +5,7 @@
 use flux_frontend::{FunctionDef, TypeRef, Expr, Literal, BinOp, TranslationUnit};
 use flux_frontend::mir::{MirFunction, MirStmt, MirTerminator};
 use cranelift_codegen::ir::{types, Type, AbiParam, Block, UserFuncName, Function, Signature, InstBuilder, Value};
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -300,7 +300,10 @@ fn compile_mir_into_function(
                     for (val_str, target_label) in targets {
                         let value: i64 = val_str.parse().unwrap_or(0);
                         let discr_v = resolve_mir_operand_to_value(discr, &vars, &tuple_vars, &mut bc);
-                        let const_v = bc.ins().iconst(types::I64, value);
+                        // Match the comparison constant's int width to the discriminant
+                        // (i8/i16/i32/i64) so the icmp is type-consistent for non-i64 scrutinees.
+                        let dty = bc.func.dfg.value_type(discr_v);
+                        let const_v = bc.ins().iconst(dty, value);
                         let eq = bc.ins().icmp(IntCC::Equal, discr_v, const_v);
                         let target_bb = *blocks.get(target_label)
                             .ok_or_else(|| format!("SwitchInt target '{}' not found", target_label))?;
@@ -390,13 +393,24 @@ fn resolve_mir_operand_to_value(
     }
 
     if let Some(rest) = c.strip_prefix("const ") {
-        let head = rest.split('_').next().unwrap_or("")
+        let r = rest.trim();
+        if r == "true"  { return bc.ins().iconst(types::I8, 1); }
+        if r == "false" { return bc.ins().iconst(types::I8, 0); }
+        // Floats: rustc renders them as `0f64` / `1.5f64` / `2.5e3f32` — the f-suffix is
+        // attached DIRECTLY (no underscore, unlike ints `3_i64`). Strip the suffix, then
+        // parse, or the literal falls back to iconst(I64) and mismatches its F64 Variable
+        // (a `def_var` type-mismatch panic / verifier reject).
+        if let Some(num) = r.strip_suffix("f64").or_else(|| r.strip_suffix("f32")) {
+            if let Ok(f) = num.trim_end_matches('_').parse::<f64>() {
+                return bc.ins().f64const(f);
+            }
+        }
+        // Integers: `3_i64`, `-5_i32`, or bare `42`.
+        let head = r.split('_').next().unwrap_or("")
             .trim_end_matches(|c: char| c.is_ascii_alphabetic());
         if let Ok(i) = head.parse::<i64>() {
             return bc.ins().iconst(types::I64, i);
         }
-        if rest == "true" { return bc.ins().iconst(types::I8, 1); }
-        if rest == "false" { return bc.ins().iconst(types::I8, 0); }
     }
 
     if let Ok(i) = c.parse::<i64>() {
@@ -404,6 +418,12 @@ fn resolve_mir_operand_to_value(
     }
 
     bc.ins().iconst(types::I64, 0)
+}
+
+/// True if a Cranelift Value carries a float type. Used to dispatch f-ops vs i-ops so the
+/// float typing already present in cl_type / mir_type_to_cl is actually honored in codegen.
+fn val_is_float(bc: &mut FunctionBuilder, v: Value) -> bool {
+    matches!(bc.func.dfg.value_type(v), types::F64 | types::F32)
 }
 
 fn compile_mir_op_to_value(
@@ -421,18 +441,22 @@ fn compile_mir_op_to_value(
         (a, b)
     };
     match op {
-        "AddWithOverflow" | "Add" => { let (a, b) = two_args(bc); bc.ins().iadd(a, b) }
-        "SubWithOverflow" | "Sub" => { let (a, b) = two_args(bc); bc.ins().isub(a, b) }
-        "MulWithOverflow" | "Mul" => { let (a, b) = two_args(bc); bc.ins().imul(a, b) }
-        "Div"                     => { let (a, b) = two_args(bc); bc.ins().udiv(a, b) }
-        "Eq"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::Equal, a, b) }
-        "Ne"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::NotEqual, a, b) }
-        "Lt"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::SignedLessThan, a, b) }
-        "Gt"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::SignedGreaterThan, a, b) }
-        "Le"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::SignedLessThanOrEqual, a, b) }
-        "Ge"     => { let (a, b) = two_args(bc); bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, a, b) }
+        "AddWithOverflow" | "Add" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fadd(a, b) } else { bc.ins().iadd(a, b) } }
+        "SubWithOverflow" | "Sub" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fsub(a, b) } else { bc.ins().isub(a, b) } }
+        "MulWithOverflow" | "Mul" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fmul(a, b) } else { bc.ins().imul(a, b) } }
+        "Div"                     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fdiv(a, b) } else { bc.ins().sdiv(a, b) } }
+        "Eq"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::Equal, a, b) } else { bc.ins().icmp(IntCC::Equal, a, b) } }
+        "Ne"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::NotEqual, a, b) } else { bc.ins().icmp(IntCC::NotEqual, a, b) } }
+        "Lt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThan, a, b) } else { bc.ins().icmp(IntCC::SignedLessThan, a, b) } }
+        "Gt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThan, a, b) } else { bc.ins().icmp(IntCC::SignedGreaterThan, a, b) } }
+        "Le"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThanOrEqual, a, b) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, a, b) } }
+        "Ge"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, a, b) } }
         "BitAnd" => { let (a, b) = two_args(bc); bc.ins().band(a, b) }
         "BitOr"  => { let (a, b) = two_args(bc); bc.ins().bor(a, b) }
+        "Rem"    => { let (a, b) = two_args(bc); bc.ins().srem(a, b) }
+        "BitXor" => { let (a, b) = two_args(bc); bc.ins().bxor(a, b) }
+        "Shl" | "ShlUnchecked" => { let (a, b) = two_args(bc); bc.ins().ishl(a, b) }
+        "Shr" | "ShrUnchecked" => { let (a, b) = two_args(bc); bc.ins().sshr(a, b) }
         "copy" | "move" | "Use" | "const" => {
             args.first().map(|a| resolve_mir_operand_to_value(a, vars, tuple_vars, bc))
                 .unwrap_or_else(|| bc.ins().iconst(types::I64, 0))
@@ -492,16 +516,23 @@ fn compile_expr_with_calls(
         Expr::BinaryOp { op, left, right } => {
             let l = compile_expr_with_calls(bc, module, left, params, param_vals, func_ids);
             let r = compile_expr_with_calls(bc, module, right, params, param_vals, func_ids);
+            let f = val_is_float(bc, l);
             match op {
-                BinOp::Add => bc.ins().iadd(l, r), BinOp::Sub => bc.ins().isub(l, r),
-                BinOp::Mul => bc.ins().imul(l, r), BinOp::Div => bc.ins().udiv(l, r),
-                BinOp::Eq => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, l, r),
-                BinOp::Neq => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, l, r),
-                BinOp::Lt => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, l, r),
-                BinOp::Gt => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, l, r),
-                BinOp::Le => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, l, r),
-                BinOp::Ge => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, l, r),
+                BinOp::Add => if f { bc.ins().fadd(l, r) } else { bc.ins().iadd(l, r) },
+                BinOp::Sub => if f { bc.ins().fsub(l, r) } else { bc.ins().isub(l, r) },
+                BinOp::Mul => if f { bc.ins().fmul(l, r) } else { bc.ins().imul(l, r) },
+                BinOp::Div => if f { bc.ins().fdiv(l, r) } else { bc.ins().sdiv(l, r) },
+                BinOp::Eq => if f { bc.ins().fcmp(FloatCC::Equal, l, r) } else { bc.ins().icmp(IntCC::Equal, l, r) },
+                BinOp::Neq => if f { bc.ins().fcmp(FloatCC::NotEqual, l, r) } else { bc.ins().icmp(IntCC::NotEqual, l, r) },
+                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(IntCC::SignedLessThan, l, r) },
+                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThan, l, r) },
+                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, l, r) },
+                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r) },
                 BinOp::And => bc.ins().band(l, r), BinOp::Or => bc.ins().bor(l, r),
+                BinOp::Rem => bc.ins().srem(l, r),
+                BinOp::BitXor => bc.ins().bxor(l, r),
+                BinOp::Shl => bc.ins().ishl(l, r),
+                BinOp::Shr => bc.ins().sshr(l, r),
             }
         }
         Expr::Call { func, args } => {
@@ -593,16 +624,23 @@ fn compile_expr(bc: &mut FunctionBuilder, expr: &Expr, params: &[flux_frontend::
         Expr::BinaryOp { op, left, right } => {
             let l = compile_expr(bc, left, params);
             let r = compile_expr(bc, right, params);
+            let f = val_is_float(bc, l);
             match op {
-                BinOp::Add => bc.ins().iadd(l, r), BinOp::Sub => bc.ins().isub(l, r),
-                BinOp::Mul => bc.ins().imul(l, r), BinOp::Div => bc.ins().udiv(l, r),
-                BinOp::Eq => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, l, r),
-                BinOp::Neq => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, l, r),
-                BinOp::Lt => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, l, r),
-                BinOp::Gt => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, l, r),
-                BinOp::Le => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, l, r),
-                BinOp::Ge => bc.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, l, r),
+                BinOp::Add => if f { bc.ins().fadd(l, r) } else { bc.ins().iadd(l, r) },
+                BinOp::Sub => if f { bc.ins().fsub(l, r) } else { bc.ins().isub(l, r) },
+                BinOp::Mul => if f { bc.ins().fmul(l, r) } else { bc.ins().imul(l, r) },
+                BinOp::Div => if f { bc.ins().fdiv(l, r) } else { bc.ins().sdiv(l, r) },
+                BinOp::Eq => if f { bc.ins().fcmp(FloatCC::Equal, l, r) } else { bc.ins().icmp(IntCC::Equal, l, r) },
+                BinOp::Neq => if f { bc.ins().fcmp(FloatCC::NotEqual, l, r) } else { bc.ins().icmp(IntCC::NotEqual, l, r) },
+                BinOp::Lt => if f { bc.ins().fcmp(FloatCC::LessThan, l, r) } else { bc.ins().icmp(IntCC::SignedLessThan, l, r) },
+                BinOp::Gt => if f { bc.ins().fcmp(FloatCC::GreaterThan, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThan, l, r) },
+                BinOp::Le => if f { bc.ins().fcmp(FloatCC::LessThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedLessThanOrEqual, l, r) },
+                BinOp::Ge => if f { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) } else { bc.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r) },
                 BinOp::And => bc.ins().band(l, r), BinOp::Or => bc.ins().bor(l, r),
+                BinOp::Rem => bc.ins().srem(l, r),
+                BinOp::BitXor => bc.ins().bxor(l, r),
+                BinOp::Shl => bc.ins().ishl(l, r),
+                BinOp::Shr => bc.ins().sshr(l, r),
             }
         }
         Expr::Return(v) => compile_expr(bc, v, params),
@@ -618,4 +656,92 @@ fn cl_type(ty: &TypeRef) -> Type {
 #[cfg(test)] mod tests { use super::*;
     #[test] fn test_add() { let u=flux_frontend::parse_source("fn add(a: i64, b: i64) -> i64 { return a + b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).unwrap().contains("function")); }
     #[test] fn test_mul() { let u=flux_frontend::parse_source("fn mul(a: i64, b: i64) -> i64 { return a * b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).is_ok()); }
+
+    // ── float codegen (verifier-backed) ────────────────────────────────────────────
+    // compile_unit_to_object runs module.define_function, which runs the Cranelift CLIF
+    // verifier — it REJECTS iadd/imul/icmp on F64 operands. So a green object == the
+    // float instruction was type-correctly selected. (compile_to_clif alone does NOT
+    // verify, so we assert the object, not just the CLIF string shape.)
+    fn tmp(name: &str) -> std::path::PathBuf { let mut p = std::env::temp_dir(); p.push(name); p }
+
+    #[test] fn test_float_expr_object_verifies() {
+        let u = flux_frontend::parse_source("fn fmul(a: f64, b: f64) -> f64 { return a * b }", "t.rs").unwrap();
+        compile_unit_to_object(&u, &tmp("flux_fmul.o")).expect("f64 mul must verify — fmul selected, not imul");
+        let clif = compile_to_clif(&u.functions[0]).unwrap();
+        assert!(clif.contains("fmul"), "expected fmul, got:\n{}", clif);
+        assert!(!clif.contains("imul"), "must NOT emit imul on f64");
+    }
+
+    #[test] fn test_float_compare_object_verifies() {
+        let u = flux_frontend::parse_source("fn flt(a: f64, b: f64) -> bool { return a < b }", "t.rs").unwrap();
+        compile_unit_to_object(&u, &tmp("flux_flt.o")).expect("f64 compare must verify — fcmp selected");
+        assert!(compile_to_clif(&u.functions[0]).unwrap().contains("fcmp"));
+    }
+
+    // Control: the integer path must stay byte-identical AND this proves the
+    // object-emit harness itself works on this host (disambiguates codegen vs platform).
+    #[test] fn test_int_nonregression_object_verifies() {
+        let u = flux_frontend::parse_source("fn imul2(a: i64, b: i64) -> i64 { return a * b }", "t.rs").unwrap();
+        compile_unit_to_object(&u, &tmp("flux_imul.o")).expect("i64 mul must verify");
+        let clif = compile_to_clif(&u.functions[0]).unwrap();
+        assert!(clif.contains("imul") && !clif.contains("fmul"));
+    }
+
+    // The headline fix: float on the MIR-direct path (loops). Hand-build the MIR for
+    //   fn faccum() -> f64 { let mut acc=0.0; let mut i=0; while i<3 { acc=acc+1.5; i=i+1 } acc }  // → 4.5
+    // and compile via compile_unit_to_object_with_mir → compile_mir_into_function →
+    // define_function (verifier). Without the fix, Add(_1, const 1.5_f64) resolves the
+    // const to iconst(I64,0) and emits iadd on F64 → the verifier rejects the function.
+    #[test] fn test_float_mir_loop_object_verifies() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign {
+            dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        let loc = |i: usize, ty: &str| MirLocal { index: i, name: format!("_{}", i), ty: ty.into(), mutable: true };
+        let mir = MirFunction {
+            name: "faccum".into(), params: vec![], return_type: "f64".into(),
+            locals: vec![loc(0, "f64"), loc(1, "f64"), loc(2, "i64"), loc(3, "bool")],
+            blocks: vec![
+                MirBlock { label: "bb0".into(), statements: vec![
+                    asg("_1", "const", &["const 0f64"]),
+                    asg("_2", "const", &["const 0_i64"]),
+                ], terminator: Some(MirTerminator::Goto("bb1".into())) },
+                MirBlock { label: "bb1".into(), statements: vec![
+                    asg("_3", "Lt", &["_2", "const 3_i64"]),
+                ], terminator: Some(MirTerminator::SwitchInt {
+                    discr: "_3".into(), targets: vec![("0".into(), "bb3".into())], otherwise: "bb2".into() }) },
+                MirBlock { label: "bb2".into(), statements: vec![
+                    asg("_1", "Add", &["_1", "const 1.5f64"]),
+                    asg("_2", "Add", &["_2", "const 1_i64"]),
+                ], terminator: Some(MirTerminator::Goto("bb1".into())) },
+                MirBlock { label: "bb3".into(), statements: vec![
+                    asg("_0", "copy", &["_1"]),
+                ], terminator: Some(MirTerminator::Return) },
+            ],
+        };
+        let u = flux_frontend::parse_source("fn faccum() -> f64 { return 0.0 }", "t.rs").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("faccum".to_string(), mir);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("flux_faccum.o"))
+            .expect("MIR-path f64 loop must verify — f64const + fadd selected through the loop");
+    }
+
+    // ── 0.29.0 new operators: %, ^, &, |, <<, >> + signed div ──────────────────────
+    // Each compiles to an object (verifier-backed) AND asserts the right Cranelift op is
+    // selected — instruction selection determines the runtime value, so the string check
+    // is the value proof the verifier alone can't give. Unique fn name per test = unique
+    // temp object file (cargo runs tests in parallel).
+    fn clif_of(src: &str) -> String {
+        let u = flux_frontend::parse_source(src, "t.rs").unwrap();
+        let fname = format!("flux_op_{}.o", u.functions[0].name);
+        compile_unit_to_object(&u, &tmp(&fname)).expect("must verify");
+        compile_to_clif(&u.functions[0]).unwrap()
+    }
+    #[test] fn test_modulo_srem()    { assert!(clif_of("fn r(a: i64, b: i64) -> i64 { return a % b }").contains("srem")); }
+    #[test] fn test_bitxor()         { assert!(clif_of("fn x(a: i64, b: i64) -> i64 { return a ^ b }").contains("bxor")); }
+    #[test] fn test_bitand_fix()     { let c = clif_of("fn n(a: i64, b: i64) -> i64 { return a & b }"); assert!(c.contains("band") && !c.contains("iadd"), "& must be band not iadd:\n{}", c); }
+    #[test] fn test_bitor()          { assert!(clif_of("fn o(a: i64, b: i64) -> i64 { return a | b }").contains("bor")); }
+    #[test] fn test_shl()            { assert!(clif_of("fn sl(a: i64, b: i64) -> i64 { return a << b }").contains("ishl")); }
+    #[test] fn test_shr()            { assert!(clif_of("fn sr(a: i64, b: i64) -> i64 { return a >> b }").contains("sshr")); }
+    #[test] fn test_signed_div_fix() { let c = clif_of("fn d(a: i64, b: i64) -> i64 { return a / b }"); assert!(c.contains("sdiv") && !c.contains("udiv"), "/ must be sdiv not udiv:\n{}", c); }
 }

@@ -87,7 +87,7 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BinOp { Add, Sub, Mul, Div, Eq, Neq, Lt, Gt, Le, Ge, And, Or }
+pub enum BinOp { Add, Sub, Mul, Div, Rem, Eq, Neq, Lt, Gt, Le, Ge, And, Or, BitXor, Shl, Shr }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Visibility { Public, Private }
@@ -288,14 +288,20 @@ fn lower_binop(op: &syn::BinOp) -> BinOp {
         syn::BinOp::Sub(_) => BinOp::Sub,
         syn::BinOp::Mul(_) => BinOp::Mul,
         syn::BinOp::Div(_) => BinOp::Div,
+        syn::BinOp::Rem(_) => BinOp::Rem,
         syn::BinOp::Eq(_) => BinOp::Eq,
         syn::BinOp::Ne(_) => BinOp::Neq,
         syn::BinOp::Lt(_) => BinOp::Lt,
         syn::BinOp::Gt(_) => BinOp::Gt,
         syn::BinOp::Le(_) => BinOp::Le,
         syn::BinOp::Ge(_) => BinOp::Ge,
-        syn::BinOp::And(_) => BinOp::And,
-        syn::BinOp::Or(_) => BinOp::Or,
+        syn::BinOp::And(_) => BinOp::And,   // logical && on bools → band (0/1)
+        syn::BinOp::Or(_) => BinOp::Or,     // logical || on bools → bor  (0/1)
+        syn::BinOp::BitAnd(_) => BinOp::And, // FIX: was falling through to Add
+        syn::BinOp::BitOr(_) => BinOp::Or,   // FIX: was falling through to Add
+        syn::BinOp::BitXor(_) => BinOp::BitXor,
+        syn::BinOp::Shl(_) => BinOp::Shl,
+        syn::BinOp::Shr(_) => BinOp::Shr,
         _ => BinOp::Add,
     }
 }

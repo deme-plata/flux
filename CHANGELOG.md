@@ -1,5 +1,21 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.29.0 — Numeric & Bitwise Codegen (2026-06-25)
+
+Native Phase-3 backend (`flux-backend`) now compiles the full set of scalar **binary** operators correctly and verifier-clean.
+
+### Added
+- **Float arithmetic & comparison** (`f64`/`f32`): `+ - * /` and `== != < > <= >=` emit `fadd/fsub/fmul/fdiv` + `fcmp` (previously emitted integer ops on float bit patterns → CLIF verifier rejection). MIR float literals parsed in both forms (`0f64`, `1.5f64`), threaded through the MIR-direct and Expr codegen paths.
+- **New operators**: modulo `%` (`srem`), bitwise XOR `^` (`bxor`), shifts `<<` `>>` (`ishl`/`sshr`).
+
+### Fixed
+- **Bitwise `&` / `|` compiled to addition** — `syn::BinOp::BitAnd`/`BitOr` fell through to `BinOp::Add`; now map to `band`/`bor`.
+- **Division was unsigned** (`udiv`) despite signed comparisons — now `sdiv`.
+
+### Verified
+- 13 verifier-backed unit tests (object emission via `define_function`) + a negative control proving the bug was real; end-to-end on epsilon's rustc 1.93 via `fluxc run` (`%`→2, `&`→8, `^`→6, `<<`→16, signed `-18/4`→-4, float loop→7).
+
+
 ## v0.6.0 — Self-Hosting Compiler (2026-05-27)
 **Commit:** `cdc96b3` · 1054 files · 1132+ / 424-
 

@@ -57,7 +57,7 @@ pub fn compile_unit_to_object_with_mir(
         for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); }
         // Aggregate (tuple) by-value return: one AbiParam per field, taken from the MIR
         // override's type string (TypeRef can't express tuples). Else a single scalar return.
-        match mir_overrides.get(&func.name).and_then(|m| parse_tuple_type(&m.return_type)) {
+        match mir_overrides.get(&func.name).and_then(|m| aggregate_fields(&m.return_type, &struct_layout)) {
             Some(fields) => for f in &fields { sig.returns.push(AbiParam::new(mir_type_to_cl(f))); },
             None => sig.returns.push(AbiParam::new(cl_type(&func.return_type))),
         }
@@ -270,8 +270,9 @@ fn compile_mir_into_function(
 
         match &mir_block.terminator {
             Some(MirTerminator::Return) => {
-                if let Some(fields) = parse_tuple_type(&mir.return_type) {
-                    // Aggregate-by-value return: return every scalar-replaced field of _0.
+                if let Some(fields) = aggregate_fields(&mir.return_type, structs) {
+                    // Aggregate-by-value return (tuple OR named struct): return every
+                    // scalar-replaced field of _0.
                     let vals: Vec<Value> = (0..fields.len())
                         .map(|i| tuple_vars.get(&(0, i)).map(|&v| bc.use_var(v))
                             .unwrap_or_else(|| bc.ins().iconst(mir_type_to_cl(&fields[i]), 0)))
@@ -1036,5 +1037,59 @@ fn cl_type(ty: &TypeRef) -> Type {
         ov.insert("mk".to_string(), mk);
         ov.insert("main".to_string(), main);
         compile_unit_to_object_with_mir(&u, &ov, &tmp("call.o")).expect("tuple-returning call must verify (multi-result destructure)");
+    }
+
+    // Reproduces the EXACT fluxc-run path (parse_mir -> parse_rhs) for a tuple-returning call.
+    // Regression: `_1 = mk()` parsed mk's empty parens as args=[""] -> main called the 0-param mk
+    // with 1 arg -> verifier reject. parse_rhs must yield [] for `mk()`.
+    #[test] fn test_tuple_returning_call_real_mir() {
+        let mir = "fn mk() -> (i64, i64) {\n    let mut _0: (i64, i64);\n    bb0: {\n        _0 = (const 3_i64, const 4_i64);\n        return;\n    }\n}\n\nfn main() -> i64 {\n    let mut _0: i64;\n    let _1: (i64, i64);\n    let mut _2: i64;\n    let mut _3: i64;\n    let mut _4: (i64, bool);\n    bb0: {\n        _1 = mk() -> [return: bb1, unwind continue];\n    }\n    bb1: {\n        _2 = copy (_1.0: i64);\n        _3 = copy (_1.1: i64);\n        _4 = AddWithOverflow(copy _2, copy _3);\n        assert(!move (_4.1: bool), \"x\") -> [success: bb2, unwind continue];\n    }\n    bb2: {\n        _0 = move (_4.0: i64);\n        return;\n    }\n}";
+        let funcs = flux_frontend::mir::parse_mir(mir).unwrap();
+        let u = flux_frontend::parse_source("fn mk() -> i64 { return 0 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        for f in &funcs { ov.insert(f.name.clone(), f.clone()); }
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("realcall.o")).expect("real tuple-returning-call MIR must verify (mk() => 0 args)");
+    }
+
+    // 0.33 ADVERSARIAL: struct-RETURNING call. `fn mk() -> P { P{x,y} } fn main(){ let p=mk(); p.x+p.y }`.
+    // The fix (aggregate_fields at both sig + return sites) must declare mk with a 2-element return
+    // and emit 2 return values + distribute both into p's fields. Pre-fix mk()->P collapses to 1.
+    #[test] fn test_struct_returning_call_mir() {
+        use flux_frontend::mir::{MirFunction, MirLocal, MirBlock, MirStmt, MirTerminator};
+        let asg = |dst: &str, op: &str, args: &[&str]| MirStmt::Assign { dst: dst.into(), op: op.into(), args: args.iter().map(|s| s.to_string()).collect() };
+        let mk = MirFunction {
+            name: "mk".into(), params: vec![], return_type: "P".into(),
+            locals: vec![ MirLocal{index:0,name:"_0".into(),ty:"P".into(),mutable:true} ],
+            blocks: vec![ MirBlock { label: "bb0".into(), statements: vec![ asg("_0","",&["const 6_i64","const 7_i64"]) ], terminator: Some(MirTerminator::Return) } ],
+        };
+        let main = MirFunction {
+            name: "main".into(), params: vec![], return_type: "i64".into(),
+            locals: vec![
+                MirLocal{index:0,name:"_0".into(),ty:"i64".into(),mutable:true},
+                MirLocal{index:1,name:"_1".into(),ty:"P".into(),mutable:true},
+            ],
+            blocks: vec![
+                MirBlock { label: "bb0".into(), statements: vec![], terminator: Some(MirTerminator::Call{ func:"mk".into(), args: vec![], dst:"_1".into(), target:"bb1".into() }) },
+                MirBlock { label: "bb1".into(), statements: vec![ asg("_0","Add",&["_1.0","_1.1"]) ], terminator: Some(MirTerminator::Return) },
+            ],
+        };
+        let u = flux_frontend::parse_source("struct P { x: i64, y: i64 }\nfn mk() -> i64 { return 0 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        assert_eq!(u.structs.len(), 1, "struct P must be in the unit for struct_layout to resolve it");
+        let mut ov = std::collections::HashMap::new();
+        ov.insert("mk".to_string(), mk);
+        ov.insert("main".to_string(), main);
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("struct_call.o")).expect("struct-returning call must verify (2-result sig + distribute)");
+    }
+
+    // Real fluxc parse_mir path: `fn mk() -> P` yields return_type "P" (bare name, bypasses
+    // parse_tuple_type) — this is the exact bug. struct P must be declared in the source unit.
+    #[test] fn test_struct_returning_call_real_mir() {
+        let mir = "fn mk() -> P {\n    let mut _0: P;\n    bb0: {\n        _0 = P { x: const 6_i64, y: const 7_i64 };\n        return;\n    }\n}\n\nfn main() -> i64 {\n    let mut _0: i64;\n    let _1: P;\n    let mut _2: i64;\n    let mut _3: i64;\n    bb0: {\n        _1 = mk() -> [return: bb1, unwind continue];\n    }\n    bb1: {\n        _2 = copy (_1.0: i64);\n        _3 = copy (_1.1: i64);\n        _0 = Add(copy _2, copy _3);\n        return;\n    }\n}";
+        let funcs = flux_frontend::mir::parse_mir(mir).unwrap();
+        assert_eq!(funcs[0].return_type, "P", "mk's return_type must be the bare struct name 'P'");
+        let u = flux_frontend::parse_source("struct P { x: i64, y: i64 }\nfn mk() -> i64 { return 0 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        let mut ov = std::collections::HashMap::new();
+        for f in &funcs { ov.insert(f.name.clone(), f.clone()); }
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("realstructcall.o")).expect("real struct-returning-call MIR must verify");
     }
 }

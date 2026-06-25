@@ -153,7 +153,11 @@ fn parse_fn_header(header: &str) -> Result<(String, Vec<MirLocal>, String), Stri
     let params_str = &rest[paren_idx+1..close_paren];
     let return_part = &rest[close_paren+1..];
 
-    let return_type = return_part.trim_start_matches("-> ").trim().to_string();
+    // Trim BEFORE stripping the arrow: rustc renders `) -> T` so return_part has a
+    // leading space (" -> T"). trim_start_matches("-> ") can't match past that space,
+    // which left the arrow glued on ("-> (i64,i64)") and made parse_tuple_type's
+    // starts_with('(') fail -> tuple/struct returns silently collapsed to 1 value.
+    let return_type = return_part.trim().trim_start_matches("->").trim().to_string();
 
     let mut params = Vec::new();
     for (i, p) in params_str.split(',').enumerate() {
@@ -716,6 +720,31 @@ mod tests {
         assert_eq!(funcs[0].name, "add");
         assert_eq!(funcs[0].params.len(), 2);
         assert_eq!(funcs[0].blocks.len(), 1);
+        // scalar return type must be the clean form, NOT "-> i64"
+        assert_eq!(funcs[0].return_type, "i64");
+    }
+
+    #[test]
+    fn test_parse_fn_header_return_arrow_stripped() {
+        // Regression: rustc renders `) -> (i64, i64)` with a leading space before the
+        // arrow. The header parser must strip the arrow so return_type is the clean
+        // "(i64, i64)" — else parse_tuple_type's starts_with('(') fails and a
+        // tuple/struct-returning fn silently collapses to a single return value
+        // (the c1=3-not-7 / c2=0-not-42 aggregate-returning-call bug).
+        let mir = r#"fn mk() -> (i64, i64) {
+    let mut _0: (i64, i64);
+    bb0: {
+        _0 = (const 3_i64, const 4_i64);
+        return;
+    }
+}"#;
+        let funcs = parse_mir(mir).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "mk");
+        assert_eq!(funcs[0].return_type, "(i64, i64)",
+            "return_type must be clean, got {:?}", funcs[0].return_type);
+        assert!(!funcs[0].return_type.contains("->"),
+            "no arrow may survive in return_type");
     }
 
     #[test]

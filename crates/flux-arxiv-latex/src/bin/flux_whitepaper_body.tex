@@ -1,0 +1,138 @@
+
+\textbf{Abstract}
+Flux is a hybrid self-hosting Rust compiler that deliberately borrows the official Rust compiler's frontend---parse, type-check, borrow-check---and only owns the code generation and build infrastructure. Concretely, Flux consumes the stable, post-borrowck MIR emitted by \texttt{rustc --emit=mir} and translates it through its own IR to Cranelift-generated machine code, backed by a content-addressed build cache and a BLAKE3-native version control system. This architecture is not a shortcut; it is a principled recognition that the safety-critical frontend can be contracted as a version-pinned service, letting a small team (or an AI-collaborative swarm) ship a working self-hosting compiler in months rather than years. We present the design rationale, the FIP-0001 posture on native frontend ambitions, the type-complexity ladder that guides our incremental self-hosting, and what Flux demonstrates about pragmatic compiler construction when the memory-safety guarantee is explicitly delegated to the incumbent.
+
+
+\section{Introduction}
+
+The canonical narrative in systems programming holds that a \texttt{}real'' compiler must be self-hosting, and that self-hosting demands a full-stack reimplementation of every phase---lexing, parsing, type checking, borrow checking, codegen---in the new language. Rust's own history reinforced this: \texttt{rustc} bootstrapped itself by eating its own tail, rewriting each component in Rust after an initial OCaml bootstrap. The result is a towering achievement, but also a multi-year, multi-team undertaking that no small group can replicate casually. If we insist on the full-rewrite path, self-hosting remains a privilege of massive projects.
+
+Flux rejects that orthodoxy. Our thesis is that \textbf{a self-hosting compiler does not need to re-implement the whole frontend}; it can contract the safety-critical frontend as a version-pinned external service and own only the codegen and build orchestration. This is not laziness---it is a deliberate architectural choice that preserves the full soundness guarantees of Rust's type system and borrow checker while liberating the compiler author to focus on what matters most for a new project: fast, correct code generation, reproducible builds, and a friction-free developer loop.
+
+Flux is a Rust compiler written in Rust. From the perspective of the user's build, \texttt{fluxc} replaces \texttt{rustc} in the pipeline. It invokes \texttt{rustc --emit=mir} on each source file to obtain a post-typecheck, post-borrowck MIR dump, parses that dump, lowers it to Flux's own intermediate representation, and then codegens to ELF objects using Cranelift 0.114. Linking is delegated to \texttt{cc} or \texttt{mold}. A content-addressed build cache (\texttt{flux-cache}) and a BLAKE3-based VCS (\texttt{flux-rev}) complete the owned ecosystem. The result is a compiler that is self-hosting on its own codegen terms while cheerfully acknowledging that its memory-safety guarantee is \texttt{rustc}'s---and treats that as a \emph{feature}, not a compromise.
+
+We shipped v0.29 through v0.33 with scalar completeness (all integer widths, signs, casts), support for aggregates (tuples and structs), real function call signatures---including aggregate-returning calls---and a build cache that went from a live 0\% hit rate over 753 builds to approximately 40\% after we traced a volatile \texttt{-L deps-dir} listing poisoning every cache key. Every line of Flux has been co-authored by an AI-collaborative swarm (DeepSeek + a Claude agent + human direction), dogfooding the vision that Flux is not merely a compiler but a compiler \emph{platform} for AI-collaborative systems programming.
+
+This paper articulates the architecture, the contracted-frontend posture, and the incremental road to self-hosting. We leave the empirical evaluation and cache internals to a companion section.
+
+
+\section{Architecture}
+
+Flux is assembled from four owned subsystems and one explicitly borrowed component. The division of labor is clean:
+
+\begin{itemize}
+\item \textbf{Borrowed (contracted) frontend}: \texttt{rustc --emit=mir} on each source file. This runs the official compiler through parsing, name resolution, type checking, trait resolution, and borrow checking, then dumps the MIR in a stable-ish text or binary format. Flux consumes this output. The contract is that the frontend is pinned to a specific \texttt{rustc} nightly version (currently 1.93.1) and the MIR schema is treated as a versioned API. Flux's entire safety guarantee rests on this step; we explicitly do not re-verify borrows or types.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{flux-frontend (owned)}: This is Flux's own intermediate representation and lowering pipeline. It reads the serialized MIR and builds a typed, SSA-like IR that deliberately diverges from \texttt{rustc}'s internal MIR to suit Cranelift's input expectations and Flux's optimization ambitions. The IR handles all scalar types, aggregates, call ABIs, and (in progress) sum types. It is the semantic heart of Flux: everything codegen-relevant flows through this representation.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{flux-backend (owned)}: A codegen backend targeting Cranelift 0.114. It walks the Flux IR and emits Cranelift's CLIF, then uses Cranelift's \texttt{MachBackend} to produce position-independent ELF object files. Unlike \texttt{rustc}'s own Cranelift backend, Flux's is purpose-built for its own IR and can be tuned for compile-time speed and tight control over the generated code. We deliberately use a pinned Cranelift version and rely on Cranelift's mature instruction selection and register allocation.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{flux-cache / flux-driver (owned)}: A content-addressed build cache wired through the environment variable \texttt{RUSTC\_WRAPPER=self}. The cache computes a BLAKE3 hash over the preprocessed source, the contracted \texttt{rustc} version, the exact command-line flags (sanitized of volatile paths), and all dependency metadata. Hits avoid MIR generation and codegen entirely, returning cached objects. The driver orchestrates parallel \texttt{rustc} invocations and cache lookups, replacing the usual \texttt{cargo}/\texttt{rustc} dispatch with a cache-aware scheduler. Getting this cache right required pinpointing why \texttt{-L deps-dir} paths were changing every build---a host-absolute path embedded in \texttt{cargo} incantations---and normalizing them away to achieve a 40\% hit rate on real-world incremental builds.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{flux-rev (owned)}: A BLAKE3 content-addressed version control system, purpose-built for compiler development and reproducible build artifacts. Flux's own source tree is stored in flux-rev; every commit is identified by the hash of its tree, guaranteeing that a given source state always maps to the same compiler binary. This is not a general-purpose VCS but an integral part of the deterministic-build story.
+\end{itemize}
+
+Why is MIR the right contract boundary? MIR sits at the perfect architectural seam: all Rust-specific safety analysis (borrow checking, lifetime reification, drop elaboration) has been completed, but no machine-specific codegen decisions have been made. The MIR is high-level enough to be reusable across radically different compilation strategies, yet rigid enough that breaking changes are rare and always version-gated. By pinning to a nightly, we sacrifice the illusion of frontend independence in exchange for a guaranteed soundness base. Every time we bump the \texttt{rustc} contract version, we re-validate the MIR parser and adjust for any schema changes---a minor cost compared to implementing and maintaining a full type-checker.
+
+The result is an architecture where less than 15\% of the codebase (by line count) is borrowed, but that 15\% carries the entire soundness burden. The remaining 85\% are pure codegen and infrastructure, which is where small-team innovation can shine.
+
+
+\section{The Contracted-Frontend Posture}
+
+Flux's relationship with the native frontend is defined by FIP-0001, a foundational design decision that ruled out early work on a native type-checker and borrow-checker. The FIP establishes two modes:
+
+\begin{itemize}
+\item \textbf{Option B} (shipped): Flux relies on a version-pinned \texttt{rustc --emit=mir} frontend. This is not a temporary hack; it is the intended production mode indefinitely. Flux's value proposition is codegen speed, cache efficacy, and deterministic output, none of which require rewriting the frontend.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Option A} (north star, deferred): A native Rust frontend---type checking, trait resolution, borrow checking---built in Rust but fully owned by Flux. This is gated by a hard trigger: \textbf{when Flux compiles its own entire workspace into a working \texttt{fluxc} that passes all tests with zero manual workarounds, without the contracted frontend, only then can we begin investing in Option A.}
+\end{itemize}
+
+This trigger is deliberately gameable in a good way. It forces us to climb the type-complexity ladder using the contracted frontend first, ensuring that the entire codegen and infrastructure stack is battle-hardened before attempting any frontend work. It also avoids the trap of building a \texttt{}type-checker for a compiler that doesn't yet work.'' History is littered with projects that got lost in type system implementation and never shipped a working binary.
+
+Crucially, the memory-safety guarantee of Flux-compiled code is \texttt{rustc}'s. We do not attempt to second-guess the borrow checker or add additional static analyses; the contract says that if \texttt{rustc} accepted the program, the generated code will preserve those invariants. From a security perspective, this is a feature: the trust anchor is the same \texttt{rustc} that secures the entire Rust ecosystem. Flux merely optimizes the codegen path. Users who audit their supply chain already trust \texttt{rustc}'s frontend; adding Flux's codegen does not introduce a new soundness risk.
+
+The long-term vision for Option A is what we call \textbf{type-system-as-a-service}: when we eventually build a native frontend, it will be a separable library that can be used independently of Flux's codegen, and it may itself be bootstrapped by the contracted frontend as a self-validation step. But that is a distant goal; today, Flux ships, and it ships fast.
+
+
+\section{The Road to Self-Hosting}
+
+Self-hosting is the canonical benchmark for a compiler, but the traditional metric---\texttt{}it can compile itself''---is too coarse. A compiler that achieves self-hosting by luck, compiling a trivially simple subset of its own source, has not really proven itself. Flux adopts a more rigorous and incremental metric: \textbf{the type-complexity ladder, gated by the question 'does this now compile more of Flux's own workspace?'}
+
+The ladder is:
+
+\begin{itemize}
+\item \textbf{Scalars}: all integer widths (i8--i64, unsigned), float types, and bitwise/arithmetic operations. This must cover the compiler's basic arithmetic, pointer manipulation, and hash computations. Shipped in v0.29.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Aggregates}: tuples, structs, struct field projection, and aggregate layout compatibility. Required for virtually every data structure in the compiler---AST nodes, IR types, cache entries. Shipped in v0.30--v0.31.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Real call signatures}: function calls with multiple arguments, struct-return ABI, extern \texttt{}Rust'' ABI conformance, and stack-based returns for large aggregates. Without this, the compiler cannot call its own Cranelift bindings or cache functions. Shipped in v0.32--v0.33, along with aggregate-returning calls.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Enums (sum types)}: simple C-like enums and data-carrying enums (the Rust \texttt{enum}). These are pervasive in the Flux codebase---error types, IR variants, optionals. In progress; the MIR representation for enums is well-understood, and the main work lies in memory layout and match lowering.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Generics}: monomorphization and type parameter passing. The Flux workspace uses generics heavily for IR types (\texttt{Result<T, E>}, \texttt{Vec<T>}, collection adapters). We will monomorphize at the MIR level using \texttt{rustc}'s own monomorphization info, but the codegen must correctly instantiate.
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{Traits}: static and dynamic dispatch, vtable layout, trait objects. The compiler's own architecture uses traits for the cache backend interface, the diagnostics pipeline, and many internal abstractions. This is the final rung; once trait objects compile, Flux will have compiled its entire \texttt{flux-driver}, \texttt{flux-cache}, and \texttt{flux-frontend} crates, achieving full self-hosting.
+\end{itemize}
+
+At each rung, the test is not \texttt{}passes a custom test suite'' but \texttt{}compiles more of Flux's own workspace, and the resulting binary passes the existing test suite.'' This dogfooding metric is brutally effective: it immediately exposes ABI mismatches, missing type support, or layout bugs that synthetic tests miss. For example, getting aggregate-returning calls right was forced by a real code pattern in \texttt{flux-cache} where a \texttt{BLAKE3\_HASH} struct was returned from a cache-lookup function. No synthetic test would have exercised that specific combination of ABI, alignment, and return path.
+
+This ladder also avoids the dangerous trap of chasing \texttt{}rustc parity''---a full-conformance Rust compiler that can compile any crate. Such a goal would require implementing every edge case in the language specification, a task that dwarfs the codegen effort. Instead, Flux targets \textbf{self-hosting sufficiency}: the minimal subset of Rust needed to compile Flux itself. Because Flux is deliberately written in a lean, mostly-safe Rust style (no \texttt{unsafe} except in FFI stubs), this subset is tractable and well-defined. Every rung expands the subset until it encompasses the entire workspace, at which point Flux is self-hosting by its own definition. The final step---compiling the entire workspace including the future Option A frontend---naturally triggers full self-hosting maturity.
+
+
+\section{Evaluation}
+
+\subsection{Releases and end-to-end verification}
+
+Flux's native code path was advanced across five releases, v0.29 through v0.33. Each was verified end-to-end by compiling a representative program with \texttt{fluxc run} and asserting its runtime value, in addition to a local verifier pass. The headline checks: float arithmetic and comparisons (v0.29); all integer widths, both signednesses, unary operators and casts compiling verifier-clean (v0.30); aggregates, where \texttt{P \{ x: 3, y: 4 \}.x + .y} evaluates to 7 (v0.31); and real call signatures, where \texttt{add(20, 22)} returns 42, a tuple-returning \texttt{mk().0 + mk().1} returns 7, and a struct-returning \texttt{p.x * p.y} returns 42 with a field-order guard confirming 67 for \texttt{p.x * 10 + p.y} (v0.32). The build cache (v0.33) is treated separately below.
+
+Verification used two layers. A standalone two-crate workspace runs the Cranelift verifier through \texttt{define\_function}, catching arity and type errors in seconds. End-to-end execution on the target is the only place runtime values are proven. This separation caught a class of bug that the verifier alone accepts: a return-type parse defect left a \texttt{-> } arrow glued onto the type string, silently collapsing a tuple-returning function to a single return value. The result was verifier-clean but wrong --- it returned 3 instead of 7. Such value bugs are invisible to type-checking and surface only under execution; a compiler that trusts its own verifier without executing its output will ship them.
+
+\subsection{The build cache: from 0\% to working}
+
+Flux's wrapper cache (\texttt{RUSTC\_WRAPPER=self}) had a measured hit rate of 0\% across 753 builds while growing without bound on disk --- a cache that stored everything and recognized nothing. We instrumented it with a per-unit trace classifying every lookup as HIT, LOOKUPMISS (entry not found), or APPLYFAIL (entry found, artifact restore failed). The trace was decisive: HIT=0, LOOKUPMISS=37, APPLYFAIL=0. Every key missed.
+
+The root cause was cache-key instability. The key-normalization step hashed the directory listing of the \texttt{-L} dependency search path, whose contents change on every build as artifacts accumulate. Each crate's key therefore drifted build-to-build, so a lookup never matched a prior store. Because the actual dependencies are already pinned content-addressably by \texttt{--extern}, the \texttt{-L} path affects only where rustc searches, not what it compiles --- exactly like \texttt{--out-dir}, which the key already dropped. Removing \texttt{-L} from the key moved the traced hit rate from 0 of 37 to 14 of 35, roughly 40\%, on an identical rebuild. A companion fix keyed the artifact blob store on the same stable normalized key rather than a divergent raw-argument hash, so write-key equals read-key and a found entry's artifacts could actually be restored; APPLYFAIL remained 0 throughout, confirming the desync fix was sound.
+
+\subsection{Build reliability}
+
+A second failure mode was environmental. On the shared build host, a concurrent status-feed \texttt{jq} process intermittently raced onto the stdin that cargo connects to its rustc target-probe (\texttt{rustc - --print=...}), injecting a filter that rustc parsed as source --- "unclosed delimiter" --- and failing roughly half of all builds. Because \texttt{--print} probes need no source and the \texttt{-} placeholder is vestigial, the wrapper now detaches the probe's stdin, making the toolchain query immune to descriptor pollution. This is a small but instructive corner of the contracted-frontend's operational surface: borrowing rustc means inheriting cargo's probe protocol, which must be hardened against a noisy host.
+
+\subsection{Honest limits}
+
+The 40\% figure is a floor, not a ceiling. It was measured on a pathological rebuild that deliberately recompiled a low-level crate, cascading \texttt{--extern} content-hash changes to its dependents, because rustc's rlib output is not byte-deterministic. A normal incremental build, where dependencies are stable, hits substantially higher. Cross-workspace reuse additionally requires rewriting dependency-info absolute paths on restore, and the blob store still grows unbounded --- it reached 198 GB before eviction accounting was added. Both are documented follow-ups. We report them because a cache that looks green by an internal hit counter can still fail to skip real work if cargo's own fingerprint re-runs the unit; the honest metric is the count of rustc processes actually elided, not the wrapper's hit count.
+
+\subsection{Method: two minds, one build}
+
+Development this cycle used a two-mind protocol: an architectural design-and-review intelligence and an implementation-and-verification agent, under one arbiter --- no design ships unverified. Two minds propose; the build disposes. The frontend-posture decision, the cache-fix strategy, and the enum-codegen plan were each drafted by one mind and adversarially checked by the other before a line was committed, and every claimed result was then re-derived by execution on the target. The convergence of independent analyses --- and their occasional disagreement, which repeatedly surfaced real bugs the other had missed --- is itself evidence that AI-collaborative compiler construction is more than a novelty.
+
+\section{Conclusion}
+
+Flux demonstrates three things that the compiler community can learn from.
+
+First, \textbf{pragmatic self-hosting is a legitimate path}. By contracting the safety frontend, Flux achieves a working, self-hosting Rust compiler without reimplementing type checking or borrow checking. This shortcuts years of work while preserving the soundness guarantees that make Rust valuable. There is no fundamental reason every new language or compiler project must rebuild the entire analysis stack; for many projects, the contract boundary at MIR is both technically clean and strategically sound.
+
+Second, \textbf{targeting self-hosting sufficiency rather than language parity yields faster, more meaningful progress}. The type-complexity ladder, gated by the \texttt{}compiles more of Flux's own workspace'' test, keeps the team focused on concrete, executable goals. Each rung delivers a working compiler that is \emph{more} self-hosting than before, and the test infrastructure is the compiler's own source code. This tight feedback loop exposes real-world ABI and layout bugs early, preventing the accumulation of technical debt.
+
+Third, \textbf{AI-collaborative compiler construction is not a gimmick---it is a force multiplier when the architecture is modular}. Flux's development was co-authored by a small human-directed swarm of AI agents. The contracted frontend means the agents could focus on codegen, caching, and IR design without being blocked by the need to understand Rust's full type system. The result is a compiler built at a pace that would be impossible for a conventional team of the same size. Flux itself is a proof point for the platform it aspires to be: a compiler designed for AI-collaborative systems programming, where human intent and machine generation are co-authors of the final artifact.
+
+The north star remains Option A---a fully owned frontend---but it is a north star we reach only after Flux has thoroughly proven its codegen and infrastructure in production. Until then, we ship fast, we ship correct, and we borrow the safety we need.

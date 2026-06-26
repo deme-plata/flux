@@ -177,7 +177,21 @@ fn restore_output_from_blob(blob_dir: &Path, out_dir: &Path, file_name: &str) ->
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).ok();
     }
-    fs::copy(&src, &dst).is_ok()
+    // ATOMIC restore (the "unknown file type" / residual-ICE fix): copy to a per-process temp then
+    // rename. fs::copy alone is NOT atomic — under cargo's parallelism two restores of the same output
+    // path (a crate compiled in two feature-unifications shares one filename) or a restore racing a
+    // concurrent rustc/linker read leave a HALF-written file -> `mold: unknown file type` / a torn
+    // rmeta -> ICE. rename(2) within the same dir is atomic: a reader sees either the old complete file
+    // or the new complete one, never a torn one.
+    let tmp = out_dir.join(format!(".{}.tmp.{}", file_name, std::process::id()));
+    if fs::copy(&src, &tmp).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    match fs::rename(&tmp, &dst) {
+        Ok(()) => true,
+        Err(_) => { let _ = fs::remove_file(&tmp); false }
+    }
 }
 
 /// Collect outputs from a successful rustc invocation, side-blob the file

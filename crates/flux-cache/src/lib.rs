@@ -302,6 +302,16 @@ pub fn evict_stale() -> usize {
 
 
 /// Compute a cache key from source file + compiler args.
+/// Content-hash a single file (hex BLAKE3), or None if unreadable. Used by the cache's
+/// closure-consistency check (flux-driver T2c) to verify a restored crate's --extern deps are
+/// byte-identical to what it was cached against — a dep with a deterministic FILENAME but a
+/// non-deterministic rmeta CONTENT would otherwise pass the key match yet leave the restored crate
+/// inconsistent (SIGBUS / "no resolution for an import"). [[flux-cache-reality]]
+pub fn hash_file(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(blake3::hash(&bytes).to_hex().to_string())
+}
+
 /// Uses mmap for large files (> 64KB) to avoid heap allocation.
 /// Returns: hex-encoded BLAKE3 string.
 pub fn compute_hash(source_file: Option<&str>, args: &[String]) -> String {

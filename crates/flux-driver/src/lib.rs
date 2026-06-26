@@ -100,6 +100,30 @@ fn find_extra_filename(args: &[String]) -> String {
     String::new()
 }
 
+/// (filename, full-path) for each `--extern name=path` whose path is present. The filename is the
+/// dep's stable identity (lib<crate>-<metahash>.<ext>); the path is where its rmeta/rlib lives now.
+fn extern_dep_paths(args: &[String]) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--extern" && i + 1 < args.len() {
+            if let Some((_name, path)) = args[i + 1].split_once('=') {
+                if let Some(base) = std::path::Path::new(path).file_name() {
+                    v.push((base.to_string_lossy().to_string(), path.to_string()));
+                }
+            }
+        }
+        i += 1;
+    }
+    v
+}
+
+/// T2c closure-consistency sidecar: target/flux-cache/closure/<cache_key> records the content-hash of
+/// every --extern dep the entry was built against, so a restore can verify the CURRENT deps still match.
+fn closure_sidecar_for(cache_key: &str) -> PathBuf {
+    PathBuf::from("target").join("flux-cache").join("closure").join(cache_key)
+}
+
 /// Recognised emit extensions. The empty string covers static-libs / binaries
 /// that rustc emits without an extension (e.g. an `--emit=link` binary).
 // Cache T3: `.d` (dep-info) is deliberately NOT cached. It's a Makefile fragment of ABSOLUTE
@@ -214,6 +238,21 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
         String::new()
     };
 
+    // T2c: record the content-hash of every --extern dep this unit was built against. A future restore
+    // verifies the CURRENT deps still match these — so a dep recompiled with different bytes (same
+    // deterministic filename, non-deterministic rmeta content) forces a recompile instead of an ICE.
+    if !source_hash.is_empty() && !outputs.is_empty() {
+        let mut lines = String::new();
+        for (base, path) in extern_dep_paths(&raw_args) {
+            if let Some(h) = flux_cache::hash_file(&path) {
+                lines.push_str(&format!("{} {}\n", base, h));
+            }
+        }
+        let side = closure_sidecar_for(&source_hash);
+        if let Some(parent) = side.parent() { fs::create_dir_all(parent).ok(); }
+        fs::write(&side, lines).ok();
+    }
+
     flux_cache::CacheEntry {
         source_hash: source_hash.clone(),
         args_hash: source_hash,
@@ -240,6 +279,25 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     // the wrapper then runs real rustc. (entry.outputs is keyed by extension.)
     for ext in required_exts(rustc_args) {
         if !entry.outputs.contains_key(ext) { return false; }
+    }
+    // T2c closure-consistency guard (the partial-hit ICE fix): a restored crate's rmeta embeds
+    // references to the EXACT deps it was compiled against. Filename-identity keys match on a dep's
+    // stable filename, but its rmeta CONTENT can still differ (rustc is non-deterministic), so a dep
+    // that was a cache MISS (recompiled fresh) leaves this crate's restored rmeta inconsistent ->
+    // SIGBUS / "no resolution for an import". Verify every current --extern dep is byte-identical to
+    // what the entry was cached against (recorded in the closure sidecar); any mismatch -> miss, so we
+    // recompile THIS crate to match its actual deps. Makes a partial hit safe. (No sidecar = legacy
+    // entry: skip — the build-safe default keeps restore opt-in anyway.)
+    if let Ok(recorded) = std::fs::read_to_string(closure_sidecar_for(&entry.source_hash)) {
+        let want: std::collections::HashMap<&str, &str> =
+            recorded.lines().filter_map(|l| l.split_once(' ')).collect();
+        for (base, path) in extern_dep_paths(rustc_args) {
+            if let Some(&expected) = want.get(base.as_str()) {
+                if flux_cache::hash_file(&path).as_deref() != Some(expected) {
+                    return false; // a dep changed since cache time -> recompile this crate
+                }
+            }
+        }
     }
     let out_dir = find_out_dir(rustc_args);
     if out_dir.is_empty() { return false; }
@@ -472,5 +530,18 @@ mod tests {
         assert_eq!(find_extra_filename(&["-C".into(), "extra-filename=-361b6c44".into()]), "-361b6c44");
         assert_eq!(find_extra_filename(&["-Cextra-filename=-cf571322".into()]), "-cf571322");
         assert_eq!(find_extra_filename(&["--crate-name".into(), "demo".into()]), "");
+    }
+
+    #[test]
+    fn t2c_extern_dep_paths_and_sidecar() {
+        let deps = extern_dep_paths(&[
+            "--extern".into(), "libc=/x/deps/liblibc-361b.rmeta".into(),
+            "--extern".into(), "noeq".into(), // malformed (no '='), skipped
+            "--extern".into(), "http=/y/deps/libhttp-cc42.rlib".into(),
+        ]);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0], ("liblibc-361b.rmeta".to_string(), "/x/deps/liblibc-361b.rmeta".to_string()));
+        assert_eq!(deps[1].0, "libhttp-cc42.rlib");
+        assert!(closure_sidecar_for("abc123").ends_with("flux-cache/closure/abc123"));
     }
 }

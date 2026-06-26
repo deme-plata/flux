@@ -737,15 +737,24 @@ pub fn wrapper_mode(args: &[String]) {
         let kp = &cache_key[..16.min(cache_key.len())];
         let cn = rustc_args.iter().position(|a| a == "--crate-name")
             .and_then(|i| rustc_args.get(i + 1)).map(|s| s.as_str()).unwrap_or("?");
-        if let Some(entry) = flux_cache::lookup(&cache_key) {
-            if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
-                if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
-                record_cache_event(true);
-                return;
+        // BUILD-SAFE restore gate (the honest Phase-1 done state): a cross-build cache restore is only
+        // consistent when the FULL dep closure hits — a PARTIAL hit mixes a stale restored .rmeta with
+        // a freshly-recompiled dependent, and rustc then ICEs (SIGBUS / "no resolution for an import").
+        // Non-deterministic rlib keys guarantee partial hits today, so RESTORE is opt-in
+        // (FLUX_CACHE_RESTORE=1) until Phase 2 makes keys deterministic enough to hit the whole closure.
+        // The cache still POPULATES unconditionally below, so it's primed the moment restore is safe.
+        // Default invariant: the cache can NEVER break a build.
+        if std::env::var("FLUX_CACHE_RESTORE").is_ok() {
+            if let Some(entry) = flux_cache::lookup(&cache_key) {
+                if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
+                    if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
+                    record_cache_event(true);
+                    return;
+                }
+                if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, std::path::Path::new("target/flux-cache/blobs").join(&entry.source_hash).exists()); }
+            } else if trace {
+                eprintln!("FLUXCACHE LOOKUPMISS {} key={}", cn, kp);
             }
-            if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, std::path::Path::new("target/flux-cache/blobs").join(&entry.source_hash).exists()); }
-        } else if trace {
-            eprintln!("FLUXCACHE LOOKUPMISS {} key={}", cn, kp);
         }
         // Cacheable unit (real .rs source, non-empty key) with no usable cached output:
         // a genuine compilation-unit cache MISS. (Uncacheable probes returned earlier.)

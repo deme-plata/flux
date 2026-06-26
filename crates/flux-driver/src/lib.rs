@@ -138,6 +138,10 @@ const CACHEABLE_EXTS: &[&str] = &["rmeta", "rlib"];
 /// is deterministic for a given (args, source) so the SAME compilation
 /// re-run will land on the same file name — which is exactly what makes
 /// the side-blob cache work.
+// SUPERSEDED by exact-filename collection in collect_outputs: this crate_name-substring scan grabbed
+// EVERY metahash-variant of a crate in the shared out_dir, polluting entries (the 223-reject bug). Kept
+// only for the unit test that documents the old behavior; not used in production.
+#[allow(dead_code)]
 fn scan_outputs(out_dir: &Path, crate_name: &str) -> Vec<String> {
     let mut found = Vec::new();
     let Ok(entries) = fs::read_dir(out_dir) else { return found; };
@@ -227,16 +231,20 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
         if !source_hash.is_empty() {
             let blob_dir = blob_dir_for(&source_hash);
             let out_dir_path = PathBuf::from(&out_dir);
-            for file_name in scan_outputs(&out_dir_path, &crate_name) {
-                if let Some(stored) = copy_output_to_blob(&out_dir_path, &blob_dir, &file_name) {
-                    // Key by extension (or empty for no extension) so the
-                    // entry's `outputs` map matches the historic shape of
-                    // emit_type → name. Multiple files of the same ext for
-                    // one crate are unusual; pick the last one scanned.
-                    let key = stored.rsplit_once('.')
-                        .map(|(_, ext)| ext.to_string())
-                        .unwrap_or_else(|| "link".to_string());
-                    outputs.insert(key, stored);
+            // Collect the EXACT artifact(s) THIS invocation produced — lib<crate><extra-filename>.<ext>
+            // — NOT a crate_name substring scan. The substring scan grabbed EVERY metahash-variant of a
+            // crate present in the shared out_dir (we measured one entry's blobdir holding 5 distinct
+            // libhashbrown-*.{rmeta,rlib} variants), so outputs[ext] held an ARBITRARY/wrong variant (or
+            // no rlib) -> a later link-pass lookup hit an entry whose rlib was the wrong variant or
+            // absent -> T2 reject. That was the bulk of the 223 wrongly-rejected hits. Exact-name
+            // collection (crate-name + -C extra-filename) stores only this pass's own artifacts.
+            let extra = find_extra_filename(&raw_args);
+            for ext in ["rmeta", "rlib"] {
+                let fname = format!("lib{}{}.{}", crate_name, extra, ext);
+                if out_dir_path.join(&fname).exists() {
+                    if let Some(stored) = copy_output_to_blob(&out_dir_path, &blob_dir, &fname) {
+                        outputs.insert(ext.to_string(), stored);
+                    }
                 }
             }
         }
@@ -412,6 +420,7 @@ mod tests {
 
         let args: Vec<String> = vec![
             "--crate-name".into(), "demo".into(),
+            "-C".into(), "extra-filename=-deadbeef".into(),
             "--out-dir".into(), out_dir.to_string_lossy().to_string(),
             src_file.to_string_lossy().to_string(),
         ];
@@ -457,6 +466,7 @@ mod tests {
 
         let args1: Vec<String> = vec![
             "--crate-name".into(), "demo".into(),
+            "-C".into(), "extra-filename=-deadbeef".into(),
             "--extern".into(), "serde=/ws1/target/libserde-AAAA.rlib".into(),
             "--out-dir".into(), out_dir.to_string_lossy().to_string(),
             src_file.to_string_lossy().to_string(),
@@ -464,6 +474,7 @@ mod tests {
         // Same logical compile, DIFFERENT absolute --extern path (a second workspace).
         let args2: Vec<String> = vec![
             "--crate-name".into(), "demo".into(),
+            "-C".into(), "extra-filename=-deadbeef".into(),
             "--extern".into(), "serde=/ws2/target/libserde-BBBB.rlib".into(),
             "--out-dir".into(), out_dir.to_string_lossy().to_string(),
             src_file.to_string_lossy().to_string(),

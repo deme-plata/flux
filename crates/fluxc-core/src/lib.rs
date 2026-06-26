@@ -772,7 +772,11 @@ pub fn wrapper_mode(args: &[String]) {
             // content hash as key.
             if !cache_key.is_empty() {
                 let entry = flux_driver::collect_outputs(&rustc_args, &cache_key);
-                if !entry.source_hash.is_empty() {
+                // Only store entries that actually carry artifacts. An empty-outputs entry (e.g. a
+                // build_script_build binary — no rmeta/rlib) can never satisfy a hit, so indexing it
+                // just produces blobless entries that later lookup-hit then APPLYFAIL (the measured
+                // blobs=false=121). Skip them: the unit recompiles cheaply and the index stays clean.
+                if !entry.source_hash.is_empty() && !entry.outputs.is_empty() {
                     flux_cache::store(&cache_key, &entry);
                 }
             }

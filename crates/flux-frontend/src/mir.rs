@@ -57,6 +57,8 @@ pub enum MirTerminator {
     Call { func: String, args: Vec<String>, dst: String, target: String },
     /// `switchInt(operand) -> [value: target, ..., otherwise: fallback]`
     SwitchInt { discr: String, targets: Vec<(String, String)>, otherwise: String },
+    /// `unreachable;` — rustc's exhaustive-match `otherwise` arm. Lowers to a Cranelift trap.
+    Unreachable,
 }
 
 /// FIP-0001 keep-A-open #3: the swap-point between "produce Flux MIR" and the rest of the compiler.
@@ -304,6 +306,12 @@ where I: Iterator<Item = &'a str>
             let dst = trimmed[..eq_idx].trim().to_string();
             let rhs = trimmed[eq_idx+1..].trim().trim_end_matches(';').trim_start_matches("move (");
             statements.push(MirStmt::Assign { dst, op: "move".into(), args: vec![rhs.to_string()] });
+            lines.next();
+        } else if trimmed.starts_with("unreachable") {
+            // rustc emits `unreachable;` in an exhaustive match's otherwise arm. Previously this fell
+            // through to the silent-drop else, leaving the block with no terminator ("block bbN has no
+            // terminator"). Capture it so the backend can emit a trap.
+            terminator = Some(MirTerminator::Unreachable);
             lines.next();
         } else {
             lines.next();
@@ -784,8 +792,23 @@ mod tests {
     fn ir_version_frozen() {
         // FIP-0001 #1: this guards the FROZEN IR. If a change to the public IR types is intended,
         // bump crate::IR_VERSION and update this assertion in the same commit — never silently.
-        assert_eq!(crate::IR_VERSION, 1,
+        assert_eq!(crate::IR_VERSION, 2,
             "flux-frontend IR changed: bump IR_VERSION intentionally (FIP-0001 frozen-IR contract)");
+    }
+
+    #[test]
+    fn parse_clike_enum() {
+        // Ladder rung 4: C-like enums parse into unit.enums with running discriminants, overridable
+        // by an explicit `= N` (then resuming previous+1).
+        let u = crate::parse_source("enum Color { Red, Green, Blue }\nenum E { A = 10, B }", "t").unwrap();
+        assert_eq!(u.enums.len(), 2);
+        assert_eq!(u.enums[0].name, "Color");
+        assert_eq!(u.enums[0].variants[0].discriminant, 0);
+        assert_eq!(u.enums[0].variants[1].name, "Green");
+        assert_eq!(u.enums[0].variants[1].discriminant, 1);
+        assert_eq!(u.enums[0].variants[2].discriminant, 2);
+        assert_eq!(u.enums[1].variants[0].discriminant, 10); // A = 10
+        assert_eq!(u.enums[1].variants[1].discriminant, 11); // B = previous+1
     }
 
     #[test]

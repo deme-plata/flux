@@ -187,6 +187,7 @@ pub fn compile_run(path: &str, args: &[String]) -> i32 {
             // Pull struct definitions from the source (the MIR-only unit carries none) so the
             // backend can resolve named-struct field layouts for scalar replacement.
             structs: flux_frontend::parse_source(&src, path).map(|u| u.structs).unwrap_or_default(),
+            enums: flux_frontend::parse_source(&src, path).map(|u| u.enums).unwrap_or_default(),
             imports: vec![],
         };
 
@@ -337,7 +338,7 @@ pub fn run_integration_tests() -> usize {
                             .collect();
                         let unit = flux_frontend::TranslationUnit {
                             file_path: src_path.to_string_lossy().to_string(),
-                            functions: ir_funcs, structs: vec![], imports: vec![],
+                            functions: ir_funcs, structs: vec![], enums: vec![], imports: vec![],
                         };
                         let overrides = build_mir_overrides(&funcs);
                         match flux_backend::compile_unit_to_object_with_mir(&unit, &overrides, &obj_path) {
@@ -598,6 +599,7 @@ pub fn compile_package(name: &str) {
         file_path: entry.to_string_lossy().to_string(),
         functions: ir_funcs,
         structs: vec![],
+        enums: vec![],
         imports: vec![],
     };
     let clif_results = flux_backend::compile_unit(&unit);
@@ -852,6 +854,7 @@ pub fn compile_impl_with_provenance(path: &str, use_mir: bool, provenance: bool)
                             file_path: path.to_string(),
                             functions: ir_funcs,
                             structs: vec![],
+                            enums: vec![],
                             imports: vec![],
                         };
                         
@@ -1040,6 +1043,7 @@ pub fn heal(path: &str, max_attempts: usize, auto_commit: bool) -> i32 {
             file_path: path.to_string(),
             functions: ir_funcs,
             structs: vec![],
+            enums: vec![],
             imports: vec![],
         };
 

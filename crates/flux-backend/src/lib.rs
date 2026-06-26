@@ -49,6 +49,13 @@ pub fn compile_unit_to_object_with_mir(
         .map(|s| (s.name.clone(), s.fields.iter().map(|f| typeref_str(&f.ty)).collect()))
         .collect();
 
+    // Enum variant table ("EnumName::Variant" -> i64 discriminant), from the source's enum defs.
+    // A C-like enum IS its discriminant: construction `_1 = Color::Green` becomes iconst(discriminant),
+    // discriminant(_1) is a copy, and the enum type lowers to i64 (mir_type_to_cl's default).
+    let enum_variants: HashMap<String, i64> = unit.enums.iter()
+        .flat_map(|e| e.variants.iter().map(move |v| (format!("{}::{}", e.name, v.name), v.discriminant)))
+        .collect();
+
     // Pass 1: declare every function so Call expressions can resolve by name.
     let mut func_ids: HashMap<String, FuncId> = HashMap::with_capacity(unit.functions.len());
     let mut func_sigs: HashMap<String, Signature> = HashMap::with_capacity(unit.functions.len());
@@ -91,7 +98,7 @@ pub fn compile_unit_to_object_with_mir(
         let sig = func_sigs.remove(&func.name).unwrap();
 
         let func_ir = if let Some(mir) = mir_overrides.get(&func.name) {
-            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids, &struct_layout)?
+            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids, &struct_layout, &enum_variants)?
         } else {
             compile_expr_into_function(func, func_id, sig, &mut module, &func_ids)?
         };
@@ -142,6 +149,7 @@ fn compile_mir_into_function(
     module: &mut ObjectModule,
     func_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
     structs: &std::collections::HashMap<String, Vec<String>>,
+    enum_variants: &std::collections::HashMap<String, i64>,
 ) -> Result<Function, String> {
     use std::collections::HashSet;
 
@@ -250,6 +258,13 @@ fn compile_mir_into_function(
                         }
                         continue;
                     }
+                    // C-like enum construction: parse_rhs emits op="EnumName::Variant" (no args).
+                    // The value is the variant's i64 discriminant.
+                    if let Some(&disc) = enum_variants.get(op.as_str()) {
+                        let val = bc.ins().iconst(types::I64, disc);
+                        if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, val); }
+                        continue;
+                    }
                     let unsigned = operand_is_unsigned(args.first().map(|s| s.as_str()).unwrap_or(""), &mir_type_strs);
                     let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, unsigned, &mut bc);
                     if let Some(&var) = vars.get(&dst_idx) {
@@ -350,6 +365,26 @@ fn compile_mir_into_function(
                         bc.switch_to_block(next_check);
                     }
                     bc.ins().jump(default_bb, &[]);
+                }
+            }
+            Some(MirTerminator::Unreachable) => {
+                // rustc's exhaustive-match `otherwise` arm. Genuinely unreachable, but the block still
+                // needs a valid terminator. Return a zero of the function's return shape — never
+                // observed at runtime, and version-agnostic (no dependency on Cranelift's TrapCode API).
+                if let Some(fields) = aggregate_fields(&mir.return_type, structs) {
+                    let vals: Vec<Value> = fields.iter().map(|f| {
+                        let ty = mir_type_to_cl(f);
+                        if ty == types::F64 { bc.ins().f64const(0.0) }
+                        else if ty == types::F32 { bc.ins().f32const(0.0f32) }
+                        else { bc.ins().iconst(ty, 0) }
+                    }).collect();
+                    bc.ins().return_(&vals);
+                } else {
+                    let ty = mir_type_to_cl(&mir.return_type);
+                    let z = if ty == types::F64 { bc.ins().f64const(0.0) }
+                        else if ty == types::F32 { bc.ins().f32const(0.0f32) }
+                        else { bc.ins().iconst(ty, 0) };
+                    bc.ins().return_(&[z]);
                 }
             }
             None => return Err(format!("block {} has no terminator", mir_block.label)),
@@ -584,7 +619,8 @@ fn compile_mir_op_to_value(
         "Neg" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); if val_is_float(bc, a) { bc.ins().fneg(a) } else { bc.ins().ineg(a) } }
         "Not" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); bc.ins().bnot(a) }
         "as" => { let a = args.first().map(|x| resolve_mir_operand_to_value(x, vars, tuple_vars, bc)).unwrap_or_else(|| bc.ins().iconst(types::I64, 0)); let want = mir_type_to_cl(args.get(1).map(|s| s.as_str()).unwrap_or("i64")); cast_value(bc, a, want) }
-        "copy" | "move" | "Use" | "const" => {
+        // C-like enum: discriminant(_x) is the value itself (the enum is stored as its discriminant).
+        "copy" | "move" | "Use" | "const" | "discriminant" => {
             args.first().map(|a| resolve_mir_operand_to_value(a, vars, tuple_vars, bc))
                 .unwrap_or_else(|| bc.ins().iconst(types::I64, 0))
         }
@@ -935,7 +971,7 @@ fn cl_type(ty: &TypeRef) -> Type {
         let mir = "fn main() -> i64 {\n    let mut _0: i64;\n    let mut _1: f64;\n    let mut _2: f64;\n    bb0: {\n        _2 = const 2.5f64;\n        _1 = Mul(move _2, const 4f64);\n        _0 = move _1 as i64 (FloatToInt);\n        return;\n    }\n}";
         let funcs = flux_frontend::mir::parse_mir(mir).unwrap();
         let fd = flux_frontend::mir::lower_mir_to_ir(&funcs[0]);
-        let u = flux_frontend::TranslationUnit { file_path: "t".into(), functions: vec![fd], structs: vec![], imports: vec![] };
+        let u = flux_frontend::TranslationUnit { file_path: "t".into(), functions: vec![fd], structs: vec![], enums: vec![], imports: vec![] };
         compile_unit_to_object(&u, &tmp("cast_mir.o")).expect("cast of float-mul (MIR path) must verify");
         let c = compile_to_clif(&u.functions[0]).unwrap();
         assert!(c.contains("fmul") && c.contains("fcvt_to_sint_sat") && !c.contains("imul"), "expected fmul+fcvt, got:\n{}", c);
@@ -1091,5 +1127,23 @@ fn cl_type(ty: &TypeRef) -> Type {
         let mut ov = std::collections::HashMap::new();
         for f in &funcs { ov.insert(f.name.clone(), f.clone()); }
         compile_unit_to_object_with_mir(&u, &ov, &tmp("realstructcall.o")).expect("real struct-returning-call MIR must verify");
+    }
+
+    #[test] fn test_clike_enum_match_mir() {
+        // Ladder rung 4: a C-like enum match. Exercises every new piece — discriminant(_1) (copy),
+        // switchInt on it, the `unreachable;` otherwise arm (-> return-zero terminator), and the
+        // `_1 = Color::Green` construction (-> iconst of the variant discriminant). Verification-only:
+        // proves the IR verifies (arity/types); the VALUE pick(Green)=2 is confirmed by e2e on epsilon.
+        let mir = "fn pick(_1: Color) -> i64 {\n    let mut _0: i64;\n    let mut _2: isize;\n    bb0: {\n        _2 = discriminant(_1);\n        switchInt(move _2) -> [0: bb4, 1: bb3, 2: bb2, otherwise: bb1];\n    }\n    bb1: {\n        unreachable;\n    }\n    bb2: {\n        _0 = const 3_i64;\n        goto -> bb5;\n    }\n    bb3: {\n        _0 = const 2_i64;\n        goto -> bb5;\n    }\n    bb4: {\n        _0 = const 1_i64;\n        goto -> bb5;\n    }\n    bb5: {\n        return;\n    }\n}\n\nfn main() -> i64 {\n    let mut _0: i64;\n    let mut _1: Color;\n    bb0: {\n        _1 = Color::Green;\n        _0 = pick(move _1) -> [return: bb1, unwind continue];\n    }\n    bb1: {\n        return;\n    }\n}";
+        let funcs = flux_frontend::mir::parse_mir(mir).unwrap();
+        // the `unreachable;` arm must now be captured, not dropped
+        let pick = funcs.iter().find(|f| f.name == "pick").unwrap();
+        assert!(pick.blocks.iter().any(|b| matches!(b.terminator, Some(flux_frontend::mir::MirTerminator::Unreachable))),
+            "unreachable; must parse to MirTerminator::Unreachable");
+        let u = flux_frontend::parse_source("enum Color { Red, Green, Blue }\nfn pick(c: i64) -> i64 { return 0 }\nfn main() -> i64 { return 0 }", "t").unwrap();
+        assert_eq!(u.enums.len(), 1);
+        let mut ov = std::collections::HashMap::new();
+        for f in &funcs { ov.insert(f.name.clone(), f.clone()); }
+        compile_unit_to_object_with_mir(&u, &ov, &tmp("enummatch.o")).expect("C-like enum match MIR must verify");
     }
 }

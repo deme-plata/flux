@@ -19,7 +19,7 @@ use std::path::Path;
 // emits this same IR directly, so the rest of the pipeline never learns whether MIR came from rustc or
 // from Flux's own parser. Any breaking change to these types MUST bump IR_VERSION (and update the
 // ir_version_frozen snapshot test), so a frontend swap stays a contained, intentional event.
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 // ── High-Level IR ──
 
@@ -29,6 +29,7 @@ pub struct TranslationUnit {
     pub file_path: String,
     pub functions: Vec<FunctionDef>,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub imports: Vec<String>,
 }
 
@@ -56,6 +57,22 @@ pub struct FieldDef {
     pub name: String,
     pub ty: TypeRef,
     pub visibility: Visibility,
+}
+
+/// A C-like enum definition (FIP-0001 type-complexity ladder, rung 4). For now an enum is modelled
+/// as its discriminant: each variant carries a name and a computed i64 discriminant (implicit
+/// previous+1, overridable by an explicit `= N`). Data-carrying variants are a later rung.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+    pub derives: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumVariant {
+    pub name: String,
+    pub discriminant: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +140,7 @@ pub fn parse_source(source: &str, file_path: &str) -> Result<TranslationUnit, St
 
     let mut functions = Vec::new();
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
     let mut imports = Vec::new();
 
     for item in ast.items {
@@ -135,6 +153,9 @@ pub fn parse_source(source: &str, file_path: &str) -> Result<TranslationUnit, St
             syn::Item::Struct(s) => {
                 structs.push(lower_struct(&s));
             }
+            syn::Item::Enum(e) => {
+                enums.push(lower_enum(&e));
+            }
             syn::Item::Use(u) => {
                 imports.push(quote::quote!(#u).to_string().replace("use ", "").replace(";", ""));
             }
@@ -146,6 +167,7 @@ pub fn parse_source(source: &str, file_path: &str) -> Result<TranslationUnit, St
         file_path: file_path.to_string(),
         functions,
         structs,
+        enums,
         imports,
     })
 }
@@ -352,6 +374,35 @@ fn lower_struct(s: &syn::ItemStruct) -> StructDef {
         .collect();
 
     StructDef { name: s.ident.to_string(), fields, derives }
+}
+
+/// Lower a C-like enum: assign each variant its i64 discriminant (running previous+1, overridable by an
+/// explicit `= N`), mirroring lower_struct's derive extraction. Data-carrying variants are a later rung.
+fn lower_enum(e: &syn::ItemEnum) -> EnumDef {
+    let mut next: i64 = 0;
+    let variants: Vec<EnumVariant> = e.variants.iter().map(|v| {
+        if let Some((_, expr)) = &v.discriminant {
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) = expr {
+                next = i.base10_parse().unwrap_or(next);
+            }
+        }
+        let d = next;
+        next += 1;
+        EnumVariant { name: v.ident.to_string(), discriminant: d }
+    }).collect();
+
+    let derives: Vec<String> = e.attrs.iter()
+        .filter(|a| a.path().is_ident("derive"))
+        .flat_map(|a| {
+            a.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated
+            ).ok().map(|paths| paths.iter().map(|p| {
+                p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
+            }).collect::<Vec<_>>()).unwrap_or_default()
+        })
+        .collect();
+
+    EnumDef { name: e.ident.to_string(), variants, derives }
 }
 
 // ── Tests ──

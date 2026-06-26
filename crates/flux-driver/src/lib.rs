@@ -86,6 +86,20 @@ fn required_exts(args: &[String]) -> Vec<&'static str> {
     req
 }
 
+/// Cache T2b: the `-C extra-filename=<suffix>` (e.g. "-361b6c44…") that determines this crate's output
+/// filename `lib<crate><suffix>.<ext>`. Cargo passes it as `-C extra-filename=…` or `-Cextra-filename=…`.
+fn find_extra_filename(args: &[String]) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-C" && i + 1 < args.len() {
+            if let Some(v) = args[i + 1].strip_prefix("extra-filename=") { return v.to_string(); }
+        }
+        if let Some(v) = args[i].strip_prefix("-Cextra-filename=") { return v.to_string(); }
+        i += 1;
+    }
+    String::new()
+}
+
 /// Recognised emit extensions. The empty string covers static-libs / binaries
 /// that rustc emits without an extension (e.g. an `--emit=link` binary).
 // Cache T3: `.d` (dep-info) is deliberately NOT cached. It's a Makefile fragment of ABSOLUTE
@@ -237,6 +251,21 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
             return false;
         }
     }
+    // T2b post-restore NAME guard (the real rc=101 fix): verify the EXACT artifact this invocation
+    // expects — lib<crate><extra-filename>.<ext> — now exists. The cache is content-keyed, but a hit
+    // can restore a DIFFERENT metadata-hash variant of a multi-feature external dep (we saw libc as
+    // both -361b6c44 and -cf571322); the restored .rmeta then carries the wrong embedded hash + name,
+    // so a consumer's `--extern <dep>=lib<dep>-<expected>.rmeta` can't find it -> rc=101. If the exact
+    // expected file isn't present after restore, treat it as a MISS and run real rustc.
+    let cn = find_crate_name(rustc_args);
+    let extra = find_extra_filename(rustc_args);
+    if !cn.is_empty() {
+        for ext in required_exts(rustc_args) {
+            if !out_dir_path.join(format!("lib{}{}.{}", cn, extra, ext)).exists() {
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -244,6 +273,13 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
 mod tests {
     use super::*;
     use std::time::SystemTime;
+
+    // Tests below mutate the process-global CWD (blob_dir_for is CWD-relative); serialize them so
+    // cargo's parallel runner (what a `fluxc combo` invokes) can't race them. Poison-tolerant.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
+        CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         let t = std::env::temp_dir().join(format!("flux-driver-test-{}-{}", name, SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -280,6 +316,7 @@ mod tests {
 
     #[test]
     fn collect_then_apply_roundtrip() {
+        let _cwd = cwd_guard();
         // We can't run rustc in unit tests — simulate by:
         // 1. pre-populating an `out_dir` with fake "outputs"
         // 2. calling collect_outputs (which side-blobs them)
@@ -329,6 +366,7 @@ mod tests {
 
     #[test]
     fn stable_key_survives_volatile_args() {
+        let _cwd = cwd_guard();
         // 0.33 core property: blobs+entry are keyed on the STABLE cache_key, so a
         // hit succeeds even when the raw rustc args differ (e.g. a different absolute
         // --extern path) — the cross-workspace / post-clean reuse case. Pre-fix the
@@ -377,6 +415,7 @@ mod tests {
 
     #[test]
     fn apply_returns_false_when_blob_dir_missing() {
+        let _cwd = cwd_guard();
         let workspace = tmp_dir("missing");
         let orig_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&workspace).unwrap();
@@ -429,5 +468,9 @@ mod tests {
                                      "--out-dir".into(), "/tmp/x".into()];
         assert!(!apply_cached_outputs(&meta_only, &link),
             "T2: a metadata-only entry must NOT satisfy a --emit=link pass");
+        // T2b: extra-filename extraction (both forms), used for the post-restore exact-name guard.
+        assert_eq!(find_extra_filename(&["-C".into(), "extra-filename=-361b6c44".into()]), "-361b6c44");
+        assert_eq!(find_extra_filename(&["-Cextra-filename=-cf571322".into()]), "-cf571322");
+        assert_eq!(find_extra_filename(&["--crate-name".into(), "demo".into()]), "");
     }
 }

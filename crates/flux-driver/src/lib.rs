@@ -67,9 +67,31 @@ fn find_out_dir(args: &[String]) -> String {
     String::new()
 }
 
+/// Cache T2: the artifact extensions THIS invocation must produce, derived from `--emit`.
+/// A `--emit=link` lib pass requires an `.rlib`; a `--emit=metadata` pass requires an `.rmeta`.
+/// apply_cached_outputs refuses a cached entry that doesn't cover these (it would otherwise ship a
+/// build missing the artifact downstream needs -> "extern location does not exist" rc=101).
+fn required_exts(args: &[String]) -> Vec<&'static str> {
+    let mut emit = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--emit" && i + 1 < args.len() { emit = args[i + 1].clone(); break; }
+        if let Some(v) = args[i].strip_prefix("--emit=") { emit = v.to_string(); break; }
+        i += 1;
+    }
+    let kinds: Vec<&str> = emit.split(',').map(|p| p.split('=').next().unwrap_or(p)).collect();
+    let mut req = Vec::new();
+    if kinds.contains(&"metadata") { req.push("rmeta"); }
+    if kinds.contains(&"link") { req.push("rlib"); } // a lib link pass; ext-less bins aren't cached anyway
+    req
+}
+
 /// Recognised emit extensions. The empty string covers static-libs / binaries
 /// that rustc emits without an extension (e.g. an `--emit=link` binary).
-const CACHEABLE_EXTS: &[&str] = &["rmeta", "rlib", "d"];
+// Cache T3: `.d` (dep-info) is deliberately NOT cached. It's a Makefile fragment of ABSOLUTE
+// source/dep/out paths from the producing build; restoring it into another out-dir makes cargo
+// either error or silently mark the unit dirty. rustc regenerates it for free, so we never restore it.
+const CACHEABLE_EXTS: &[&str] = &["rmeta", "rlib"];
 
 /// Scan `out_dir` for files belonging to this crate's compilation and return
 /// the matching file names (without the directory prefix). Recognised by
@@ -198,6 +220,13 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     if entry.outputs.is_empty() || entry.source_hash.is_empty() {
         return false;
     }
+    // T2 required-ext guard: a cache hit MUST carry every artifact this --emit produces (an rlib for
+    // a link pass, an rmeta for a metadata pass). A metadata-only entry served to a link pass would
+    // skip rustc and leave no .rlib -> downstream "extern location does not exist" rc=101. Refuse it;
+    // the wrapper then runs real rustc. (entry.outputs is keyed by extension.)
+    for ext in required_exts(rustc_args) {
+        if !entry.outputs.contains_key(ext) { return false; }
+    }
     let out_dir = find_out_dir(rustc_args);
     if out_dir.is_empty() { return false; }
     let blob_dir = blob_dir_for(&entry.source_hash);
@@ -238,14 +267,14 @@ mod tests {
         let dir = tmp_dir("scan");
         fs::write(dir.join("libfoo-abc123.rmeta"), b"r").unwrap();
         fs::write(dir.join("libfoo-abc123.rlib"), b"l").unwrap();
-        fs::write(dir.join("foo-abc123.d"), b"d").unwrap();
+        fs::write(dir.join("foo-abc123.d"), b"d").unwrap();      // T3: .d is no longer cached
         fs::write(dir.join("libbar-xyz.rmeta"), b"x").unwrap();   // wrong crate
         fs::write(dir.join("libfoo-abc123.so"), b"so").unwrap();  // unsupported ext
         let found = scan_outputs(&dir, "foo");
-        assert_eq!(found.len(), 3, "got {found:?}");
+        assert_eq!(found.len(), 2, "T3: only rmeta+rlib, NOT .d — got {found:?}");
         assert!(found.iter().any(|f| f == "libfoo-abc123.rmeta"));
         assert!(found.iter().any(|f| f == "libfoo-abc123.rlib"));
-        assert!(found.iter().any(|f| f == "foo-abc123.d"));
+        assert!(!found.iter().any(|f| f == "foo-abc123.d"), "T3: .d must NOT be collected");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -382,5 +411,23 @@ mod tests {
             timestamp: 0,
         };
         assert!(!apply_cached_outputs(&entry, &args));
+    }
+
+    #[test]
+    fn t2_required_exts_and_link_rejection() {
+        // T2: --emit drives required artifacts, and a metadata-only entry is REFUSED for a link pass
+        // (the rc=101 root: serving a .rmeta-only entry to a --emit=link unit leaves no .rlib).
+        assert_eq!(required_exts(&["--emit=link".to_string()]), vec!["rlib"]);
+        assert_eq!(required_exts(&["--emit=metadata".to_string()]), vec!["rmeta"]);
+        assert_eq!(required_exts(&["--emit".to_string(), "link,dep-info=/x.d".to_string()]), vec!["rlib"]);
+        let meta_only = flux_cache::CacheEntry {
+            source_hash: "k".into(), args_hash: "k".into(),
+            outputs: vec![("rmeta".to_string(), "libdemo-x.rmeta".to_string())].into_iter().collect(),
+            rustc_version: RUSTC_VERSION.into(), timestamp: 0,
+        };
+        let link: Vec<String> = vec!["--crate-name".into(), "demo".into(), "--emit=link".into(),
+                                     "--out-dir".into(), "/tmp/x".into()];
+        assert!(!apply_cached_outputs(&meta_only, &link),
+            "T2: a metadata-only entry must NOT satisfy a --emit=link pass");
     }
 }

@@ -815,6 +815,21 @@ fn normalize_args_for_cache_key(args: &[String]) -> Vec<String> {
                 // Drop entirely — output destination doesn't affect compiled output.
                 i += 2;
             }
+            "--emit" if i + 1 < args.len() => {
+                // Cache T1: make the key EMIT-AWARE. Cargo's pipelined build runs the SAME crate
+                // twice — `--emit=metadata` (produces .rmeta) then `--emit=link,...` (.rlib). Without
+                // this, both passes hash to the same key, so a metadata-only entry can be served for a
+                // link lookup (or vice-versa) -> wrong/missing artifact -> rc=101. Normalize to the
+                // sorted set of emit KINDS (dropping the volatile =output-path), so the two passes
+                // get distinct keys.
+                out.push("--emit".into());
+                out.push(normalize_emit(&args[i + 1]));
+                i += 2;
+            }
+            s if s.starts_with("--emit=") => {
+                out.push(format!("--emit={}", normalize_emit(&s["--emit=".len()..])));
+                i += 1;
+            }
             _ => {
                 out.push(a.clone());
                 i += 1;
@@ -822,6 +837,16 @@ fn normalize_args_for_cache_key(args: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Cache T1 helper: canonicalize an `--emit` spec to its sorted, de-duplicated set of KINDS,
+/// dropping any `=output-path` (which is volatile). e.g. `link,dep-info=/abs/foo.d` -> `dep-info,link`.
+/// Keeps the cache key path-independent while distinguishing a metadata pass from a link pass.
+fn normalize_emit(spec: &str) -> String {
+    let mut kinds: Vec<&str> = spec.split(',').map(|p| p.split('=').next().unwrap_or(p)).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds.join(",")
 }
 
 /// Parse a "name=value" or "kind=value" arg and substitute the value via
@@ -1355,17 +1380,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_dash_l_substitutes_listing_hash() {
-        let dir = tmp_dir("L-listing");
-        std::fs::write(dir.join("liba.rlib"), b"a").unwrap();
-        std::fs::write(dir.join("libb.rlib"), b"b").unwrap();
+    fn normalize_drops_dash_l() {
+        // 0.33 fix (554baf38): -L is a volatile search PATH (its deps-dir listing changes every
+        // build), so it's dropped from the cache key entirely — like --out-dir. The actual deps are
+        // pinned content-addressably by --extern. (Replaces the old listing-hash substitution test.)
         let args: Vec<String> = vec![
-            "-L".into(),
-            format!("dependency={}", dir.display()),
+            "-L".into(), "dependency=/some/target/debug/deps".into(),
+            "--crate-name".into(), "demo".into(),
         ];
         let n = normalize_args_for_cache_key(&args);
-        assert!(n[1].starts_with("dependency=<dir:"), "got {}", n[1]);
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(!n.iter().any(|a| a == "-L" || a.starts_with("dependency=")),
+            "-L and its path must be dropped, got {:?}", n);
+        assert_eq!(n, vec!["--crate-name".to_string(), "demo".to_string()]);
     }
 
     #[test]
@@ -1395,7 +1421,24 @@ mod tests {
             "src/lib.rs".into(),
         ];
         let n = normalize_args_for_cache_key(&args);
-        // All input args present (none dropped/substituted).
+        // All input args present (none dropped/substituted). `--emit metadata` normalizes to itself.
         assert_eq!(n, args);
+    }
+
+    #[test]
+    fn t1_emit_aware_key_distinguishes_passes() {
+        // T1 (the rc=101 root): a metadata pass and a link pass of the SAME crate must produce
+        // DIFFERENT normalized args, so the cache can't serve a .rmeta-only entry for a link lookup.
+        let meta = normalize_args_for_cache_key(&[
+            "--crate-name".into(), "demo".into(), "--emit=metadata".into()]);
+        let link = normalize_args_for_cache_key(&[
+            "--crate-name".into(), "demo".into(), "--emit=link,dep-info=/abs/foo.d".into()]);
+        assert_ne!(meta, link, "metadata vs link passes MUST differ in the cache key");
+        // ...and the volatile =output-path is dropped, so the link key is path-independent:
+        let link_other = normalize_args_for_cache_key(&[
+            "--crate-name".into(), "demo".into(), "--emit=link,dep-info=/OTHER/foo.d".into()]);
+        assert_eq!(link, link_other, "emit normalization must drop the volatile =output-path");
+        assert_eq!(normalize_emit("link,dep-info=/x.d"), "dep-info,link");
+        assert_eq!(normalize_emit("metadata"), "metadata");
     }
 }

@@ -806,7 +806,7 @@ fn normalize_args_for_cache_key(args: &[String]) -> Vec<String> {
         match a.as_str() {
             "--extern" if i + 1 < args.len() => {
                 out.push(a.clone());
-                out.push(substitute_name_eq_path(&args[i + 1], substitute_file_content));
+                out.push(substitute_name_eq_path(&args[i + 1], substitute_dep_identity));
                 i += 2;
             }
             "-L" if i + 1 < args.len() => {
@@ -867,11 +867,19 @@ fn substitute_name_eq_path(arg: &str, subst: impl Fn(&str) -> String) -> String 
     }
 }
 
-/// Substitute a single file path with the BLAKE3 of its content.
-fn substitute_file_content(path: &str) -> String {
-    match std::fs::read(path) {
-        Ok(bytes) => format!("<content:{}>", blake3::hash(&bytes).to_hex()),
-        Err(_) => path.to_string(),
+/// Substitute a dep path with its STABLE identity: the filename `lib<crate>-<metadata-hash>.<ext>`.
+/// Phase 2 (determinism — the fix for 0.4% cold hits + the partial-hit ICE): the rlib BYTES are
+/// NON-deterministic (rustc embeds a volatile metadata blob), so hashing them (the old behavior) made
+/// every dependent's --extern key vary build-to-build -> guaranteed misses -> an inconsistent mix of
+/// restored+recompiled rmetas -> SIGBUS. The filename's metadata-hash is cargo's DETERMINISTIC
+/// fingerprint of (crate, features, profile, transitive deps): it changes iff a real input changed,
+/// and is byte-identical across cold builds in the same workspace. (Cross-machine CI<->dev determinism
+/// is a later refinement — cargo's metahash can embed an abs path for path-deps; the robust form is a
+/// sidecar mapping each rlib to the dep's own source-based flux cache_key. See [[flux-cache-reality]].)
+fn substitute_dep_identity(path: &str) -> String {
+    match std::path::Path::new(path).file_name() {
+        Some(f) => format!("<extern:{}>", f.to_string_lossy()),
+        None => path.to_string(),
     }
 }
 
@@ -1306,86 +1314,70 @@ mod tests {
     }
 
     #[test]
-    fn normalize_extern_substitutes_content_hash() {
+    fn normalize_extern_uses_filename_identity() {
+        // Phase 2: a dep is identified by its FILENAME (lib<crate>-<metahash>.<ext>) — cargo's
+        // deterministic fingerprint — NOT its volatile rlib bytes. Abs path/dir dropped.
         let dir = tmp_dir("extern-subst");
         let rlib_path = dir.join("libfoo-abc123.rlib");
-        let content = b"sample rlib bytes";
-        std::fs::write(&rlib_path, content).unwrap();
+        std::fs::write(&rlib_path, b"sample rlib bytes").unwrap();
         let args: Vec<String> = vec![
             "--extern".into(), format!("foo={}", rlib_path.display()),
         ];
         let n = normalize_args_for_cache_key(&args);
         assert_eq!(n.len(), 2);
         assert_eq!(n[0], "--extern");
-        // Path substituted with content hash; ABSOLUTE path no longer present.
-        assert!(n[1].starts_with("foo=<content:"), "got {}", n[1]);
-        assert!(!n[1].contains(rlib_path.to_string_lossy().as_ref()));
+        assert_eq!(n[1], "foo=<extern:libfoo-abc123.rlib>", "got {}", n[1]);
+        assert!(!n[1].contains(dir.to_string_lossy().as_ref()), "abs path must be dropped");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn normalize_extern_two_workspaces_same_content_same_key() {
-        // Simulate two workspaces. Each has its own rlib at a different path
-        // but with identical bytes. After normalization, the cache key arg
-        // must be identical.
+    fn normalize_extern_same_filename_two_workspaces_same_key() {
+        // Two workspaces, the dep's rlib at different ABS paths but the SAME filename (= same metahash
+        // = same real identity). Filename-identity makes the normalized key identical -> cross-workspace
+        // dedup. Different BYTES on purpose to prove it's the FILENAME, not the content, that decides.
         let ws_a = tmp_dir("ws-a");
         let ws_b = tmp_dir("ws-b");
-        let content = b"deterministic dep bytes (same in both workspaces)";
-        std::fs::write(ws_a.join("libdep-aaa.rlib"), content).unwrap();
-        std::fs::write(ws_b.join("libdep-bbb.rlib"), content).unwrap();
+        std::fs::write(ws_a.join("libdep-aaa.rlib"), b"bytes-a").unwrap();
+        std::fs::write(ws_b.join("libdep-aaa.rlib"), b"DIFFERENT-bytes-b").unwrap();
 
-        let args_a: Vec<String> = vec![
-            "--extern".into(),
-            format!("dep={}", ws_a.join("libdep-aaa.rlib").display()),
-        ];
-        let args_b: Vec<String> = vec![
-            "--extern".into(),
-            format!("dep={}", ws_b.join("libdep-bbb.rlib").display()),
-        ];
+        let args_a: Vec<String> = vec!["--extern".into(), format!("dep={}", ws_a.join("libdep-aaa.rlib").display())];
+        let args_b: Vec<String> = vec!["--extern".into(), format!("dep={}", ws_b.join("libdep-aaa.rlib").display())];
 
-        let na = normalize_args_for_cache_key(&args_a);
-        let nb = normalize_args_for_cache_key(&args_b);
-        assert_eq!(na, nb, "same-content extern from two workspaces produced different normalized args");
+        assert_eq!(normalize_args_for_cache_key(&args_a), normalize_args_for_cache_key(&args_b),
+            "same dep filename from two workspaces must normalize identically");
 
         std::fs::remove_dir_all(&ws_a).ok();
         std::fs::remove_dir_all(&ws_b).ok();
     }
 
     #[test]
-    fn normalize_extern_different_content_different_key() {
-        let ws_a = tmp_dir("diff-a");
-        let ws_b = tmp_dir("diff-b");
-        std::fs::write(ws_a.join("libdep-x.rlib"), b"content version 1").unwrap();
-        std::fs::write(ws_b.join("libdep-x.rlib"), b"content version 2 -- different bytes").unwrap();
+    fn normalize_extern_different_filename_different_key() {
+        // Different real deps carry different metahash filenames -> different keys. (In reality a
+        // content change always yields a new metahash, so the filename is a faithful content proxy.)
+        let dir = tmp_dir("diff");
+        std::fs::write(dir.join("libdep-v1.rlib"), b"a").unwrap();
+        std::fs::write(dir.join("libdep-v2.rlib"), b"b").unwrap();
 
-        let args_a: Vec<String> = vec![
-            "--extern".into(),
-            format!("dep={}", ws_a.join("libdep-x.rlib").display()),
-        ];
-        let args_b: Vec<String> = vec![
-            "--extern".into(),
-            format!("dep={}", ws_b.join("libdep-x.rlib").display()),
-        ];
+        let args_a: Vec<String> = vec!["--extern".into(), format!("dep={}", dir.join("libdep-v1.rlib").display())];
+        let args_b: Vec<String> = vec!["--extern".into(), format!("dep={}", dir.join("libdep-v2.rlib").display())];
 
-        let na = normalize_args_for_cache_key(&args_a);
-        let nb = normalize_args_for_cache_key(&args_b);
-        assert_ne!(na, nb, "different-content extern produced identical normalized args");
+        assert_ne!(normalize_args_for_cache_key(&args_a), normalize_args_for_cache_key(&args_b),
+            "different dep filenames must produce different keys");
 
-        std::fs::remove_dir_all(&ws_a).ok();
-        std::fs::remove_dir_all(&ws_b).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn normalize_extern_missing_file_keeps_path_verbatim() {
-        // If the --extern path can't be read, normalization keeps the
-        // original arg. The cache key is still well-defined locally; the
-        // entry just won't cross-workspace dedup.
+    fn normalize_extern_uses_basename_even_when_missing() {
+        // Phase 2: identity is the FILENAME, so we never read the file — even a non-existent path
+        // normalizes to its basename (abs path dropped -> path/machine independent).
         let args: Vec<String> = vec![
             "--extern".into(),
-            "foo=/this/path/does/not/exist/libfoo.rlib".into(),
+            "foo=/this/path/does/not/exist/libfoo-99.rlib".into(),
         ];
         let n = normalize_args_for_cache_key(&args);
-        assert_eq!(n[1], "foo=/this/path/does/not/exist/libfoo.rlib");
+        assert_eq!(n[1], "foo=<extern:libfoo-99.rlib>");
     }
 
     #[test]

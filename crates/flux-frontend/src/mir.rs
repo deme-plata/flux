@@ -549,6 +549,40 @@ pub fn monomorphize(funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     out
 }
 
+// ── Named-const resolution (ladder rung 6) ──
+//
+// rustc renders a named integer const as `const HALVING_INTERVAL` in MIR, not its value. Flux's
+// operand resolver only understands `const <literal>`, so an unresolved named const parses to 0 — and
+// a `Div`/`Rem` by one traps (SIGFPE), as found dogfooding sigil-emission::block_reward. This pass
+// substitutes `const NAME` → `const <value>` before codegen, reusing the literal-const path. Empty
+// table → input returned unchanged.
+
+fn fix_const(arg: &mut String, consts: &std::collections::HashMap<String, i64>) {
+    if let Some(name) = arg.strip_prefix("const ") {
+        if let Some(&v) = consts.get(name.trim()) { *arg = format!("const {}", v); }
+    }
+}
+
+/// Substitute named-const operands in every statement + terminator using the const table.
+pub fn resolve_consts(mut funcs: Vec<MirFunction>, consts: &std::collections::HashMap<String, i64>) -> Vec<MirFunction> {
+    if consts.is_empty() { return funcs; }
+    for f in &mut funcs {
+        for b in &mut f.blocks {
+            for s in &mut b.statements {
+                if let MirStmt::Assign { args, .. } = s {
+                    for a in args.iter_mut() { fix_const(a, consts); }
+                }
+            }
+            match &mut b.terminator {
+                Some(MirTerminator::Call { args, .. }) => for a in args.iter_mut() { fix_const(a, consts); },
+                Some(MirTerminator::SwitchInt { discr, .. }) => fix_const(discr, consts),
+                _ => {}
+            }
+        }
+    }
+    funcs
+}
+
 // ── MIR → flux-frontend IR lowering (file-scope, callable from phase3) ──
 // Phase 2c+: previously trapped inside `mod tests` so phase3 could not use them.
 // Hoisted here, return-value bug fixed, opcode coverage expanded.
@@ -972,6 +1006,20 @@ mod tests {
         // bump crate::IR_VERSION and update this assertion in the same commit — never silently.
         assert_eq!(crate::IR_VERSION, 3,
             "flux-frontend IR changed: bump IR_VERSION intentionally (FIP-0001 frozen-IR contract)");
+    }
+
+    #[test]
+    fn resolve_named_consts() {
+        // The gap dogfooding sigil-emission::block_reward: `Div(copy _1, const HALVING_INTERVAL)`.
+        let mir = "fn f(_1: u64) -> u64 {\n    bb0: {\n        _0 = Div(copy _1, const HALVING_INTERVAL);\n        return;\n    }\n}\n";
+        let consts: std::collections::HashMap<String,i64> =
+            [("HALVING_INTERVAL".to_string(), 2_100_000i64)].into_iter().collect();
+        let funcs = resolve_consts(parse_mir(mir).unwrap(), &consts);
+        let stmt = &funcs[0].blocks[0].statements[0];
+        if let MirStmt::Assign { args, .. } = stmt {
+            assert_eq!(args, &vec!["copy _1".to_string(), "const 2100000".to_string()],
+                "named const must be substituted with its value");
+        } else { panic!("expected assign"); }
     }
 
     #[test]

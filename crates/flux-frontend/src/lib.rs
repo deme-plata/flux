@@ -179,6 +179,26 @@ pub fn parse_source(source: &str, file_path: &str) -> Result<TranslationUnit, St
     })
 }
 
+/// Extract top-level integer `const NAME: T = <int literal>;` definitions as a name→value map.
+/// rustc's MIR refers to a named const by NAME (`const HALVING_INTERVAL`), not its value, so codegen
+/// needs this table to resolve them (ladder rung 6 — found dogfooding sigil-emission::block_reward,
+/// where an unresolved `const` in a `Div` became a divide-by-zero SIGFPE). Only plain integer-literal
+/// consts are captured; const expressions (`A * B`) are a later slice. Values are i64 (a u128 const
+/// beyond i64 range is skipped rather than truncated).
+pub fn parse_consts(source: &str) -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
+    if let Ok(ast) = syn::parse_file(source) {
+        for item in &ast.items {
+            if let syn::Item::Const(c) = item {
+                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) = &*c.expr {
+                    if let Ok(v) = i.base10_parse::<i64>() { out.insert(c.ident.to_string(), v); }
+                }
+            }
+        }
+    }
+    out
+}
+
 // ── Lowering: syn AST → Flux IR ──
 
 fn lower_function(f: &syn::ItemFn) -> Option<FunctionDef> {

@@ -862,6 +862,9 @@ pub fn compile_impl_with_provenance(path: &str, use_mir: bool, provenance: bool)
                         // Monomorphize generics (rung 5 pt 2): expand turbofish instantiations,
                         // drop templates. No-op for non-generic programs.
                         let funcs = flux_frontend::mir::monomorphize(funcs);
+                        // Resolve named integer consts (rung 6): `const HALVING_INTERVAL` -> its value,
+                        // so a Div/Rem by one doesn't trap. No-op when the source has no such consts.
+                        let funcs = flux_frontend::mir::resolve_consts(funcs, &flux_frontend::parse_consts(&source));
                         println!("  MIR parsed: {} functions", funcs.len());
                         for f in &funcs {
                             println!("  fn {}({} params) → {}", f.name, f.params.len(), f.return_type);

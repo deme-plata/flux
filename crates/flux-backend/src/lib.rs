@@ -307,8 +307,11 @@ fn compile_mir_into_function(
                         continue;
                     }
                     // Enum construction: parse_rhs emits op="EnumName::Variant" with the payload
-                    // operands as args (C-like variants carry no args).
-                    if let Some(&disc) = enum_variants.get(op.as_str()) {
+                    // operands as args (C-like variants carry no args). A concrete-instantiated generic
+                    // enum renders the turbofish in the path (`MyOpt::<i64>::Some`); normalize it away so
+                    // it matches the bare variant key.
+                    let op_norm = strip_turbofish(op);
+                    if let Some(&disc) = enum_variants.get(op.as_str()).or_else(|| enum_variants.get(op_norm.as_str())) {
                         // Data-carrying enum: dst is an aggregate [tag, payload…]. Write disc into the
                         // tag field (0) and each construction arg into payload field (1+i); zero-fill any
                         // payload the variant doesn't supply (a unit variant of a data-carrying enum, so
@@ -496,7 +499,14 @@ fn parse_tuple_type(ty: &str) -> Option<Vec<String>> {
 /// struct resolved through the layout table built from the source's struct definitions. Structs are
 /// "named tuples" — same scalar-replacement, just resolved by name.
 fn aggregate_fields(ty: &str, structs: &std::collections::HashMap<String, Vec<String>>) -> Option<Vec<String>> {
-    parse_tuple_type(ty).or_else(|| structs.get(ty.trim()).cloned())
+    let t = ty.trim();
+    parse_tuple_type(t)
+        .or_else(|| structs.get(t).cloned())
+        // Generic instantiation (ladder rung 5, part 1): `MyOpt<i64>` / `Point<i64>` share the layout of
+        // their base type. rustc renders the concrete payload type at each USE site (the def's type param
+        // defaults to i64 in the layout table), so the base layout is correct for scalar instantiations.
+        // A non-scalar or non-i64-width type param is a later slice (needs real substitution + coercion).
+        .or_else(|| structs.get(t.split('<').next().unwrap_or(t).trim()).cloned())
 }
 
 /// TypeRef -> the type string mir_type_to_cl understands (for the struct layout table).
@@ -536,6 +546,14 @@ fn bare_local(s: &str) -> Option<usize> {
     let c = s.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
     if !c.starts_with('_') || c.contains('.') || c.contains('(') || c.contains(':') { return None; }
     c[1..].parse::<usize>().ok()
+}
+
+/// Strip turbofish segments from a `::`-path (ladder rung 5, part 1). A generic enum's variant
+/// construction is rendered with the instantiation in the path — `MyOpt::<i64>::Some` — but the enum
+/// variant table is keyed on the bare `MyOpt::Some`. Dropping any `<…>` segment normalizes the two so
+/// a concrete-instantiated generic enum constructs through the same path as a non-generic one.
+fn strip_turbofish(name: &str) -> String {
+    name.split("::").filter(|seg| !seg.starts_with('<')).collect::<Vec<_>>().join("::")
 }
 
 fn resolve_mir_operand_to_value(
@@ -951,6 +969,20 @@ fn cl_type(ty: &TypeRef) -> Type {
         assert_eq!(bare_local("move (_4.0: i64)"), None); // projection — single value
         assert_eq!(bare_local("const 7_i64"), None);
         assert_eq!(bare_local("(_1 as Some).0"), None);
+    }
+    #[test] fn test_strip_turbofish() {
+        // Generic enum variant path normalization (ladder rung 5, part 1).
+        assert_eq!(strip_turbofish("MyOpt::<i64>::Some"), "MyOpt::Some");
+        assert_eq!(strip_turbofish("MyOpt::<i64>::None"), "MyOpt::None");
+        assert_eq!(strip_turbofish("Opt::Some"), "Opt::Some"); // non-generic untouched
+    }
+    #[test] fn test_aggregate_fields_generic() {
+        let mut s = std::collections::HashMap::new();
+        s.insert("MyOpt".to_string(), vec!["i64".to_string(), "i64".to_string()]);
+        // A concrete instantiation resolves to the base type's layout.
+        assert_eq!(aggregate_fields("MyOpt<i64>", &s), Some(vec!["i64".into(), "i64".into()]));
+        assert_eq!(aggregate_fields("MyOpt", &s), Some(vec!["i64".into(), "i64".into()]));
+        assert_eq!(aggregate_fields("i64", &s), None);
     }
     #[test] fn test_add() { let u=flux_frontend::parse_source("fn add(a: i64, b: i64) -> i64 { return a + b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).unwrap().contains("function")); }
     #[test] fn test_mul() { let u=flux_frontend::parse_source("fn mul(a: i64, b: i64) -> i64 { return a * b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).is_ok()); }

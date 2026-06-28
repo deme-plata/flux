@@ -636,13 +636,29 @@ fn build_mir_overrides(funcs: &[flux_frontend::mir::MirFunction])
     -> std::collections::HashMap<String, flux_frontend::mir::MirFunction>
 {
     funcs.iter()
-        .filter(|f| has_cycles(f) || has_complex_switch(f) || has_tuples(f) || has_structs(f))
+        .filter(|f| has_cycles(f) || has_complex_switch(f) || has_tuples(f) || has_structs(f)
+            || touches_aggregates(f))
         .map(|f| (f.name.clone(), f.clone()))
         .collect()
 }
 
 /// True if any local or param has a tuple type. Tuple support lives only in the
 /// MIR-direct path (each field becomes its own Cranelift Variable).
+/// True if any param OR local is an aggregate carried by value (struct / tuple / data-carrying enum).
+/// Such a function MUST take the MIR-direct path: that's where the backend lays aggregates out as
+/// scalar-replaced Variables and where the flattened param/return/call ABI lives. References are
+/// excluded so ref-taking functions keep their current path. Catches the case the other has_* checks
+/// miss: an enum-typed param/local (e.g. `unwrap_or(o: Opt, …)`), since enums aren't tuples or structs.
+fn touches_aggregates(mir: &flux_frontend::mir::MirFunction) -> bool {
+    fn is_agg(t: &str) -> bool {
+        let t = t.trim();
+        if t.is_empty() || t.starts_with('&') || t.starts_with('*') { return false; }
+        !matches!(t, "i8"|"i16"|"i32"|"i64"|"u8"|"u16"|"u32"|"u64"
+            |"isize"|"usize"|"bool"|"f32"|"f64"|"()"|"char")
+    }
+    mir.params.iter().any(|p| is_agg(&p.ty)) || mir.locals.iter().any(|l| is_agg(&l.ty))
+}
+
 fn has_tuples(mir: &flux_frontend::mir::MirFunction) -> bool {
     mir.locals.iter().any(|l| l.ty.trim().starts_with('('))
         || mir.params.iter().any(|p| p.ty.trim().starts_with('('))

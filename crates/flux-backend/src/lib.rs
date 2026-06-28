@@ -81,7 +81,20 @@ pub fn compile_unit_to_object_with_mir(
         // inline (`_d = Enum::Variant(args)`), and the `::` name would emit a bogus object symbol.
         if enum_variants.contains_key(&func.name) { continue; }
         let mut sig = module.make_signature();
-        for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); }
+        // Params: an aggregate (struct / tuple / data-carrying enum) passed BY VALUE becomes one
+        // AbiParam PER scalar-replaced field — Flux's flattened ABI, symmetric with the call site and
+        // the multi-value return. Real per-param type strings come from the MIR override (a TypeRef
+        // can't spell "Opt" / "(i64,i64)"); the TypeRef fallback is for Expr-path funcs, which never
+        // carry aggregate params (build_mir_overrides routes those to the MIR-direct path).
+        match mir_overrides.get(&func.name) {
+            Some(m) => for mp in &m.params {
+                match aggregate_fields(&mp.ty, &struct_layout) {
+                    Some(fields) => for f in &fields { sig.params.push(AbiParam::new(mir_type_to_cl(f))); },
+                    None => sig.params.push(AbiParam::new(mir_type_to_cl(&mp.ty))),
+                }
+            },
+            None => for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); },
+        }
         // Aggregate (tuple) by-value return: one AbiParam per field, taken from the MIR
         // override's type string (TypeRef can't express tuples). Else a single scalar return.
         match mir_overrides.get(&func.name).and_then(|m| aggregate_fields(&m.return_type, &struct_layout)) {
@@ -244,10 +257,23 @@ fn compile_mir_into_function(
     bc.switch_to_block(entry);
     bc.append_block_params_for_function_params(entry);
     let entry_params: Vec<Value> = bc.block_params(entry).to_vec();
-    for (i, p) in mir.params.iter().enumerate() {
-        if let Some(&var) = vars.get(&p.index) {
-            let val = entry_params[i];
-            bc.def_var(var, val);
+    // Bind incoming block-params to param Variables with a running cursor: an aggregate param consumes
+    // one block-param per field (matching the flattened sig above), a scalar param consumes one.
+    let mut pcursor = 0usize;
+    for p in &mir.params {
+        let ty = mir_type_strs.get(&p.index).cloned().unwrap_or_default();
+        if let Some(fields) = aggregate_fields(&ty, structs) {
+            for fi in 0..fields.len() {
+                if let (Some(&var), Some(&val)) = (tuple_vars.get(&(p.index, fi)), entry_params.get(pcursor)) {
+                    bc.def_var(var, val);
+                }
+                pcursor += 1;
+            }
+        } else {
+            if let (Some(&var), Some(&val)) = (vars.get(&p.index), entry_params.get(pcursor)) {
+                bc.def_var(var, val);
+            }
+            pcursor += 1;
         }
     }
     let first_label = mir.blocks.first().map(|b| b.label.clone()).unwrap_or_default();
@@ -357,9 +383,23 @@ fn compile_mir_into_function(
                 else { return Err(format!("Assert target '{}' not found", target)); }
             }
             Some(MirTerminator::Call { func, args, dst, target }) => {
-                let arg_vals: Vec<Value> = args.iter()
-                    .map(|a| resolve_mir_operand_to_value(a, &vars, &tuple_vars, &mut bc))
-                    .collect();
+                // Aggregate-by-value arg: expand a bare aggregate local (`move _3` where _3: Opt) into
+                // its scalar-replaced fields, matching the callee's flattened param ABI. Scalars,
+                // projections (`(_4.0: i64)`), and consts resolve to a single value as before.
+                let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+                for a in args {
+                    if let Some(idx) = bare_local(a) {
+                        if let Some(fields) = aggregate_fields(&mir_type_strs.get(&idx).cloned().unwrap_or_default(), structs) {
+                            for fi in 0..fields.len() {
+                                let v = tuple_vars.get(&(idx, fi)).map(|&v| bc.use_var(v))
+                                    .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+                                arg_vals.push(v);
+                            }
+                            continue;
+                        }
+                    }
+                    arg_vals.push(resolve_mir_operand_to_value(a, &vars, &tuple_vars, &mut bc));
+                }
                 let cleaned = func.rsplit("::").next().unwrap_or(func).to_string();
                 if let Some(&fid) = func_ids.get(&cleaned) {
                     let func_ref = module.declare_func_in_func(fid, bc.func);
@@ -486,6 +526,16 @@ fn parse_mir_local_idx(s: &str) -> Option<usize> {
     if !s.starts_with('_') { return None; }
     let n: String = s.chars().skip(1).take_while(|c| c.is_ascii_digit()).collect();
     n.parse().ok()
+}
+
+/// The bare local index of an operand like `move _3` / `copy _3` / `_3`. Used to spot an
+/// aggregate-by-value call argument that must be expanded into its fields. Returns None for a
+/// projection (`(_4.0: i64)`), a const, or anything that isn't a plain `_N` — those resolve to a
+/// single value the normal way.
+fn bare_local(s: &str) -> Option<usize> {
+    let c = s.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
+    if !c.starts_with('_') || c.contains('.') || c.contains('(') || c.contains(':') { return None; }
+    c[1..].parse::<usize>().ok()
 }
 
 fn resolve_mir_operand_to_value(
@@ -892,6 +942,16 @@ fn cl_type(ty: &TypeRef) -> Type {
 }
 
 #[cfg(test)] mod tests { use super::*;
+    #[test] fn test_bare_local() {
+        // Drives aggregate-by-value call-arg expansion: only a plain `_N` (optionally copy/move) is a
+        // bare local to expand; projections / consts must resolve as single values instead.
+        assert_eq!(bare_local("move _3"), Some(3));
+        assert_eq!(bare_local("copy _12"), Some(12));
+        assert_eq!(bare_local("_7"), Some(7));
+        assert_eq!(bare_local("move (_4.0: i64)"), None); // projection — single value
+        assert_eq!(bare_local("const 7_i64"), None);
+        assert_eq!(bare_local("(_1 as Some).0"), None);
+    }
     #[test] fn test_add() { let u=flux_frontend::parse_source("fn add(a: i64, b: i64) -> i64 { return a + b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).unwrap().contains("function")); }
     #[test] fn test_mul() { let u=flux_frontend::parse_source("fn mul(a: i64, b: i64) -> i64 { return a * b }","t.rs").unwrap(); assert!(compile_to_clif(&u.functions[0]).is_ok()); }
 

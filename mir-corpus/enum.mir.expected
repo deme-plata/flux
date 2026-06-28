@@ -1,0 +1,45 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn code(_1: Color) -> i64 {
+    debug c => _1;
+    let mut _0: i64;
+    let mut _2: isize;
+
+    bb0: {
+        _2 = discriminant(_1);
+        switchInt(move _2) -> [0: bb4, 1: bb3, 2: bb2, otherwise: bb1];
+    }
+
+    bb1: {
+        unreachable;
+    }
+
+    bb2: {
+        _0 = const 3_i64;
+        goto -> bb5;
+    }
+
+    bb3: {
+        _0 = const 2_i64;
+        goto -> bb5;
+    }
+
+    bb4: {
+        _0 = const 1_i64;
+        goto -> bb5;
+    }
+
+    bb5: {
+        return;
+    }
+}
+
+fn make() -> Color {
+    let mut _0: Color;
+
+    bb0: {
+        _0 = Color::Green;
+        return;
+    }
+}

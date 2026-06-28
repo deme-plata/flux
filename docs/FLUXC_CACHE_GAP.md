@@ -167,6 +167,44 @@ time cargo check --package sigil-scoring   # expect sub-1s for shared deps
 fluxc stats | grep "cache (.*%)"  # expect non-zero hit %
 ```
 
+## Addendum — measured reality as of 2026-06-28 (this doc was a month stale)
+
+Everything above is the 2026-05-29 snapshot and is now **out of date**. The June FIP-0002 cache
+saga (commits `c179acb5` → `0d095cae`) finished the job. Verified by reading the live code +
+`fluxc stats`:
+
+- **Patches 2 + 3 are SHIPPED and hardened, not "designed."** `flux_driver::collect_outputs` side-blobs
+  the EXACT `lib<crate><extra-filename>.{rmeta,rlib}` bytes to `target/flux-cache/blobs/<stable-key>/`
+  (exact-filename collection — the substring scan that caused the 223-reject pollution is gone), and
+  `apply_cached_outputs` does an **atomic** byte-restore (temp+rename) with three correctness guards:
+  T2 required-ext (never serve a metadata-only entry to a `--emit=link` pass → the rc=101 fix),
+  T2b post-restore exact-name (reject a wrong metahash variant), and T2c closure-consistency sidecar
+  (`target/flux-cache/closure/<key>` records each `--extern` dep's content-hash; a restore that finds
+  any dep changed → miss → recompile this crate → makes a PARTIAL hit safe).
+- **The cache key is workspace-independent** via `normalize_args_for_cache_key` (patch 4, in the wrapper):
+  `--extern name=PATH` → content-hash, `-L kind=PATH` → dir-listing hash, `--out-dir` dropped. So
+  flux / sigil / quillonos share one cache.
+- **Measured hit rate: `4946/13665 units = 36.2%` all-time, 757 MB cache** (`fluxc stats` → "Compile
+  cache … [wrapper flux_cache, all-time]"). Matches the git arc "0% → ~40%".
+
+### The ACTUAL remaining gap (the live frontier — not byte-restore)
+
+Restore is **gated OFF by default** (`fluxc-core/src/lib.rs` BUILD-SAFE restore gate, ~line 747): it only
+runs under `FLUX_CACHE_RESTORE=1`. Default = populate-always, restore-never, on the invariant *"the cache
+can NEVER break a build."* The 36.2% accumulated only in restore-enabled sessions. So the next move is
+**not** more byte-restore code — it's deciding whether T2b+T2c+atomic-restore have made restore safe
+enough to **enable by default** (or auto-enable when the full dep closure hits). That is the change that
+delivers the self-host speedup and feeds the FIP-0001 Option-A trigger. It is build-breaking-risk and
+should be soak-tested (a full `fluxc self` under `FLUX_CACHE_RESTORE=1`, all tests green, zero ICEs)
+before flipping — not cowboyed.
+
+Two empirical notes from a 2026-06-28 probe (flux-uint, isolated `/tmp` target on Epsilon):
+- A restore-enabled rebuild stayed **green** (exit 0); no breakage observed.
+- A single-crate hit could NOT be forced because **cargo's own fingerprint freshness sits in FRONT of the
+  wrapper** — cargo never invokes the wrapper for a unit it judges fresh. ⇒ flux-cache's win is
+  cross-clean / cross-workspace reuse (cold deps after `cargo clean`, or a sibling workspace), NOT warm
+  incremental. Worth stating plainly so the speedup isn't oversold for the inner-loop case.
+
 ## Related
 
 - `/root/.claude/skills/flux-dev/FLUXFOOD.md` — the four levers; lever 2's "fluxc build" promise depends on this gap closing
@@ -175,3 +213,4 @@ fluxc stats | grep "cache (.*%)"  # expect non-zero hit %
 
 —
 *rocky-sigil-75 — wiring shipped. patches 2–4 are deepseek's + future flux-driver owner's calls.*
+*2026-06-28 addendum — patches 2–4 confirmed shipped+hardened; live frontier is "restore safe-by-default", not byte-restore.*

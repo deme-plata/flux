@@ -19,7 +19,10 @@ use std::path::Path;
 // emits this same IR directly, so the rest of the pipeline never learns whether MIR came from rustc or
 // from Flux's own parser. Any breaking change to these types MUST bump IR_VERSION (and update the
 // ir_version_frozen snapshot test), so a frontend swap stays a contained, intentional event.
-pub const IR_VERSION: u32 = 2;
+//
+// v3 (2026-06-28): EnumVariant gained `fields` (payload types) for data-carrying enums — the second
+// half of FIP-0001 type-complexity ladder rung 4. C-like (fieldless) variants carry an empty `fields`.
+pub const IR_VERSION: u32 = 3;
 
 // ── High-Level IR ──
 
@@ -73,6 +76,10 @@ pub struct EnumDef {
 pub struct EnumVariant {
     pub name: String,
     pub discriminant: i64,
+    /// Payload types for a data-carrying variant (`Some(i64)` → `[I64]`, tuple-style). Empty for a
+    /// C-like (fieldless) variant. The backend lays a data-carrying enum out as `[i64 tag, payload…]`
+    /// where the payload slot count = the max `fields.len()` across variants (a tagged union).
+    pub fields: Vec<TypeRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,7 +395,13 @@ fn lower_enum(e: &syn::ItemEnum) -> EnumDef {
         }
         let d = next;
         next += 1;
-        EnumVariant { name: v.ident.to_string(), discriminant: d }
+        // Data-carrying payload types: tuple-style `Some(i64)` → [I64]. Named-field variants
+        // (`Move { x: i64 }`) and unit variants carry no positional payload here (a later rung).
+        let fields: Vec<TypeRef> = match &v.fields {
+            syn::Fields::Unnamed(u) => u.unnamed.iter().map(|f| lower_type(&f.ty)).collect(),
+            _ => Vec::new(),
+        };
+        EnumVariant { name: v.ident.to_string(), discriminant: d, fields }
     }).collect();
 
     let derives: Vec<String> = e.attrs.iter()
@@ -437,6 +450,20 @@ pub struct Point {
         assert_eq!(unit.structs.len(), 1);
         assert_eq!(unit.structs[0].name, "Point");
         assert_eq!(unit.structs[0].derives.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_data_carrying_enum() {
+        // Ladder rung 4 (part 2): tuple-style variants capture positional payload types;
+        // unit variants carry an empty `fields`.
+        let source = "pub enum Shape { Dot, Line(i64), Box(i64, i64) }";
+        let unit = parse_source(source, "test.rs").unwrap();
+        assert_eq!(unit.enums.len(), 1);
+        let v = &unit.enums[0].variants;
+        assert_eq!(v[0].fields.len(), 0, "Dot is a unit variant");
+        assert_eq!(v[1].fields.len(), 1, "Line carries one payload");
+        assert_eq!(v[2].fields.len(), 2, "Box carries two payloads");
+        assert!(matches!(v[1].fields[0], TypeRef::I64));
     }
 
     #[test]

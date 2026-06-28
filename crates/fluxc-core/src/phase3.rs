@@ -850,14 +850,21 @@ pub fn compile_impl_with_provenance(path: &str, use_mir: bool, provenance: bool)
                             .map(flux_frontend::mir::lower_mir_to_ir)
                             .collect();
                         
+                        // Carry struct + enum defs from the syn parse: the backend needs struct layouts
+                        // (aggregate scalar-replacement) and enum variant tables + data-carrying layouts
+                        // (ladder rung 4). Without these, a data-carrying enum's constructor functions
+                        // aren't recognised/skipped → duplicate-name panic, and its match payload reads 0.
+                        let (src_structs, src_enums) = flux_frontend::parse_source(&source, path)
+                            .map(|u| (u.structs, u.enums))
+                            .unwrap_or_default();
                         let unit = flux_frontend::TranslationUnit {
                             file_path: path.to_string(),
                             functions: ir_funcs,
-                            structs: vec![],
-                            enums: vec![],
+                            structs: src_structs,
+                            enums: src_enums,
                             imports: vec![],
                         };
-                        
+
                         match flux_backend::compile_unit(&unit) {
                             Ok(clifs) => {
                                 println!("  Compiled {} functions to CLIF:", clifs.len());

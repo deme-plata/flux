@@ -322,6 +322,14 @@ where I: Iterator<Item = &'a str>
 }
 
 fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
+    // Data-carrying enum payload extraction: `copy ((_N as Variant).K: T)` — rustc downcasts an enum
+    // local to a variant and projects its K-th field. Map it to aggregate field (K+1): field 0 is the
+    // discriminant tag, payload slots start at 1. Emitting `copy _N.(K+1)` reuses the existing
+    // `_N.F` tuple-projection resolver in the backend. MUST come BEFORE the ` as ` cast check below,
+    // which would otherwise split on the inner " as " and mangle the operand.
+    if let Some(proj) = strip_downcast_projection(rhs) {
+        return ("copy".to_string(), vec![proj]);
+    }
     // Cast rvalue: "move _1 as i64 (IntToInt)" / "_1 as f64 (IntToFloat)" — capture operand + target type.
     if let Some(pos) = rhs.find(" as ") {
         let operand = rhs[..pos].trim().to_string();
@@ -369,6 +377,28 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
         return ("copy".to_string(), vec![trimmed.to_string()]);
     }
     (trimmed.to_string(), vec![])
+}
+
+/// Recognise a data-carrying enum downcast-projection `((_N as Variant).K: T)` (optionally prefixed
+/// `copy `/`move `) and return the equivalent aggregate-field operand `_N.(K+1)`. The +1 skips the
+/// discriminant tag, which the backend stores as field 0. Returns None for anything else — crucially
+/// for a plain int/float cast (`move _1 as i64 (IntToInt)`), which has ` as ` but no `).` projection,
+/// so it falls through to parse_rhs's cast handler untouched.
+fn strip_downcast_projection(rhs: &str) -> Option<String> {
+    let s = rhs.trim()
+        .trim_start_matches("copy ").trim_start_matches("move ").trim();
+    let as_pos = s.find(" as ")?;
+    // Local immediately before " as " — walk back to its leading `_` and read the digits.
+    let before = &s[..as_pos];
+    let lstart = before.rfind('_')?;
+    let local: String = before[lstart + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    if local.is_empty() { return None; }
+    // Field index after the closing `).` — `).0`, `).1`, …
+    let dot = s[as_pos..].find(").")?;
+    let kpos = as_pos + dot + 2;
+    let kdigits: String = s[kpos..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let k: usize = kdigits.parse().ok()?;
+    Some(format!("_{}.{}", local, k + 1))
 }
 
 // ── MIR → flux-frontend IR lowering (file-scope, callable from phase3) ──
@@ -792,8 +822,24 @@ mod tests {
     fn ir_version_frozen() {
         // FIP-0001 #1: this guards the FROZEN IR. If a change to the public IR types is intended,
         // bump crate::IR_VERSION and update this assertion in the same commit — never silently.
-        assert_eq!(crate::IR_VERSION, 2,
+        assert_eq!(crate::IR_VERSION, 3,
             "flux-frontend IR changed: bump IR_VERSION intentionally (FIP-0001 frozen-IR contract)");
+    }
+
+    #[test]
+    fn parse_rhs_data_carrying_enum_forms() {
+        // Ladder rung 4 (part 2): construction keeps the variant path + payload args.
+        assert_eq!(parse_rhs("Opt::Some(const 42_i64)"),
+            ("Opt::Some".to_string(), vec!["const 42_i64".to_string()]));
+        assert_eq!(parse_rhs("Opt::None"), ("Opt::None".to_string(), vec![]));
+        // Payload extraction `((_1 as Some).0: i64)` → aggregate field K+1 (tag is field 0).
+        assert_eq!(parse_rhs("copy ((_1 as Some).0: i64)"),
+            ("copy".to_string(), vec!["_1.1".to_string()]));
+        assert_eq!(parse_rhs("move ((_3 as Box).1: i64)"),
+            ("copy".to_string(), vec!["_3.2".to_string()]));
+        // A PLAIN cast must still reach the cast handler, NOT be eaten as a projection.
+        assert_eq!(parse_rhs("move _1 as i64 (IntToInt)").0, "as");
+        assert_eq!(strip_downcast_projection("move _1 as i64 (IntToInt)"), None);
     }
 
     #[test]

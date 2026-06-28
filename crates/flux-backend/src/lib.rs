@@ -45,7 +45,7 @@ pub fn compile_unit_to_object_with_mir(
 
     // Struct layout table (name -> field type-strings), from the source's struct defs. Lets
     // a named-struct local be scalar-replaced into per-field Variables, like a tuple.
-    let struct_layout: HashMap<String, Vec<String>> = unit.structs.iter()
+    let mut struct_layout: HashMap<String, Vec<String>> = unit.structs.iter()
         .map(|s| (s.name.clone(), s.fields.iter().map(|f| typeref_str(&f.ty)).collect()))
         .collect();
 
@@ -56,10 +56,30 @@ pub fn compile_unit_to_object_with_mir(
         .flat_map(|e| e.variants.iter().map(move |v| (format!("{}::{}", e.name, v.name), v.discriminant)))
         .collect();
 
+    // Data-carrying enum layout (FIP-0001 ladder rung 4, part 2): a tagged union laid out as
+    // [i64 tag, payload0, payload1, …], payload-slot count = the widest variant's arity. Only enums
+    // with at least one payload-carrying variant get an entry; a C-like (all-fieldless) enum stays a
+    // single i64 (its discriminant), unchanged. Merged INTO struct_layout so aggregate_fields scalar-
+    // replaces an enum local into per-field Variables exactly like a struct/tuple — no new machinery.
+    for e in &unit.enums {
+        let widest = e.variants.iter().max_by_key(|v| v.fields.len());
+        let max_arity = widest.map(|v| v.fields.len()).unwrap_or(0);
+        if max_arity == 0 { continue; }
+        let mut fields = Vec::with_capacity(max_arity + 1);
+        fields.push("i64".to_string()); // field 0 = discriminant tag
+        for i in 0..max_arity {
+            fields.push(widest.and_then(|v| v.fields.get(i)).map(typeref_str).unwrap_or_else(|| "i64".to_string()));
+        }
+        struct_layout.insert(e.name.clone(), fields);
+    }
+
     // Pass 1: declare every function so Call expressions can resolve by name.
     let mut func_ids: HashMap<String, FuncId> = HashMap::with_capacity(unit.functions.len());
     let mut func_sigs: HashMap<String, Signature> = HashMap::with_capacity(unit.functions.len());
     for func in &unit.functions {
+        // Skip rustc's synthesized variant constructor `fn Enum::Variant(..)` — we lower construction
+        // inline (`_d = Enum::Variant(args)`), and the `::` name would emit a bogus object symbol.
+        if enum_variants.contains_key(&func.name) { continue; }
         let mut sig = module.make_signature();
         for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); }
         // Aggregate (tuple) by-value return: one AbiParam per field, taken from the MIR
@@ -79,6 +99,7 @@ pub fn compile_unit_to_object_with_mir(
     // resolves them at link time. Real signature inference from rlib metadata is TBD.
     let mut external_calls: HashMap<String, usize> = HashMap::new();
     for func in &unit.functions {
+        if enum_variants.contains_key(&func.name) { continue; }
         collect_call_arities(&func.body, &mut external_calls);
     }
     for (name, arity) in external_calls {
@@ -94,6 +115,7 @@ pub fn compile_unit_to_object_with_mir(
     // Pass 2: define each function body. Loopy functions take the MIR-direct path; the
     // rest take the Expr-based path (which is more compact for pure-expression bodies).
     for func in &unit.functions {
+        if enum_variants.contains_key(&func.name) { continue; }
         let func_id = func_ids[&func.name];
         let sig = func_sigs.remove(&func.name).unwrap();
 
@@ -258,9 +280,32 @@ fn compile_mir_into_function(
                         }
                         continue;
                     }
-                    // C-like enum construction: parse_rhs emits op="EnumName::Variant" (no args).
-                    // The value is the variant's i64 discriminant.
+                    // Enum construction: parse_rhs emits op="EnumName::Variant" with the payload
+                    // operands as args (C-like variants carry no args).
                     if let Some(&disc) = enum_variants.get(op.as_str()) {
+                        // Data-carrying enum: dst is an aggregate [tag, payload…]. Write disc into the
+                        // tag field (0) and each construction arg into payload field (1+i); zero-fill any
+                        // payload the variant doesn't supply (a unit variant of a data-carrying enum, so
+                        // all the local's fields are defined on every path before the switchInt merge).
+                        if tuple_vars.contains_key(&(dst_idx, 0)) {
+                            let dst_ty = mir_type_strs.get(&dst_idx).cloned().unwrap_or_default();
+                            let fields = aggregate_fields(&dst_ty, structs).unwrap_or_default();
+                            let tag = bc.ins().iconst(types::I64, disc);
+                            if let Some(&v0) = tuple_vars.get(&(dst_idx, 0)) { bc.def_var(v0, tag); }
+                            for fi in 1..fields.len() {
+                                let want = mir_type_to_cl(&fields[fi]);
+                                let val = if let Some(arg) = args.get(fi - 1) {
+                                    let raw = resolve_mir_operand_to_value(arg, &vars, &tuple_vars, &mut bc);
+                                    if matches!(want, types::F64 | types::F32) { raw }
+                                    else { coerce_int_width(&mut bc, raw, want) }
+                                } else if want == types::F64 { bc.ins().f64const(0.0) }
+                                  else if want == types::F32 { bc.ins().f32const(0.0f32) }
+                                  else { bc.ins().iconst(want, 0) };
+                                if let Some(&v) = tuple_vars.get(&(dst_idx, fi)) { bc.def_var(v, val); }
+                            }
+                            continue;
+                        }
+                        // C-like enum (single i64 var): the value IS the discriminant.
                         let val = bc.ins().iconst(types::I64, disc);
                         if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, val); }
                         continue;

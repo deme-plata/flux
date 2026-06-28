@@ -1285,6 +1285,83 @@ impl Database {
             .collect();
         DbIterator { inner: head.into_iter(), descending: true }
     }
+
+    /// v0.37: bounded most-recent scan of one key prefix WITHOUT materializing
+    /// the whole DB. Returns up to `limit` (key, value) pairs whose key starts
+    /// with `prefix`, in ASCENDING key order (oldest→newest of the recent
+    /// window). Memory is O(limit), not O(db).
+    ///
+    /// Why this exists: `iter`/`iter_from`/`iter_rev`/`iter_from_back` all build
+    /// a full `BTreeMap` of every visible pair before returning — fine for small
+    /// scans, catastrophic for a 30M-entry append-only history that an explorer
+    /// `/recent?limit=12` endpoint polls (it materialized the entire history in
+    /// RAM per request → multi-GB heap → cgroup OOM). This keeps only the
+    /// `limit` LARGEST matching keys seen, which for an append-only prefix (the
+    /// flux-history h:/k:/g: indexes never delete) equals the most recent N.
+    ///
+    /// Merge order mirrors `iter_from`: SSTs oldest→newest, then the live
+    /// memtable, then range tombstones; an empty value (point tombstone) removes
+    /// the key. For prefixes that DO take in-range deletes the result is
+    /// best-effort-recent rather than exact (a delete that frees window space
+    /// can't resurrect an already-evicted older key) — acceptable for the
+    /// recent/explorer views this serves.
+    pub fn scan_prefix_recent(&self, prefix: &[u8], limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        // Bounded window of the `limit` largest matching keys seen so far.
+        let mut win: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut consider = |win: &mut BTreeMap<Vec<u8>, Vec<u8>>, k: Vec<u8>, v: Vec<u8>| {
+            if !k.starts_with(prefix) {
+                return;
+            }
+            if v.is_empty() {
+                win.remove(&k); // point tombstone shadows older data
+                return;
+            }
+            // Fast reject: once the window is full, a brand-new key no larger
+            // than the smallest kept key can never make the top-`limit`.
+            if win.len() >= limit && !win.contains_key(&k) {
+                if let Some((min_k, _)) = win.iter().next() {
+                    if k.as_slice() <= min_k.as_slice() {
+                        return;
+                    }
+                }
+            }
+            win.insert(k, v);
+            while win.len() > limit {
+                // Drop the smallest (oldest) kept key.
+                if let Some(min_k) = win.keys().next().cloned() {
+                    win.remove(&min_k);
+                } else {
+                    break;
+                }
+            }
+        };
+        if let Ok(ssts) = self.cached_sst_paths() {
+            for sst in &ssts {
+                if let Ok(table) = self.sst_cached(sst) {
+                    for (k, v) in table.pairs() {
+                        consider(&mut win, k, v);
+                    }
+                }
+            }
+        }
+        let inner = self.inner.read();
+        for (k, v) in inner.memtable.iter() {
+            consider(&mut win, k.clone(), v.clone());
+        }
+        for tomb in &inner.range_tombs {
+            let to_drop: Vec<Vec<u8>> = win
+                .range(tomb.start.clone()..tomb.end.clone())
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in to_drop {
+                win.remove(&k);
+            }
+        }
+        win.into_iter().collect()
+    }
 }
 
 /// Streaming key/value iterator. Holds an owned BTreeMap iterator so the

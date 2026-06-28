@@ -292,24 +292,48 @@ impl HistoryStore {
         Ok(out)
     }
 
-    /// The most recent `limit` entries, newest first. Walks the whole primary
-    /// range (ascending) then takes the tail reversed — correct + simple; for
-    /// huge histories use [`by_time_range`] with a bounded window instead.
+    /// The most recent `limit` entries, newest first. Bounded memory: pulls only
+    /// the last `limit` primary keys via [`Database::scan_prefix_recent`] instead
+    /// of materializing the whole primary range (the pre-fix `iter_from(P_PRIMARY)`
+    /// loaded every entry into RAM just to keep the tail — fine for a small store,
+    /// an OOM for a multi-million-entry history that a `/recent` endpoint polls).
     pub fn recent(&self, limit: usize) -> Result<Vec<HistoryEntry>, HistoryError> {
-        let mut all = Vec::new();
-        for (k, v) in self.db.iter_from(P_PRIMARY) {
-            if !k.starts_with(P_PRIMARY) {
-                break;
-            }
+        let mut out = Vec::new();
+        // scan_prefix_recent returns the `limit` largest keys ascending; reverse
+        // for newest-first.
+        for (_k, v) in self.db.scan_prefix_recent(P_PRIMARY, limit) {
             let stored: Stored = serde_json::from_slice(&v).map_err(|e| HistoryError::Codec(e.to_string()))?;
-            all.push(stored.entry);
+            out.push(stored.entry);
         }
-        all.reverse();
-        all.truncate(limit);
-        Ok(all)
+        out.reverse();
+        Ok(out)
+    }
+
+    /// The most recent `limit` entries of one `kind`, chronological (oldest→newest
+    /// of the recent window). Bounded memory: scans the by-kind index for only the
+    /// last `limit` ids, then fetches those primaries — unlike [`by_kind`], which
+    /// materializes EVERY entry of the kind (millions of mining events) regardless
+    /// of how few the caller wants.
+    pub fn by_kind_recent(&self, kind: &str, limit: usize) -> Result<Vec<HistoryEntry>, HistoryError> {
+        let mut prefix = Vec::new();
+        prefix.extend_from_slice(P_KIND);
+        prefix.extend_from_slice(kind.as_bytes());
+        prefix.push(0);
+        let mut ids = Vec::new();
+        for (k, _v) in self.db.scan_prefix_recent(&prefix, limit) {
+            // recover (ts, seq) from the tail of the key → fetch the primary blob
+            let tail = &k[k.len() - 16..];
+            let ts = u64::from_be_bytes(tail[..8].try_into().unwrap());
+            let seq = u64::from_be_bytes(tail[8..].try_into().unwrap());
+            ids.push((ts, seq));
+        }
+        self.fetch_primaries(&ids)
     }
 
     /// All entries of one `kind`, chronological. O(range) over the by-kind index.
+    /// WARNING: unbounded — materializes every entry of the kind. For polled
+    /// "recent" views use [`by_kind_recent`] instead (this loaded millions of
+    /// mining events per `/recent` poll → OOM).
     pub fn by_kind(&self, kind: &str) -> Result<Vec<HistoryEntry>, HistoryError> {
         let mut ids = Vec::new();
         let mut prefix = Vec::new();

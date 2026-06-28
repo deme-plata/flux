@@ -401,6 +401,154 @@ fn strip_downcast_projection(rhs: &str) -> Option<String> {
     Some(format!("_{}.{}", local, k + 1))
 }
 
+// ── Monomorphization (FIP-0001 type-complexity ladder, rung 5 part 2) ──
+//
+// rustc --emit=mir gives us a generic function POLYMORPHICALLY (`fn id(_1: T) -> T`) plus turbofish
+// call sites (`id::<i64>`), never the monomorphized instances — so Flux generates them itself. For each
+// distinct instantiation reached from a call site, clone the template, substitute its type params with
+// the concrete type args, mangle a unique name (`id$i64`), and rewrite call sites to it. Templates
+// (functions only ever reached via turbofish) are dropped. A program with no turbofish calls is
+// returned UNCHANGED (early-out), so non-generic code is provably unaffected.
+
+/// Split a `<…>` arg list on top-level commas (depth-aware, so `Vec<u8>, i64` → ["Vec<u8>", "i64"]).
+fn split_top_commas(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+    for c in s.chars() {
+        match c {
+            '<' => { depth += 1; cur.push(c); }
+            '>' => { depth -= 1; cur.push(c); }
+            ',' if depth == 0 => { out.push(cur.trim().to_string()); cur.clear(); }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() { out.push(cur.trim().to_string()); }
+    out
+}
+
+/// Parse a turbofish call func string `id::<i64>` / `fst::<i64, bool>` → (base, type-args). Returns
+/// None for a non-turbofish call OR an enum-variant ctor path (`MyOpt::<i64>::Some`, which has a `::`
+/// segment AFTER the `>` — those construct inline, they aren't generic-fn calls).
+fn parse_turbofish(func: &str) -> Option<(String, Vec<String>)> {
+    let pos = func.find("::<")?;
+    let base = func[..pos].to_string();
+    let rest = &func[pos + 3..];
+    let close = rest.rfind('>')?;
+    if rest[close + 1..].contains("::") { return None; }
+    Some((base, split_top_commas(&rest[..close])))
+}
+
+/// A unique, symbol-safe name for one instantiation: `id` + `[i64]` → `id$i64`.
+fn mangle(base: &str, targs: &[String]) -> String {
+    let mut s = base.to_string();
+    for t in targs {
+        s.push('$');
+        for c in t.chars() { s.push(if c.is_ascii_alphanumeric() { c } else { '_' }); }
+    }
+    s
+}
+
+/// A single uppercase ASCII letter — the Rust convention for a type parameter (T, U, A, B, E, K, V).
+/// Multi-letter params (`Item`) aren't detected; that's a documented limitation of the MIR-text path
+/// (the header carries no explicit `<…>` list to read them from).
+fn is_type_param_name(s: &str) -> bool {
+    s.len() == 1 && s.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+}
+
+/// Type-param names of a template, in first-appearance order across params then the return type.
+fn detect_type_params(f: &MirFunction) -> Vec<String> {
+    let mut params: Vec<String> = Vec::new();
+    let mut scan = |ty: &str, params: &mut Vec<String>| {
+        let mut cur = String::new();
+        for c in ty.chars().chain(std::iter::once(' ')) {
+            if c.is_ascii_alphanumeric() || c == '_' { cur.push(c); }
+            else { if is_type_param_name(&cur) && !params.contains(&cur) { params.push(cur.clone()); } cur.clear(); }
+        }
+    };
+    for p in &f.params { scan(&p.ty, &mut params); }
+    scan(&f.return_type, &mut params);
+    params
+}
+
+/// Substitute whole-token type-param names in a type string: `(T, i64)` + {T→u32} → `(u32, i64)`.
+/// Token-aware so `TypeName` is never partially rewritten.
+fn subst_type(ty: &str, map: &std::collections::HashMap<String, String>) -> String {
+    if map.is_empty() { return ty.to_string(); }
+    let (mut out, mut cur) = (String::new(), String::new());
+    for c in ty.chars().chain(std::iter::once('\0')) {
+        if c.is_ascii_alphanumeric() || c == '_' { cur.push(c); }
+        else {
+            if !cur.is_empty() { out.push_str(map.get(&cur).map(|s| s.as_str()).unwrap_or(&cur)); cur.clear(); }
+            if c != '\0' { out.push(c); }
+        }
+    }
+    out
+}
+
+/// Rewrite turbofish calls to template functions into their mangled instance names, in place.
+fn rewrite_calls(f: &mut MirFunction, templates: &std::collections::HashSet<String>) {
+    for b in &mut f.blocks {
+        if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
+            if let Some((base, targs)) = parse_turbofish(func) {
+                if templates.contains(&base) { *func = mangle(&base, &targs); }
+            }
+        }
+    }
+}
+
+/// Generate a concrete instance of `template` for `targs`: substitute type params, rename to `mangled`.
+fn specialize(template: &MirFunction, targs: &[String], mangled: &str) -> MirFunction {
+    let tparams = detect_type_params(template);
+    let map: std::collections::HashMap<String, String> =
+        tparams.iter().cloned().zip(targs.iter().cloned()).collect();
+    let mut f = template.clone();
+    f.name = mangled.to_string();
+    f.return_type = subst_type(&f.return_type, &map);
+    for p in &mut f.params { p.ty = subst_type(&p.ty, &map); }
+    for l in &mut f.locals { l.ty = subst_type(&l.ty, &map); }
+    f
+}
+
+/// Monomorphize a parsed MIR function list. See the module-section comment above. No turbofish calls →
+/// the input is returned unchanged.
+pub fn monomorphize(funcs: Vec<MirFunction>) -> Vec<MirFunction> {
+    use std::collections::{HashMap, HashSet};
+    let mut by_name: HashMap<String, MirFunction> = HashMap::new();
+    for f in &funcs { by_name.entry(f.name.clone()).or_insert_with(|| f.clone()); }
+
+    // Collect distinct instantiations from turbofish call sites whose base names a defined function.
+    let mut needed: Vec<(String, Vec<String>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for f in &funcs {
+        for b in &f.blocks {
+            if let Some(MirTerminator::Call { func, .. }) = &b.terminator {
+                if let Some((base, targs)) = parse_turbofish(func) {
+                    if by_name.contains_key(&base) && seen.insert(format!("{}|{}", base, targs.join(","))) {
+                        needed.push((base, targs));
+                    }
+                }
+            }
+        }
+    }
+    let templates: HashSet<String> = needed.iter().map(|(b, _)| b.clone()).collect();
+    if templates.is_empty() { return funcs; } // non-generic program → untouched
+
+    let mut out: Vec<MirFunction> = Vec::new();
+    let mut emitted: HashSet<String> = HashSet::new();
+    for f in &funcs {
+        if templates.contains(&f.name) { continue; }      // drop templates (replaced by instances)
+        if !emitted.insert(f.name.clone()) { continue; }  // drop rustc CTFE duplicates
+        let mut nf = f.clone();
+        rewrite_calls(&mut nf, &templates);
+        out.push(nf);
+    }
+    for (base, targs) in &needed {
+        let mut s = specialize(&by_name[base], targs, &mangle(base, targs));
+        rewrite_calls(&mut s, &templates); // a generic instance may itself call other generics
+        out.push(s);
+    }
+    out
+}
+
 // ── MIR → flux-frontend IR lowering (file-scope, callable from phase3) ──
 // Phase 2c+: previously trapped inside `mod tests` so phase3 could not use them.
 // Hoisted here, return-value bug fixed, opcode coverage expanded.
@@ -824,6 +972,28 @@ mod tests {
         // bump crate::IR_VERSION and update this assertion in the same commit — never silently.
         assert_eq!(crate::IR_VERSION, 3,
             "flux-frontend IR changed: bump IR_VERSION intentionally (FIP-0001 frozen-IR contract)");
+    }
+
+    #[test]
+    fn monomorphize_helpers_and_pass() {
+        assert_eq!(parse_turbofish("id::<i64>"), Some(("id".to_string(), vec!["i64".to_string()])));
+        assert_eq!(parse_turbofish("fst::<i64, bool>"), Some(("fst".to_string(), vec!["i64".to_string(), "bool".to_string()])));
+        assert_eq!(parse_turbofish("plain_call"), None);
+        assert_eq!(parse_turbofish("MyOpt::<i64>::Some"), None); // enum ctor, not a generic fn call
+        assert_eq!(mangle("id", &["i64".into()]), "id$i64");
+        assert_eq!(mangle("fst", &["i64".into(), "bool".into()]), "fst$i64$bool");
+        let mut m = std::collections::HashMap::new();
+        m.insert("T".to_string(), "u32".to_string());
+        assert_eq!(subst_type("T", &m), "u32");
+        assert_eq!(subst_type("(T, i64)", &m), "(u32, i64)");
+        assert_eq!(subst_type("TypeName", &m), "TypeName"); // whole-token only
+        // detect_type_params: first-appearance order across params then return.
+        let f = MirFunction { name: "fst".into(), return_type: "A".into(),
+            params: vec![MirLocal{index:1,name:String::new(),ty:"A".into(),mutable:false},
+                         MirLocal{index:2,name:String::new(),ty:"B".into(),mutable:false}],
+            locals: vec![], blocks: vec![] };
+        assert_eq!(detect_type_params(&f), vec!["A".to_string(), "B".to_string()]);
+        // (end-to-end monomorphization is proven by the compile-native `run()=100` gate)
     }
 
     #[test]

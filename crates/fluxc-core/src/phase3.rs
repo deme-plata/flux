@@ -175,6 +175,7 @@ pub fn compile_run(path: &str, args: &[String]) -> i32 {
             Ok(f) => f,
             Err(e) => { eprintln!("  MIR parse error: {}", e); return 1; }
         };
+        let funcs = flux_frontend::mir::monomorphize(funcs);
 
         println!("  MIR: {} functions", funcs.len());
         let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
@@ -333,6 +334,7 @@ pub fn run_integration_tests() -> usize {
                 }
                 match flux_frontend::mir::parse_mir(&mir_text) {
                     Ok(funcs) => {
+                        let funcs = flux_frontend::mir::monomorphize(funcs);
                         let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
                             .map(flux_frontend::mir::lower_mir_to_ir)
                             .collect();
@@ -590,6 +592,7 @@ pub fn compile_package(name: &str) {
         Ok(f) => f,
         Err(e) => { eprintln!("  MIR parse error: {}", e); return; }
     };
+    let funcs = flux_frontend::mir::monomorphize(funcs);
     println!("  Parsed: {} MIR functions", funcs.len());
 
     let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()
@@ -856,6 +859,9 @@ pub fn compile_impl_with_provenance(path: &str, use_mir: bool, provenance: bool)
                 }
                 match flux_frontend::mir::parse_mir(&mir_text) {
                     Ok(funcs) => {
+                        // Monomorphize generics (rung 5 pt 2): expand turbofish instantiations,
+                        // drop templates. No-op for non-generic programs.
+                        let funcs = flux_frontend::mir::monomorphize(funcs);
                         println!("  MIR parsed: {} functions", funcs.len());
                         for f in &funcs {
                             println!("  fn {}({} params) → {}", f.name, f.params.len(), f.return_type);

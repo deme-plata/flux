@@ -1,0 +1,158 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn make_circle(_1: i64) -> Shape {
+    debug r => _1;
+    let mut _0: Shape;
+
+    bb0: {
+        _0 = Shape::Circle(copy _1);
+        return;
+    }
+}
+
+fn make_rect(_1: i64, _2: i64, _3: i64, _4: i64) -> Shape {
+    debug x1 => _1;
+    debug y1 => _2;
+    debug x2 => _3;
+    debug y2 => _4;
+    let mut _0: Shape;
+    let mut _5: Point;
+    let mut _6: Point;
+
+    bb0: {
+        _5 = Point { x: copy _1, y: copy _2 };
+        _6 = Point { x: copy _3, y: copy _4 };
+        _0 = Shape::Rect(move _5, move _6);
+        return;
+    }
+}
+
+fn area(_1: Shape) -> i64 {
+    debug s => _1;
+    let mut _0: i64;
+    let mut _2: isize;
+    let _3: i64;
+    let mut _4: i64;
+    let mut _5: (i64, bool);
+    let mut _6: (i64, bool);
+    let _7: Point;
+    let _8: Point;
+    let mut _9: i64;
+    let mut _10: i64;
+    let mut _11: i64;
+    let mut _12: (i64, bool);
+    let mut _13: i64;
+    let mut _14: i64;
+    let mut _15: i64;
+    let mut _16: (i64, bool);
+    let mut _17: (i64, bool);
+    scope 1 {
+        debug r => _3;
+    }
+    scope 2 {
+        debug p1 => _7;
+        debug p2 => _8;
+    }
+
+    bb0: {
+        _2 = discriminant(_1);
+        switchInt(move _2) -> [0: bb4, 1: bb3, 2: bb2, otherwise: bb1];
+    }
+
+    bb1: {
+        unreachable;
+    }
+
+    bb2: {
+        _0 = const 0_i64;
+        goto -> bb10;
+    }
+
+    bb3: {
+        _7 = move ((_1 as Rect).0: Point);
+        _8 = move ((_1 as Rect).1: Point);
+        _10 = copy (_8.0: i64);
+        _11 = copy (_7.0: i64);
+        _12 = SubWithOverflow(copy _10, copy _11);
+        assert(!move (_12.1: bool), "attempt to compute `{} - {}`, which would overflow", move _10, move _11) -> [success: bb7, unwind continue];
+    }
+
+    bb4: {
+        _3 = copy ((_1 as Circle).0: i64);
+        _5 = MulWithOverflow(copy _3, copy _3);
+        assert(!move (_5.1: bool), "attempt to compute `{} * {}`, which would overflow", copy _3, copy _3) -> [success: bb5, unwind continue];
+    }
+
+    bb5: {
+        _4 = move (_5.0: i64);
+        _6 = MulWithOverflow(copy _4, const 3_i64);
+        assert(!move (_6.1: bool), "attempt to compute `{} * {}`, which would overflow", move _4, const 3_i64) -> [success: bb6, unwind continue];
+    }
+
+    bb6: {
+        _0 = move (_6.0: i64);
+        goto -> bb10;
+    }
+
+    bb7: {
+        _9 = move (_12.0: i64);
+        _14 = copy (_8.1: i64);
+        _15 = copy (_7.1: i64);
+        _16 = SubWithOverflow(copy _14, copy _15);
+        assert(!move (_16.1: bool), "attempt to compute `{} - {}`, which would overflow", move _14, move _15) -> [success: bb8, unwind continue];
+    }
+
+    bb8: {
+        _13 = move (_16.0: i64);
+        _17 = MulWithOverflow(copy _9, copy _13);
+        assert(!move (_17.1: bool), "attempt to compute `{} * {}`, which would overflow", move _9, move _13) -> [success: bb9, unwind continue];
+    }
+
+    bb9: {
+        _0 = move (_17.0: i64);
+        goto -> bb10;
+    }
+
+    bb10: {
+        return;
+    }
+}
+
+fn Shape::Circle(_1: i64) -> Shape {
+    let mut _0: Shape;
+
+    bb0: {
+        _0 = Shape::Circle(move _1);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn Shape::Circle(_1: i64) -> Shape {
+    let mut _0: Shape;
+
+    bb0: {
+        _0 = Shape::Circle(move _1);
+        return;
+    }
+}
+
+fn Shape::Rect(_1: Point, _2: Point) -> Shape {
+    let mut _0: Shape;
+
+    bb0: {
+        _0 = Shape::Rect(move _1, move _2);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn Shape::Rect(_1: Point, _2: Point) -> Shape {
+    let mut _0: Shape;
+
+    bb0: {
+        _0 = Shape::Rect(move _1, move _2);
+        return;
+    }
+}

@@ -1,0 +1,123 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn make_a(_1: i64) -> Multi {
+    debug x => _1;
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::A(copy _1);
+        return;
+    }
+}
+
+fn make_b(_1: i64, _2: i64) -> Multi {
+    debug x => _1;
+    debug y => _2;
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::B(copy _1, copy _2);
+        return;
+    }
+}
+
+fn make_c() -> Multi {
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::C;
+        return;
+    }
+}
+
+fn sum(_1: Multi) -> i64 {
+    debug o => _1;
+    let mut _0: i64;
+    let mut _2: isize;
+    let _3: i64;
+    let _4: i64;
+    let _5: i64;
+    let mut _6: (i64, bool);
+    scope 1 {
+        debug x => _3;
+    }
+    scope 2 {
+        debug x => _4;
+        debug y => _5;
+    }
+
+    bb0: {
+        _2 = discriminant(_1);
+        switchInt(move _2) -> [0: bb4, 1: bb3, 2: bb2, otherwise: bb1];
+    }
+
+    bb1: {
+        unreachable;
+    }
+
+    bb2: {
+        _0 = const 0_i64;
+        goto -> bb6;
+    }
+
+    bb3: {
+        _4 = copy ((_1 as B).0: i64);
+        _5 = copy ((_1 as B).1: i64);
+        _6 = AddWithOverflow(copy _4, copy _5);
+        assert(!move (_6.1: bool), "attempt to compute `{} + {}`, which would overflow", copy _4, copy _5) -> [success: bb5, unwind continue];
+    }
+
+    bb4: {
+        _3 = copy ((_1 as A).0: i64);
+        _0 = copy _3;
+        goto -> bb6;
+    }
+
+    bb5: {
+        _0 = move (_6.0: i64);
+        goto -> bb6;
+    }
+
+    bb6: {
+        return;
+    }
+}
+
+fn Multi::A(_1: i64) -> Multi {
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::A(move _1);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn Multi::A(_1: i64) -> Multi {
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::A(move _1);
+        return;
+    }
+}
+
+fn Multi::B(_1: i64, _2: i64) -> Multi {
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::B(move _1, move _2);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn Multi::B(_1: i64, _2: i64) -> Multi {
+    let mut _0: Multi;
+
+    bb0: {
+        _0 = Multi::B(move _1, move _2);
+        return;
+    }
+}

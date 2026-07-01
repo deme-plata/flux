@@ -37,6 +37,9 @@ pub fn compile_unit_to_object_with_mir(
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
     flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;
+    // Required for 128-bit integers (i128/u128) in the calling convention — without it the x64 ABI
+    // lowering panics when an I128 is a function param/return (ladder rung: 128-bit ints for SIGIL money math).
+    flag_builder.set("enable_llvm_abi_extensions", "true").map_err(|e| e.to_string())?;
     let isa = isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| format!("isa finish: {}", e))?;
 
     let builder = ObjectBuilder::new(isa, "flux_module", default_libcall_names())
@@ -55,6 +58,16 @@ pub fn compile_unit_to_object_with_mir(
     let enum_variants: HashMap<String, i64> = unit.enums.iter()
         .flat_map(|e| e.variants.iter().map(move |v| (format!("{}::{}", e.name, v.name), v.discriminant)))
         .collect();
+
+    // Data-carrying enum variant field map: variant name → list of field type strings.
+    // Used by the downcast-expansion path to compute correct sub-aggregate offsets.
+    let mut variant_fields: HashMap<String, Vec<String>> = HashMap::new();
+    for e in &unit.enums {
+        for v in &e.variants {
+            let fts: Vec<String> = v.fields.iter().map(typeref_str).collect();
+            variant_fields.insert(v.name.clone(), fts);
+        }
+    }
 
     // Data-carrying enum layout (FIP-0001 ladder rung 4, part 2): a tagged union laid out as
     // [i64 tag, payload0, payload1, …], payload-slot count = the widest variant's arity. Only enums
@@ -88,10 +101,7 @@ pub fn compile_unit_to_object_with_mir(
         // carry aggregate params (build_mir_overrides routes those to the MIR-direct path).
         match mir_overrides.get(&func.name) {
             Some(m) => for mp in &m.params {
-                match aggregate_fields(&mp.ty, &struct_layout) {
-                    Some(fields) => for f in &fields { sig.params.push(AbiParam::new(mir_type_to_cl(f))); },
-                    None => sig.params.push(AbiParam::new(mir_type_to_cl(&mp.ty))),
-                }
+                flatten_params(&mp.ty, &struct_layout, &mut sig.params);
             },
             None => for p in &func.params { sig.params.push(AbiParam::new(cl_type(&p.ty))); },
         }
@@ -99,7 +109,13 @@ pub fn compile_unit_to_object_with_mir(
         // override's type string (TypeRef can't express tuples). Else a single scalar return.
         match mir_overrides.get(&func.name).and_then(|m| aggregate_fields(&m.return_type, &struct_layout)) {
             Some(fields) => for f in &fields { sig.returns.push(AbiParam::new(mir_type_to_cl(f))); },
-            None => sig.returns.push(AbiParam::new(cl_type(&func.return_type))),
+            // Prefer the MIR return-type STRING (knows "u128" -> I128); TypeRef collapses u128 -> Named -> I64.
+            None => {
+                let rt = mir_overrides.get(&func.name)
+                    .map(|m| mir_type_to_cl(&m.return_type))
+                    .unwrap_or_else(|| cl_type(&func.return_type));
+                sig.returns.push(AbiParam::new(rt));
+            }
         }
         let id = module.declare_function(&func.name, Linkage::Export, &sig)
             .map_err(|e| format!("declare {}: {}", func.name, e))?;
@@ -133,7 +149,7 @@ pub fn compile_unit_to_object_with_mir(
         let sig = func_sigs.remove(&func.name).unwrap();
 
         let func_ir = if let Some(mir) = mir_overrides.get(&func.name) {
-            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids, &struct_layout, &enum_variants)?
+            compile_mir_into_function(mir, func_id, sig, &mut module, &func_ids, &struct_layout, &enum_variants, &variant_fields)?
         } else {
             compile_expr_into_function(func, func_id, sig, &mut module, &func_ids)?
         };
@@ -185,6 +201,7 @@ fn compile_mir_into_function(
     func_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
     structs: &std::collections::HashMap<String, Vec<String>>,
     enum_variants: &std::collections::HashMap<String, i64>,
+    variant_fields: &std::collections::HashMap<String, Vec<String>>,
 ) -> Result<Function, String> {
     use std::collections::HashSet;
 
@@ -229,10 +246,12 @@ fn compile_mir_into_function(
         std::collections::HashMap::new();
     for &idx in &all_locals {
         let ty_str = mir_type_strs.get(&idx).cloned().unwrap_or_default();
-        if let Some(fields) = aggregate_fields(&ty_str, structs) {
-            // Tuple or struct — declare one Variable per field; IDs in a separate range to
-            // avoid collisions with single-i64 locals.
-            for (fi, field_ty) in fields.iter().enumerate() {
+        // Recursively flatten: each scalar leaf gets its own Variable, indexed by
+        // a flat field number. E.g. Shape[i64, Point, Point] becomes 5 flat fields.
+        let mut flat_fields: Vec<String> = Vec::new();
+        collect_flat_fields(&ty_str, structs, &mut flat_fields);
+        if flat_fields.len() > 1 || (flat_fields.len() == 1 && flat_fields[0] != ty_str) {
+            for (fi, field_ty) in flat_fields.iter().enumerate() {
                 let var_id = 1_000_000u32 + (idx as u32) * 32 + fi as u32;
                 let v = Variable::from_u32(var_id);
                 bc.declare_var(v, mir_type_to_cl(field_ty));
@@ -262,19 +281,7 @@ fn compile_mir_into_function(
     let mut pcursor = 0usize;
     for p in &mir.params {
         let ty = mir_type_strs.get(&p.index).cloned().unwrap_or_default();
-        if let Some(fields) = aggregate_fields(&ty, structs) {
-            for fi in 0..fields.len() {
-                if let (Some(&var), Some(&val)) = (tuple_vars.get(&(p.index, fi)), entry_params.get(pcursor)) {
-                    bc.def_var(var, val);
-                }
-                pcursor += 1;
-            }
-        } else {
-            if let (Some(&var), Some(&val)) = (vars.get(&p.index), entry_params.get(pcursor)) {
-                bc.def_var(var, val);
-            }
-            pcursor += 1;
-        }
+        bind_param_flat(p.index, &ty, structs, &vars, &tuple_vars, &entry_params, &mut pcursor, &mut bc);
     }
     let first_label = mir.blocks.first().map(|b| b.label.clone()).unwrap_or_default();
     if let Some(&first_bb) = blocks.get(&first_label) {
@@ -305,6 +312,46 @@ fn compile_mir_into_function(
                             }
                         }
                         continue;
+                    }
+                    // Downcast expansion: `_N|Variant|K` — extract sub-aggregate at index K
+                    // of variant V from the tagged-union local _N. The backend computes the
+                    // correct field offset from the enum layout, handling nested aggregates.
+                    if (op == "copy" || op == "move") && args.len() == 1 {
+                        if let Some((src_local, variant, sub_idx)) = parse_downcast_operand(&args[0]) {
+                            if let Some(vf) = variant_fields.get(&variant) {
+                                if sub_idx < vf.len() {
+                                    // Compute starting offset: 1 (skip tag) + sum of sizes
+                                    // of sub-aggregates before index sub_idx.
+                                    let mut offset: usize = 1;
+                                    for i in 0..sub_idx {
+                                        offset += aggregate_fields(&vf[i], structs)
+                                            .map(|f| f.len()).unwrap_or(1);
+                                    }
+
+                                    let sub_type = &vf[sub_idx];
+                                    let sub_fields = aggregate_fields(sub_type, structs)
+                                        .unwrap_or_else(|| vec![sub_type.clone()]);
+                                    // Copy each sub-field from _src.(offset+i) to _dst.(i)
+                                    for (i, _) in sub_fields.iter().enumerate() {
+                                        let src_field = format!("_{}.{}", src_local, offset + i);
+                                        let val = resolve_mir_operand_to_value(
+                                            &src_field, &vars, &tuple_vars, &mut bc);
+                                        if let Some(&var) = tuple_vars.get(&(dst_idx, i)) {
+                                            bc.def_var(var, val);
+                                        } else if i == 0 {
+                                            if let Some(&var) = vars.get(&dst_idx) {
+                                                let want = mir_type_to_cl(
+                                                    &mir_type_strs.get(&dst_idx).cloned()
+                                                        .unwrap_or_default());
+                                                let val = coerce_int_width(&mut bc, val, want);
+                                                bc.def_var(var, val);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                     }
                     // Enum construction: parse_rhs emits op="EnumName::Variant" with the payload
                     // operands as args (C-like variants carry no args). A concrete-instantiated generic
@@ -340,7 +387,8 @@ fn compile_mir_into_function(
                         continue;
                     }
                     let unsigned = operand_is_unsigned(args.first().map(|s| s.as_str()).unwrap_or(""), &mir_type_strs);
-                    let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, unsigned, &mut bc);
+                    let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, unsigned, module, &mut bc);
+
                     if let Some(&var) = vars.get(&dst_idx) {
                         let want = mir_type_to_cl(&mir_type_strs.get(&dst_idx).cloned().unwrap_or_default());
                         let val = coerce_int_width(&mut bc, val, want);
@@ -349,6 +397,7 @@ fn compile_mir_into_function(
                         // Single-arg op writing into a tuple: forward to field 0.
                         if !fields.is_empty() {
                             if let Some(&var) = tuple_vars.get(&(dst_idx, 0)) {
+
                                 bc.def_var(var, val);
                             }
                         }
@@ -484,6 +533,94 @@ fn compile_mir_into_function(
     Ok(func_ir)
 }
 
+/// Recursively bind flat block params to scalar-replaced tuple_vars.
+fn bind_param_flat(
+    local_idx: usize, ty: &str,
+    structs: &std::collections::HashMap<String, Vec<String>>,
+    vars: &std::collections::HashMap<usize, Variable>,
+    tuple_vars: &std::collections::HashMap<(usize, usize), Variable>,
+    entry_params: &[Value],
+    pcursor: &mut usize,
+    bc: &mut FunctionBuilder,
+) {
+    let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
+    if let Some(fields) = aggregate_fields(ty, structs) {
+        for fi in (0..fields.len()).rev() { stack.push((local_idx, vec![fi])); }
+    } else {
+        if let (Some(&var), Some(&val)) = (vars.get(&local_idx), entry_params.get(*pcursor)) {
+            bc.def_var(var, val);
+        }
+        *pcursor += 1;
+        return;
+    }
+    // `tuple_vars` is keyed by (local, per-local FLAT-LEAF index) — the leaf index restarts at 0 for
+    // each local (see collect_flat_fields + the declaration loop). `pcursor`, by contrast, runs GLOBALLY
+    // across ALL params (one slot per incoming block-param). For the FIRST aggregate param the two
+    // coincide, but for any LATER aggregate param pcursor is already > 0, so keying tuple_vars by pcursor
+    // misses (e.g. looks up (2,2) when the var is (2,0)) and that field silently never binds. Track a
+    // per-local leaf counter for the tuple_vars key; keep pcursor for the global entry_params slot.
+    let mut leaf = 0usize;
+    while let Some((base, path)) = stack.pop() {
+        // Walk the path to get the current field type and check if it has sub-aggregates.
+        let current_ty = walk_to_field(ty, &path, structs);
+        if let Some(sub_fields) = aggregate_fields(&current_ty, structs) {
+            // Still an aggregate — push children for depth-first walk
+            for fi in (0..sub_fields.len()).rev() {
+                let mut sub = path.clone();
+                sub.push(fi);
+                stack.push((base, sub));
+            }
+        } else {
+            // Scalar leaf reached — bind to next block param
+            if let (Some(&var), Some(&val)) = (tuple_vars.get(&(base, leaf)), entry_params.get(*pcursor)) {
+                bc.def_var(var, val);
+            }
+            leaf += 1;
+            *pcursor += 1;
+        }
+    }
+}
+
+/// Walk a field-path through nested aggregate types and return the type name
+/// at the end of the path. Returns the aggregate type name if the path ends
+/// inside an aggregate (so callers can check for further sub-fields).
+fn walk_to_field(root_ty: &str, path: &[usize], structs: &std::collections::HashMap<String, Vec<String>>) -> String {
+    let mut current_ty = root_ty.to_string();
+    for &fi in path {
+        if let Some(fields) = aggregate_fields(&current_ty, structs) {
+            if fi < fields.len() {
+                current_ty = fields[fi].clone();
+            } else {
+                return current_ty; // path out of bounds — return what we have
+            }
+        } else {
+            return current_ty; // can't descend further
+        }
+    }
+    current_ty
+}
+
+/// Recursively collect all scalar field types from an aggregate into a flat list.
+fn collect_flat_fields(ty: &str, structs: &std::collections::HashMap<String, Vec<String>>, out: &mut Vec<String>) {
+    if let Some(fields) = parse_tuple_type(ty).or_else(|| structs.get(ty).cloned()) {
+        for f in &fields { collect_flat_fields(f, structs, out); }
+    } else {
+        out.push(ty.to_string());
+    }
+}
+
+/// Recursively flatten an aggregate type into its scalar AbiParams, pushing onto `out`.
+fn flatten_params(ty: &str, structs: &std::collections::HashMap<String, Vec<String>>, out: &mut Vec<AbiParam>) {
+    if let Some(fields) = parse_tuple_type(ty).or_else(|| structs.get(ty).cloned()) {
+        for f in &fields { flatten_params(f, structs, out); }
+    } else if ty.starts_with('(') {
+        // Unparseable tuple, fall back to I64
+        out.push(AbiParam::new(types::I64));
+    } else {
+        out.push(AbiParam::new(mir_type_to_cl(ty)));
+    }
+}
+
 /// Parse a tuple type string like "(i64, i64)" into its field types. Returns None for
 /// non-tuple types or malformed input.
 fn parse_tuple_type(ty: &str) -> Option<Vec<String>> {
@@ -512,13 +649,18 @@ fn aggregate_fields(ty: &str, structs: &std::collections::HashMap<String, Vec<St
 /// TypeRef -> the type string mir_type_to_cl understands (for the struct layout table).
 fn typeref_str(t: &TypeRef) -> String {
     match t {
-        TypeRef::I32 => "i32", TypeRef::I64 => "i64", TypeRef::U32 => "u32", TypeRef::U64 => "u64",
-        TypeRef::Bool => "bool", TypeRef::F32 => "f32", TypeRef::F64 => "f64", _ => "i64",
-    }.to_string()
+        TypeRef::I32 => "i32".to_string(), TypeRef::I64 => "i64".to_string(),
+        TypeRef::U32 => "u32".to_string(), TypeRef::U64 => "u64".to_string(),
+        TypeRef::Bool => "bool".to_string(), TypeRef::F32 => "f32".to_string(),
+        TypeRef::F64 => "f64".to_string(),
+        TypeRef::Named(s) => s.clone(),
+        _ => "i64".to_string(),
+    }
 }
 
 fn mir_type_to_cl(t: &str) -> Type {
     match t.trim().trim_start_matches("-> ") {
+        "i128" | "u128" => types::I128,
         "i64" | "u64" => types::I64,
         "i32" | "u32" => types::I32,
         "i16" | "u16" => types::I16,
@@ -536,6 +678,23 @@ fn parse_mir_local_idx(s: &str) -> Option<usize> {
     if !s.starts_with('_') { return None; }
     let n: String = s.chars().skip(1).take_while(|c| c.is_ascii_digit()).collect();
     n.parse().ok()
+}
+
+/// Parse a downcast operand `_N|Variant|K` into its components.
+/// Returns (local_index, variant_name, sub_aggregate_index).
+fn parse_downcast_operand(s: &str) -> Option<(usize, String, usize)> {
+    let s = s.trim().trim_start_matches("copy ").trim_start_matches("move ");
+    if !s.starts_with('_') { return None; }
+    let rest = &s[1..];
+    let local_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let local: usize = local_str.parse().ok()?;
+    let after_local = &rest[local_str.len()..];
+    if !after_local.starts_with('|') { return None; }
+    let parts: Vec<&str> = after_local[1..].split('|').collect();
+    if parts.len() != 2 { return None; }
+    let variant = parts[0].to_string();
+    let idx: usize = parts[1].parse().ok()?;
+    Some((local, variant, idx))
 }
 
 /// The bare local index of an operand like `move _3` / `copy _3` / `_3`. Used to spot an
@@ -573,6 +732,7 @@ fn resolve_mir_operand_to_value(
             let local_n: String = c[1..dot].chars().take_while(|ch| ch.is_ascii_digit()).collect();
             let field_n: String = c[dot+1..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
             if let (Ok(loc), Ok(field)) = (local_n.parse::<usize>(), field_n.parse::<usize>()) {
+
                 if let Some(&var) = tuple_vars.get(&(loc, field)) {
                     return bc.use_var(var);
                 }
@@ -584,6 +744,7 @@ fn resolve_mir_operand_to_value(
         }
         // Plain `_N`
         if let Some(idx) = parse_mir_local_idx(c) {
+
             if let Some(&var) = vars.get(&idx) {
                 return bc.use_var(var);
             }
@@ -606,16 +767,27 @@ fn resolve_mir_operand_to_value(
                 return bc.ins().f64const(f);
             }
         }
-        // Integers: `3_i64`, `-5_i32`, or bare `42`.
+        // Integers: `3_i64`, `-5_i32`, `500000000_u128`, or bare `42`.
         let head = r.split('_').next().unwrap_or("")
             .trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        // 128-bit literal: by `_u128`/`_i128` suffix, OR magnitude beyond i64. iconst can't hold it
+        // (64-bit immediate) — assemble via iconcat. MUST be tried before the i64 parse.
+        if r.contains("u128") || r.contains("i128") {
+            if let Ok(v) = head.parse::<i128>() { return build_i128_const(v, bc); }
+        }
         if let Ok(i) = head.parse::<i64>() {
             return bc.ins().iconst(types::I64, i);
+        }
+        if let Ok(v) = head.parse::<i128>() {
+            return build_i128_const(v, bc); // > i64 range, unsuffixed
         }
     }
 
     if let Ok(i) = c.parse::<i64>() {
         return bc.ins().iconst(types::I64, i);
+    }
+    if let Ok(v) = c.parse::<i128>() {
+        return build_i128_const(v, bc);
     }
 
     bc.ins().iconst(types::I64, 0)
@@ -651,11 +823,11 @@ fn operand_is_unsigned(s: &str, types: &std::collections::HashMap<usize, String>
     let c = s.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
     if let Some(rest) = c.strip_prefix("const ") {
         return rest.contains("u8") || rest.contains("u16") || rest.contains("u32")
-            || rest.contains("u64") || rest.contains("usize");
+            || rest.contains("u64") || rest.contains("u128") || rest.contains("usize");
     }
     if let Some(idx) = parse_mir_local_idx(c) {
         if let Some(t) = types.get(&idx) {
-            return matches!(t.trim(), "u8" | "u16" | "u32" | "u64" | "usize");
+            return matches!(t.trim(), "u8" | "u16" | "u32" | "u64" | "u128" | "usize");
         }
     }
     false
@@ -697,12 +869,36 @@ fn cast_value(bc: &mut FunctionBuilder, v: Value, want: Type) -> Value {
     }
 }
 
+/// Cranelift's x64 backend (0.114) cannot lower i128 div/rem inline (it panics in machinst/lower) — it
+/// expects the producer to emit the compiler-rt libcall. Declare + call __udivti3/__divti3/__umodti3/
+/// __modti3 (two i128 args -> i128); they resolve against compiler_builtins/compiler-rt at link time.
+fn emit_i128_libcall(name: &str, a: Value, b: Value, module: &mut ObjectModule, bc: &mut FunctionBuilder) -> Value {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I128));
+    sig.params.push(AbiParam::new(types::I128));
+    sig.returns.push(AbiParam::new(types::I128));
+    let fid = module.declare_function(name, Linkage::Import, &sig).expect("declare i128 libcall");
+    let fref = module.declare_func_in_func(fid, bc.func);
+    let call = bc.ins().call(fref, &[a, b]);
+    bc.inst_results(call)[0]
+}
+
+/// Build an I128 constant. Cranelift's `iconst` immediate is 64-bit only, so a 128-bit value is
+/// assembled from its low/high 64-bit halves via `iconcat` (ladder rung: 128-bit ints).
+fn build_i128_const(v: i128, bc: &mut FunctionBuilder) -> Value {
+    let u = v as u128;
+    let lo = bc.ins().iconst(types::I64, (u as u64) as i64);
+    let hi = bc.ins().iconst(types::I64, ((u >> 64) as u64) as i64);
+    bc.ins().iconcat(lo, hi)
+}
+
 fn compile_mir_op_to_value(
     op: &str,
     args: &[String],
     vars: &std::collections::HashMap<usize, Variable>,
     tuple_vars: &std::collections::HashMap<(usize, usize), Variable>,
     unsigned: bool,
+    module: &mut ObjectModule,
     bc: &mut FunctionBuilder,
 ) -> Value {
     let two_args = |bc: &mut FunctionBuilder| -> (Value, Value) {
@@ -710,13 +906,14 @@ fn compile_mir_op_to_value(
             .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
         let b = args.get(1).map(|a| resolve_mir_operand_to_value(a, vars, tuple_vars, bc))
             .unwrap_or_else(|| bc.ins().iconst(types::I64, 0));
+
         unify_int_width(bc, a, b)
     };
     match op {
         "AddWithOverflow" | "Add" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fadd(a, b) } else { bc.ins().iadd(a, b) } }
         "SubWithOverflow" | "Sub" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fsub(a, b) } else { bc.ins().isub(a, b) } }
         "MulWithOverflow" | "Mul" => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fmul(a, b) } else { bc.ins().imul(a, b) } }
-        "Div"                     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fdiv(a, b) } else if unsigned { bc.ins().udiv(a, b) } else { bc.ins().sdiv(a, b) } }
+        "Div"                     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fdiv(a, b) } else if bc.func.dfg.value_type(a) == types::I128 { emit_i128_libcall(if unsigned { "__udivti3" } else { "__divti3" }, a, b, module, bc) } else if unsigned { bc.ins().udiv(a, b) } else { bc.ins().sdiv(a, b) } }
         "Eq"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::Equal, a, b) } else { bc.ins().icmp(IntCC::Equal, a, b) } }
         "Ne"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::NotEqual, a, b) } else { bc.ins().icmp(IntCC::NotEqual, a, b) } }
         "Lt"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::LessThan, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedLessThan } else { IntCC::SignedLessThan }, a, b) } }
@@ -725,7 +922,7 @@ fn compile_mir_op_to_value(
         "Ge"     => { let (a, b) = two_args(bc); if val_is_float(bc, a) { bc.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b) } else { bc.ins().icmp(if unsigned { IntCC::UnsignedGreaterThanOrEqual } else { IntCC::SignedGreaterThanOrEqual }, a, b) } }
         "BitAnd" => { let (a, b) = two_args(bc); bc.ins().band(a, b) }
         "BitOr"  => { let (a, b) = two_args(bc); bc.ins().bor(a, b) }
-        "Rem"    => { let (a, b) = two_args(bc); if unsigned { bc.ins().urem(a, b) } else { bc.ins().srem(a, b) } }
+        "Rem"    => { let (a, b) = two_args(bc); if bc.func.dfg.value_type(a) == types::I128 { emit_i128_libcall(if unsigned { "__umodti3" } else { "__modti3" }, a, b, module, bc) } else if unsigned { bc.ins().urem(a, b) } else { bc.ins().srem(a, b) } }
         "BitXor" => { let (a, b) = two_args(bc); bc.ins().bxor(a, b) }
         "Shl" | "ShlUnchecked" => { let (a, b) = two_args(bc); bc.ins().ishl(a, b) }
         "Shr" | "ShrUnchecked" => { let (a, b) = two_args(bc); if unsigned { bc.ins().ushr(a, b) } else { bc.ins().sshr(a, b) } }

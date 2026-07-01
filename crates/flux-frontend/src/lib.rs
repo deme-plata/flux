@@ -185,18 +185,37 @@ pub fn parse_source(source: &str, file_path: &str) -> Result<TranslationUnit, St
 /// where an unresolved `const` in a `Div` became a divide-by-zero SIGFPE). Only plain integer-literal
 /// consts are captured; const expressions (`A * B`) are a later slice. Values are i64 (a u128 const
 /// beyond i64 range is skipped rather than truncated).
-pub fn parse_consts(source: &str) -> std::collections::HashMap<String, i64> {
+pub fn parse_consts(source: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Ok(ast) = syn::parse_file(source) {
         for item in &ast.items {
             if let syn::Item::Const(c) = item {
                 if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) = &*c.expr {
-                    if let Ok(v) = i.base10_parse::<i64>() { out.insert(c.ident.to_string(), v); }
+                    // Carry the WIDTH from the declared type (`const X: u128 = 5` → "5_u128") so the
+                    // backend resolves the substituted literal at the right Cranelift type, not i64.
+                    let digits = i.base10_digits().to_string();
+                    let suffix = const_type_suffix(&c.ty);
+                    let lit = if suffix.is_empty() { digits } else { format!("{}_{}", digits, suffix) };
+                    out.insert(c.ident.to_string(), lit);
                 }
             }
         }
     }
     out
+}
+
+/// The integer-type suffix of a const's declared type (`u128`, `i64`, …), or "" if not a plain int.
+fn const_type_suffix(t: &syn::Type) -> String {
+    if let syn::Type::Path(tp) = t {
+        if let Some(seg) = tp.path.segments.last() {
+            let n = seg.ident.to_string();
+            if matches!(n.as_str(),
+                "u8"|"u16"|"u32"|"u64"|"u128"|"usize"|"i8"|"i16"|"i32"|"i64"|"i128"|"isize") {
+                return n;
+            }
+        }
+    }
+    String::new()
 }
 
 // ── Lowering: syn AST → Flux IR ──

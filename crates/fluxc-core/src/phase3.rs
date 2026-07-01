@@ -1071,11 +1071,15 @@ pub fn heal(path: &str, max_attempts: usize, auto_commit: bool) -> i32 {
             .map(flux_frontend::mir::lower_mir_to_ir)
             .collect();
 
+        let (src_structs, src_enums) = flux_frontend::parse_source(&current_source, path)
+            .map(|u| (u.structs, u.enums))
+            .unwrap_or_default();
+
         let unit = flux_frontend::TranslationUnit {
             file_path: path.to_string(),
             functions: ir_funcs,
-            structs: vec![],
-            enums: vec![],
+            structs: src_structs,
+            enums: src_enums,
             imports: vec![],
         };
 

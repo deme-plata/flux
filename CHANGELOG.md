@@ -1,5 +1,60 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.34.0 — The type-complexity ladder: enums, generics, named consts (2026-07-01)
+
+Ladder rungs 4–6 land together with the multi-aggregate parameter fixes — tuple/struct/enum
+aggregates now construct → pass → bind → return end-to-end through the native backend.
+
+### Added
+- **Data-carrying enums end-to-end** (rung 4 pt 2): construction keeps variant path + payload args;
+  payload extraction uses the `_N|Variant|K` downcast-projection encoding (raw payload index — the
+  backend computes the real field offset from the enum layout). C-like enums with explicit/running
+  discriminants.
+- **Generics via monomorphization** (rung 5): turbofish call sites (`id::<i64>`) clone the generic
+  template per distinct instantiation (`id$i64`), substitute type params, rewrite call sites, drop
+  unused templates. Programs without turbofish are provably unchanged (early-out).
+- **Named integer consts** (rung 6): `const HALVING_INTERVAL: u64 = 2_100_000` resolves at MIR level
+  with **width-tagged substitution** (`2100000_u64`) so the backend picks the right Cranelift type,
+  not i64 — found dogfooding sigil-emission::block_reward.
+- structs/enums are now parsed from source and wired into the MIR-direct path (phase3), instead of
+  empty placeholder tables.
+- mir-corpus: `data_enum` / `data_enum2` / `nested_enum` fixtures + pinned-rustc (1.93.1)
+  `.mir.expected` baselines (FIP-0001 frozen-IR groundwork).
+
+### Fixed
+- **Multi-aggregate parameter binding** (the 701 bug): `bind_param_flat` keyed `tuple_vars` by the
+  global param cursor instead of a per-local flat-leaf index, so every aggregate param after the
+  first silently bound to zero. Per-local leaf counter + `walk_to_field` path-type resolution.
+  Proof: `fn second(p: Point, q: Point) -> i64 { q.x }` objdumps `xor rax,rax` → `mov rdx,rax`.
+- **MIR param parser**: the param-list close-paren is now matched by `()` nesting depth and params
+  split on top-level commas only — inline tuple-typed params (`fn f(a: (i64,i64), b: (i64,i64))`)
+  previously truncated at the tuple's inner paren/comma into a mangled type + phantom param. This
+  also resolves the downstream caller-side CLIF verifier errors on multi-aggregate call sites.
+- flux-frontend unit tests updated to the current encodings (`_N|Variant|K`, normalized copy-strip);
+  suite green 16/16 (was 14/16).
+
+### Verified
+- e2e via `fluxc run`: `pick((1,2),(3,4))` → exit 34 (correct; 0 if b unbound, 12 if a misused).
+- flux-backend 43/43 · flux-frontend 16/16 (`flux_combo`, 6.0s) · objdump-verified SysV arg binding.
+
+### Notes
+- `Cargo.lock` intentionally not committed this release — the working-tree lock carries deps from
+  in-flight WIP outside this cut (flux-context); it rides with its owner's commit.
+- See `docs/VERSION_LEDGER.md` (new) for how the version tracks reconcile.
+
+
+## v0.33.0 — Cache: drop volatile -L from the cache key (2026-06-25)
+
+(Backfilled entry — v0.33.0 was tagged without a changelog entry.)
+
+### Fixed
+- **The 0% cache-hit root cause**: the volatile `-L` path was part of the cache key, so no key ever
+  matched across builds. Dropping it took measured hits from 0% → ~40% (within-build/predicted).
+  One of several layered cache bugs — see FIP-0002 for the full determinism story (restore stayed
+  gated behind `FLUX_CACHE_RESTORE=1` in this release).
+- jq-stdin-poison build fix: quarantine stray stdin reaching cargo's rustc target-probe.
+
+
 ## v0.32.0 — Real call signatures: aggregate-returning calls (2026-06-25)
 
 ### Added

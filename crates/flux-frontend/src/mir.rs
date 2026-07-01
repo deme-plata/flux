@@ -172,7 +172,19 @@ fn parse_fn_header(header: &str) -> Result<(String, Vec<MirLocal>, String), Stri
     let paren_idx = rest.find('(').ok_or("no (")?;
     let name = rest[..paren_idx].trim().to_string();
 
-    let close_paren = rest.find(')').ok_or("no )")?;
+    // Match the param-list close paren by NESTING depth — a tuple/struct param type like
+    // `(i64, i64)` carries its own parens, so the FIRST `)` is not the list end (that bug parsed
+    // `_1: (i64, i64)` as ty `"(i64"` plus a phantom empty param).
+    let mut pdepth = 0i32;
+    let mut close_paren = None;
+    for (j, b) in rest.bytes().enumerate().skip(paren_idx) {
+        match b {
+            b'(' => pdepth += 1,
+            b')' => { pdepth -= 1; if pdepth == 0 { close_paren = Some(j); break; } }
+            _ => {}
+        }
+    }
+    let close_paren = close_paren.ok_or("no )")?;
     let params_str = &rest[paren_idx+1..close_paren];
     let return_part = &rest[close_paren+1..];
 
@@ -183,7 +195,9 @@ fn parse_fn_header(header: &str) -> Result<(String, Vec<MirLocal>, String), Stri
     let return_type = return_part.trim().trim_start_matches("->").trim().to_string();
 
     let mut params = Vec::new();
-    for (i, p) in params_str.split(',').enumerate() {
+    // Split on TOP-LEVEL commas only: a comma inside a tuple/struct/generic param type
+    // (`(i64, i64)`, `Wrap<A, B>`) must not start a new param.
+    for (i, p) in split_top_level_commas(params_str).iter().enumerate() {
         let p = p.trim();
         if p.is_empty() { continue; }
         let parts: Vec<&str> = p.splitn(2, ':').collect();
@@ -193,6 +207,24 @@ fn parse_fn_header(header: &str) -> Result<(String, Vec<MirLocal>, String), Stri
     }
 
     Ok((name, params, return_type))
+}
+
+/// Split a comma list on TOP-LEVEL commas only, leaving commas nested inside (), [], <>, {}
+/// untouched — so an inline tuple/struct/generic type like `(i64, i64)` stays a single element.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' | '[' | '<' | '{' => { depth += 1; cur.push(ch); }
+            ')' | ']' | '>' | '}' => { if depth > 0 { depth -= 1; } cur.push(ch); }
+            ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out
 }
 
 fn parse_block<'a, I>(lines: &mut std::iter::Peekable<I>) -> Result<MirBlock, String>
@@ -286,7 +318,9 @@ where I: Iterator<Item = &'a str>
             terminator = Some(MirTerminator::Call { func, args, dst, target });
             lines.next();
         } else if trimmed.starts_with("_") && trimmed.contains('=') {
-            // _0 = Add(_1, _2);
+            // _0 = Add(_1, _2) — but also _7 = move ((_1 as Rect).0: Point)
+            // Route EVERY assignment through parse_rhs so downcast projections,
+            // struct construction, casts, and plain copies all decode correctly.
             let eq_idx = trimmed.find('=').unwrap();
             let dst = trimmed[..eq_idx].trim().to_string();
             let rhs = trimmed[eq_idx+1..].trim().trim_end_matches(';');
@@ -300,12 +334,6 @@ where I: Iterator<Item = &'a str>
         } else if trimmed.starts_with("StorageDead") {
             let local = trimmed[13..].trim().trim_end_matches(';').trim_matches('(').trim_matches(')').to_string();
             statements.push(MirStmt::StorageDead(local));
-            lines.next();
-        } else if trimmed.starts_with("_") && trimmed.contains("= move") {
-            let eq_idx = trimmed.find('=').unwrap();
-            let dst = trimmed[..eq_idx].trim().to_string();
-            let rhs = trimmed[eq_idx+1..].trim().trim_end_matches(';').trim_start_matches("move (");
-            statements.push(MirStmt::Assign { dst, op: "move".into(), args: vec![rhs.to_string()] });
             lines.next();
         } else if trimmed.starts_with("unreachable") {
             // rustc emits `unreachable;` in an exhaustive match's otherwise arm. Previously this fell
@@ -380,8 +408,8 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
 }
 
 /// Recognise a data-carrying enum downcast-projection `((_N as Variant).K: T)` (optionally prefixed
-/// `copy `/`move `) and return the equivalent aggregate-field operand `_N.(K+1)`. The +1 skips the
-/// discriminant tag, which the backend stores as field 0. Returns None for anything else — crucially
+/// `copy `/`move `) and return the operand encoded as `_N|Variant|K` (raw payload index K — the
+/// backend computes the real field offset from the enum layout). Returns None for anything else — crucially
 /// for a plain int/float cast (`move _1 as i64 (IntToInt)`), which has ` as ` but no `).` projection,
 /// so it falls through to parse_rhs's cast handler untouched.
 fn strip_downcast_projection(rhs: &str) -> Option<String> {
@@ -393,12 +421,17 @@ fn strip_downcast_projection(rhs: &str) -> Option<String> {
     let lstart = before.rfind('_')?;
     let local: String = before[lstart + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
     if local.is_empty() { return None; }
+    // Variant name between ` as ` and `).` — e.g. `Rect` in `((_1 as Rect).0: Point)`
+    let after_as = &s[as_pos + 4..];
+    let dot = after_as.find(").")?;
+    let variant = after_as[..dot].trim().to_string();
+    if variant.is_empty() { return None; }
     // Field index after the closing `).` — `).0`, `).1`, …
-    let dot = s[as_pos..].find(").")?;
-    let kpos = as_pos + dot + 2;
-    let kdigits: String = s[kpos..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let kpos = dot + 2;
+    let kdigits: String = after_as[kpos..].chars().take_while(|c| c.is_ascii_digit()).collect();
     let k: usize = kdigits.parse().ok()?;
-    Some(format!("_{}.{}", local, k + 1))
+    // Encode as _N|Variant|K — the backend computes the real field offset from the enum layout.
+    Some(format!("_{}|{}|{}", local, variant, k))
 }
 
 // ── Monomorphization (FIP-0001 type-complexity ladder, rung 5 part 2) ──
@@ -557,14 +590,14 @@ pub fn monomorphize(funcs: Vec<MirFunction>) -> Vec<MirFunction> {
 // substitutes `const NAME` → `const <value>` before codegen, reusing the literal-const path. Empty
 // table → input returned unchanged.
 
-fn fix_const(arg: &mut String, consts: &std::collections::HashMap<String, i64>) {
+fn fix_const(arg: &mut String, consts: &std::collections::HashMap<String, String>) {
     if let Some(name) = arg.strip_prefix("const ") {
-        if let Some(&v) = consts.get(name.trim()) { *arg = format!("const {}", v); }
+        if let Some(lit) = consts.get(name.trim()) { *arg = format!("const {}", lit); }
     }
 }
 
 /// Substitute named-const operands in every statement + terminator using the const table.
-pub fn resolve_consts(mut funcs: Vec<MirFunction>, consts: &std::collections::HashMap<String, i64>) -> Vec<MirFunction> {
+pub fn resolve_consts(mut funcs: Vec<MirFunction>, consts: &std::collections::HashMap<String, String>) -> Vec<MirFunction> {
     if consts.is_empty() { return funcs; }
     for f in &mut funcs {
         for b in &mut f.blocks {
@@ -1012,13 +1045,13 @@ mod tests {
     fn resolve_named_consts() {
         // The gap dogfooding sigil-emission::block_reward: `Div(copy _1, const HALVING_INTERVAL)`.
         let mir = "fn f(_1: u64) -> u64 {\n    bb0: {\n        _0 = Div(copy _1, const HALVING_INTERVAL);\n        return;\n    }\n}\n";
-        let consts: std::collections::HashMap<String,i64> =
-            [("HALVING_INTERVAL".to_string(), 2_100_000i64)].into_iter().collect();
+        let consts: std::collections::HashMap<String,String> =
+            [("HALVING_INTERVAL".to_string(), "2100000_u64".to_string())].into_iter().collect();
         let funcs = resolve_consts(parse_mir(mir).unwrap(), &consts);
         let stmt = &funcs[0].blocks[0].statements[0];
         if let MirStmt::Assign { args, .. } = stmt {
-            assert_eq!(args, &vec!["copy _1".to_string(), "const 2100000".to_string()],
-                "named const must be substituted with its value");
+            assert_eq!(args, &vec!["_1".to_string(), "const 2100000_u64".to_string()],
+                "named const must be substituted with its width-tagged value");
         } else { panic!("expected assign"); }
     }
 
@@ -1050,11 +1083,12 @@ mod tests {
         assert_eq!(parse_rhs("Opt::Some(const 42_i64)"),
             ("Opt::Some".to_string(), vec!["const 42_i64".to_string()]));
         assert_eq!(parse_rhs("Opt::None"), ("Opt::None".to_string(), vec![]));
-        // Payload extraction `((_1 as Some).0: i64)` → aggregate field K+1 (tag is field 0).
+        // Payload extraction `((_1 as Some).0: i64)` → `_N|Variant|K` (raw K; the backend
+        // computes the real field offset from the enum layout).
         assert_eq!(parse_rhs("copy ((_1 as Some).0: i64)"),
-            ("copy".to_string(), vec!["_1.1".to_string()]));
+            ("copy".to_string(), vec!["_1|Some|0".to_string()]));
         assert_eq!(parse_rhs("move ((_3 as Box).1: i64)"),
-            ("copy".to_string(), vec!["_3.2".to_string()]));
+            ("copy".to_string(), vec!["_3|Box|1".to_string()]));
         // A PLAIN cast must still reach the cast handler, NOT be eaten as a projection.
         assert_eq!(parse_rhs("move _1 as i64 (IntToInt)").0, "as");
         assert_eq!(strip_downcast_projection("move _1 as i64 (IntToInt)"), None);

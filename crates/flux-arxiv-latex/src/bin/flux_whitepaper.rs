@@ -16,7 +16,7 @@ const PREAMBLE: &str = r#"
 \setlist[itemize]{leftmargin=15pt,itemsep=2pt,topsep=3pt}
 \title{\bfseries __TITLE__}
 \author{Viktor S. Kristensen \and DeepSeek-V4-Pro \and Claude (agent)}
-\date{June 2026 \\ \small github.com/deme-plata/flux}
+\date{July 2026 \,\textperiodcentered\, v0.34.0 \\ \small github.com/deme-plata/flux}
 "#;
 
 fn main() {

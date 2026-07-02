@@ -288,13 +288,27 @@ impl Database {
         // host (proven on a real machine: a 1.6 GB WAL ate 3 GB RSS; a 4.1 GB one
         // ate 4 GB). Quarantine instead of replay: the bytes stay on disk for
         // manual recovery and the store resumes from its last checkpointed SSTs.
-        const WAL_QUARANTINE_BYTES: u64 = 256 * 1024 * 1024;
-        if let Ok(m) = fs::metadata(&wal_path) {
-            if m.len() > WAL_QUARANTINE_BYTES {
-                let q = path.join(format!("flux.wal.quarantined-{}", m.len()));
-                eprintln!("[flux-db] WAL is {} bytes (cap {}) — quarantining to {:?}; resuming from last checkpoint",
-                    m.len(), WAL_QUARANTINE_BYTES, q);
-                let _ = fs::rename(&wal_path, &q);
+        //
+        // v0.35 re-sizing: the original 256 MiB cap was an OOM guard for the old
+        // whole-file slurp replay. Streaming replay (WAL_REPLAY_WINDOW) bounds RSS
+        // at 8 MiB regardless of WAL size, so the cap's job is now only to stop
+        // PATHOLOGICAL WALs (runaway/corrupt files), not normal large windows —
+        // consumers like sigil-node legitimately run max_wal_bytes = 1 GiB (the
+        // chronos-v035 matrix: +22% write throughput, ~20x lower read p99), and a
+        // 256 MiB cap would quarantine (set aside!) their crash-recovery data.
+        // Measured replay speed is ~330 MB/s, so the 4 GiB default is a ~13 s
+        // worst-case open. FLUX_DB_WAL_QUARANTINE_BYTES overrides; 0 disables.
+        let wal_quarantine_bytes: u64 = std::env::var("FLUX_DB_WAL_QUARANTINE_BYTES").ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 * 1024 * 1024 * 1024);
+        if wal_quarantine_bytes > 0 {
+            if let Ok(m) = fs::metadata(&wal_path) {
+                if m.len() > wal_quarantine_bytes {
+                    let q = path.join(format!("flux.wal.quarantined-{}", m.len()));
+                    eprintln!("[flux-db] WAL is {} bytes (cap {}) — quarantining to {:?}; resuming from last checkpoint",
+                        m.len(), wal_quarantine_bytes, q);
+                    let _ = fs::rename(&wal_path, &q);
+                }
             }
         }
         let mut memtable = BTreeMap::new();

@@ -1184,39 +1184,33 @@ impl Database {
         };
         // v0.15: flushes always land at L0; the leveled compactor pushes them deeper.
         let sst_path = self.path.join(sst_name(0, snapshot_seq));
-        let key_count = snapshot.len() as u64;
-        let mut bloom = BloomFilter::new(snapshot.len().max(16), 0.01);
-        // v0.12: block-based SST body (data blocks + index + footer); SstReader
-        // auto-detects by the SST_VERSION byte. Build bloom + body from the SAME
-        // snapshot so they can never disagree.
-        let mut builder = block::SstBuilder::new();
-        for (k, v) in snapshot.iter() {
-            builder.add(k, v);
-            bloom.insert(k);
-        }
-        let block_body = builder.finish();
 
-        // v3 (LANE 1): shared framing — byte-identical to compact() and the SST-ingest path.
-        let out = encode_sst(key_count, &bloom, &block_body);
-
-        // Write the SST and FSYNC it. sync_all (not the old buffer-only flush) is
-        // MANDATORY before truncating the WAL — otherwise a crash between SST write
-        // and WAL truncate would lose the memtable's data entirely.
+        // v0.37 (task #10): STREAM the SST to disk. The old path built the
+        // block body in RAM (SstBuilder.output, ~= SST size) and then
+        // `encode_sst` copied it into a second full-size buffer — at a 1 GiB
+        // WAL cap that is ~2.2 GB of transient allocations per flush ON TOP
+        // of the memtable + its snapshot clone. FileSstWriter (the compaction
+        // output writer) emits the byte-identical v3 framing incrementally:
+        // peak extra RAM is one 4 KiB block + the flat index bytes.
         //
-        // v0.37 (task #10): ATOMIC PUBLISH — write to `.sst.tmp`, fsync, THEN
-        // rename. flush() used to create the final `.sst` path directly, so a
-        // kill -9 mid-write left a TORN file that `SstReader::open` rejects —
-        // and one unopenable SST fails every subsequent `get()` (observed as a
-        // total read outage in crash-chaos runs). A torn tmp is swept at the
-        // next open (`ingest::sweep_stale_tmp`) and the data is still covered
-        // by the un-truncated WAL, so the crash costs nothing.
-        let sst_tmp = sst_path.with_extension("sst.tmp");
-        {
-            let mut f = fs::File::create(&sst_tmp).map_err(|e| format!("create sst: {}", e))?;
-            f.write_all(&out).map_err(|e| format!("sst write: {}", e))?;
-            f.sync_all().map_err(|e| format!("sst sync: {}", e))?;
+        // ATOMIC PUBLISH: FileSstWriter writes `.sst.tmp` and fsyncs in
+        // finish(); we rename only after. flush() used to create the final
+        // `.sst` path directly, so a kill -9 mid-write left a TORN file that
+        // `SstReader::open` rejects — and one unopenable SST fails every
+        // subsequent `get()`. A torn tmp is swept at the next open
+        // (`ingest::sweep_stale_tmp`) and the data is still covered by the
+        // un-truncated WAL, so the crash costs nothing. The fsync before the
+        // WAL truncate below stays MANDATORY.
+        let mut w = FileSstWriter::create(sst_path.clone(), snapshot.len())
+            .map_err(|e| format!("flush create sst: {}", e))?;
+        for (k, v) in snapshot.iter() {
+            if let Err(e) = w.add(k, v) {
+                w.abort();
+                return Err(format!("flush sst write: {}", e));
+            }
         }
-        fs::rename(&sst_tmp, &sst_path).map_err(|e| format!("sst rename: {}", e))?;
+        let (sst_tmp, sst_final) = w.finish().map_err(|e| format!("flush sst finish: {}", e))?; // finish() removes its tmp on error
+        fs::rename(&sst_tmp, &sst_final).map_err(|e| format!("sst rename: {}", e))?;
         // v3 (LANE-C): a new L0 SST now exists — drop the cached path list so readers see it.
         self.invalidate_sst_paths();
 
@@ -2238,8 +2232,21 @@ impl FileSstWriter {
     }
 
     /// Write index + footer, back-patch the header, fsync. Returns
-    /// (tmp_path, final_path) for the caller's rename phase.
-    fn finish(mut self) -> Result<(PathBuf, PathBuf), String> {
+    /// (tmp_path, final_path) for the caller's rename phase. On ANY error the
+    /// partial tmp file is removed before returning — callers never have to
+    /// clean up a writer they can no longer see.
+    fn finish(self) -> Result<(PathBuf, PathBuf), String> {
+        let tmp = self.tmp_path.clone();
+        match self.finish_inner() {
+            Ok(pair) => Ok(pair),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    fn finish_inner(mut self) -> Result<(PathBuf, PathBuf), String> {
         use std::io::{Seek, SeekFrom};
         self.flush_block()?;
         let index_offset = self.data_pos;

@@ -40,7 +40,11 @@ pub(crate) const SST_MAGIC: [u8; 4] = *b"FXDB";
 /// format with index + footer; payload bytes start at the position right
 /// after the bloom filter, but the payload is now `block::build_block_sst`
 /// output rather than a single compressed buffer.
-pub(crate) const SST_VERSION: u8 = 2;
+// v3 (chronos-v035 data-loss fix): body length is u64. v2 framed it as u32,
+// so any SST body >= 4 GiB wrapped mod 2^32 -> reader saw a prefix -> footer
+// parse failed silently -> gets returned None and compaction merged 'empty'
+// inputs then deleted them (measured: 1.06 TB written, 4 GB left, 0.02% readable).
+pub(crate) const SST_VERSION: u8 = 3;
 const AUTO_COMPACT_THRESHOLD: usize = 4;
 /// v0.36: default WAL auto-flush threshold. Once the approximate number of
 /// bytes appended to the WAL since the last truncation exceeds this, the next
@@ -107,7 +111,7 @@ pub(crate) fn encode_sst(key_count: u64, bloom: &BloomFilter, block_body: &[u8])
     out.extend_from_slice(&(bloom.num_hashes as u32).to_le_bytes());
     out.extend_from_slice(&(bloom_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&bloom_bytes);
-    out.extend_from_slice(&(block_body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(block_body.len() as u64).to_le_bytes()); // v3: u64 (v2's u32 wrapped at 4 GiB)
     out.extend_from_slice(block_body);
     out
 }
@@ -1505,6 +1509,9 @@ pub struct SstReader {
     payload_off: u64,
     payload_len: usize,
     payload: std::sync::OnceLock<Vec<u8>>,
+    /// Header key_count — authoritative entry count for v2+; 0 for legacy.
+    /// The compaction data-loss guard compares parsed pairs against this.
+    key_count: u64,
 }
 
 impl SstReader {
@@ -1524,14 +1531,16 @@ impl SstReader {
                 payload_off: 0,
                 payload_len: flen as usize,
                 payload: std::sync::OnceLock::new(),
+                key_count: 0,
             });
         }
         // Bytes 4..22 of the header (we already consumed the 4-byte magic).
         let mut rest = [0u8; 18];
         f.read_exact(&mut rest).map_err(|_| "SST truncated in header".to_string())?;
         let version = rest[0]; // raw[4]
-        if version != 1 && version != 2 {
-            return Err(format!("unsupported SST version {} (supported: 1, 2)", version));
+        let key_count = u64::from_le_bytes([rest[2], rest[3], rest[4], rest[5], rest[6], rest[7], rest[8], rest[9]]); // raw[6..14]
+        if !(1..=3).contains(&version) {
+            return Err(format!("unsupported SST version {} (supported: 1-3)", version));
         }
         let bloom_num_hashes = u32::from_le_bytes([rest[10], rest[11], rest[12], rest[13]]) as usize; // raw[14..18]
         let bloom_len = u32::from_le_bytes([rest[14], rest[15], rest[16], rest[17]]) as usize;        // raw[18..22]
@@ -1547,10 +1556,28 @@ impl SstReader {
             i += 8;
         }
         let bloom = BloomFilter { bits, num_hashes: bloom_num_hashes.max(1) };
-        let mut plen = [0u8; 4];
-        f.read_exact(&mut plen).map_err(|_| "SST truncated in bloom".to_string())?;
-        let payload_len = u32::from_le_bytes(plen) as usize;
-        let payload_off = (22 + bloom_len + 4) as u64;
+        let (mut payload_len, payload_off) = if version >= 3 {
+            let mut plen = [0u8; 8];
+            f.read_exact(&mut plen).map_err(|_| "SST truncated in bloom".to_string())?;
+            (u64::from_le_bytes(plen) as usize, (22 + bloom_len + 8) as u64)
+        } else {
+            let mut plen = [0u8; 4];
+            f.read_exact(&mut plen).map_err(|_| "SST truncated in bloom".to_string())?;
+            (u32::from_le_bytes(plen) as usize, (22 + bloom_len + 4) as u64)
+        };
+        // v2 WRAP RECOVERY (chronos-v035): v2 stored the body length as u32, so a
+        // >= 4 GiB body recorded len mod 2^32 while the FULL body (with its valid
+        // u64-offset footer) is on disk. If the true remaining length matches the
+        // stored value mod 2^32, trust the file: the whole tail is the body. This
+        // makes every wrapped-but-complete v2 SST fully readable again.
+        if version == 2 {
+            let true_body = flen.saturating_sub(payload_off);
+            if true_body != payload_len as u64 && true_body % (1u64 << 32) == payload_len as u64 {
+                eprintln!("[flux-db] v2 SST {} : u32-wrapped body length recovered ({} -> {} bytes)",
+                    path.display(), payload_len, true_body);
+                payload_len = true_body as usize;
+            }
+        }
         if flen < payload_off + payload_len as u64 {
             return Err("SST truncated in payload".into());
         }
@@ -1562,6 +1589,7 @@ impl SstReader {
             payload_off,
             payload_len,
             payload: std::sync::OnceLock::new(),
+            key_count,
         })
     }
 
@@ -1596,7 +1624,7 @@ impl SstReader {
     ///
     /// If `cache` is provided, v2 reads consult and populate it.
     pub fn lookup_cached(&self, key: &[u8], cache: Option<&cache::BlockCache>) -> Option<Vec<u8>> {
-        if self.version == 2 {
+        if self.version >= 2 {
             let body = self.payload(); // v0.35: lazy — first access reads the file body
             let reader = match block::BlockSstReader::new(body) {
                 Ok(r) => r,
@@ -1652,7 +1680,7 @@ impl SstReader {
     /// (the Database reader cache) can be drained without cloning the reader.
     pub fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let _ = self.legacy;
-        if self.version == 2 {
+        if self.version >= 2 {
             if let Ok(r) = block::BlockSstReader::new(self.payload()) {
                 if let Ok(p) = r.pairs() {
                     return p;
@@ -1798,7 +1826,21 @@ impl Database {
             at_level.sort_by_key(|h| h.sequence);
             for h in &at_level {
                 let table = SstReader::open(&h.path)?;
-                for (k, v) in table.into_pairs() {
+                let expect = table.key_count;
+                let vers = table.version;
+                let pairs = table.into_pairs();
+                // DATA-LOSS GUARD (chronos-v035 finding): a body-parse failure used
+                // to yield an empty vec here, so compaction merged "nothing" and
+                // then DELETED the inputs — physically destroying ~1 TB in the 2 TB
+                // soak. For versioned SSTs the header key_count is authoritative:
+                // any mismatch means the body did not fully parse — abort the whole
+                // pass and keep every input on disk.
+                if vers >= 2 && pairs.len() as u64 != expect {
+                    return Err(format!(
+                        "compact ABORT (data-loss guard): {:?} parsed {} of {} entries — inputs kept",
+                        h.path, pairs.len(), expect));
+                }
+                for (k, v) in pairs {
                     if v.is_empty() {
                         merged.remove(&k);
                     } else {
@@ -2418,7 +2460,7 @@ mod tests {
         let raw = std::fs::read(&ssts[0]).unwrap();
         assert_eq!(&raw[0..4], &SST_MAGIC);
         assert_eq!(raw[4], SST_VERSION);
-        assert_eq!(SST_VERSION, 2);
+        assert_eq!(SST_VERSION, 3);
         let _ = fs::remove_dir_all(&tmp);
     }
 

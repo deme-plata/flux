@@ -521,8 +521,8 @@ impl Database {
     /// v3 (LANE-C): the SST path list, from cache when warm. A cache miss does ONE `list_ssts`
     /// (`fs::read_dir` + name-parse) and memoizes it; subsequent reads (the hot negative-lookup
     /// path during sync) cost only a read-lock + clone — no syscall. Invalidated by `flush()` /
-    /// `compact()`, the only operations that change the SST set. Returns oldest-first (the order
-    /// `list_ssts` returns), so callers that need newest-first still `.rev()` as before.
+    /// `compact()`, the only operations that change the SST set. Returns oldest-data-first
+    /// (deepest level first; see `list_ssts`), so callers that need newest-first still `.rev()`.
     fn cached_sst_paths(&self) -> Result<Vec<PathBuf>, String> {
         if let Some(paths) = self.sst_paths.read().as_ref() {
             return Ok(paths.clone());
@@ -728,7 +728,9 @@ impl Database {
                 return Ok(if v.is_empty() { None } else { Some(v.clone()) });
             }
         }
-        // Read-through SSTs. Newest first (highest sequence number in filename).
+        // Read-through SSTs. Newest first: `.rev()` of the read-merge order =
+        // L0 by descending sequence, THEN deeper levels — a fresh L0 copy must
+        // shadow the stale copy a compaction pushed to L1+.
         // v0.12: lookups consult the LRU block cache to avoid re-decompressing
         // the same blocks on hot keys.
         // v3 (LANE-C): cached SST list — no `read_dir` syscall on this (hot) miss path.
@@ -1520,9 +1522,20 @@ fn list_ssts_leveled(path: &std::path::Path) -> Result<Vec<SstHandle>, String> {
     Ok(out)
 }
 
-/// Legacy unleveled wrapper kept for callers that don't care about level.
+/// Unleveled wrapper: paths in READ-MERGE order — oldest data first, i.e.
+/// deepest level first (level DESC), ascending sequence within a level.
+/// `.rev()` therefore yields newest-first: L0 by descending sequence, then
+/// deeper levels. This is the order every reader must use — the raw
+/// `list_ssts_leveled` order (level ASC) made forward-merging readers apply
+/// deep (old) levels LAST and `.rev()` readers consult them FIRST, so a key
+/// updated after compaction pushed its old value to L1 read back the stale
+/// L1 copy, and deleted keys resurrected. Within-level sequence order
+/// matters at EVERY level: an L0→L1 merge lands beside older L1 files, so
+/// a newer L1 file (higher sequence) shadows an older one.
 fn list_ssts(path: &std::path::Path) -> Result<Vec<PathBuf>, String> {
-    Ok(list_ssts_leveled(path)?.into_iter().map(|h| h.path).collect())
+    let mut handles = list_ssts_leveled(path)?;
+    handles.sort_by(|a, b| b.level.cmp(&a.level).then(a.sequence.cmp(&b.sequence)));
+    Ok(handles.into_iter().map(|h| h.path).collect())
 }
 
 /// Build the v0.15 SST filename for a given level + sequence.
@@ -2360,10 +2373,13 @@ impl Database {
             .collect()
     }
 
-    /// Compact all SSTs into one merged SST. Tombstones drop their target
-    /// (so deletions become permanent). The merged view also folds in the
-    /// current memtable so an explicit `flush()` before `compact()` isn't
-    /// required.
+    /// Compact all SSTs into one merged SST. Tombstones drop their target —
+    /// but the PAIR itself is dropped only when the merge inputs are the
+    /// deepest data in the tree; otherwise the tombstone is written through
+    /// to the output so it keeps shadowing older copies of the key that live
+    /// at or below the output level (dropping it early resurrected them).
+    /// The merged view also folds in the current memtable so an explicit
+    /// `flush()` before `compact()` isn't required.
     /// v0.15: leveled compaction. For each level L where the file count
     /// exceeds the threshold, merge ALL files at L (plus the memtable on
     /// the first pass) into a single file at L+1. Repeats until every
@@ -2425,8 +2441,16 @@ impl Database {
             };
 
             let out_level = current_level + 1;
+            // A tombstone's PAIR may be dropped only when no level deeper
+            // than the inputs holds data — every older copy of the key is
+            // then an input to THIS merge and dies with it. Merging above
+            // deeper data must write tombstones through, or the older copy
+            // at/below out_level resurrects. New L0 flushes racing in are
+            // strictly newer data, so they can't be resurrected by this.
+            let deepest_populated = handles.iter().map(|h| h.level).max().unwrap_or(0);
+            let drop_tombstones = current_level >= deepest_populated;
             let mut outputs: Vec<(PathBuf, PathBuf)> = Vec::new(); // (tmp, final)
-            let merge_res = self.merge_level_streaming(&at_level, mem_snapshot, input_bytes, out_level, &mut outputs);
+            let merge_res = self.merge_level_streaming(&at_level, mem_snapshot, input_bytes, out_level, drop_tombstones, &mut outputs);
             if let Err(e) = merge_res {
                 // Data-loss guard semantics: ANY parse mismatch or IO failure
                 // aborts the whole pass — partial outputs are dropped, every
@@ -2464,8 +2488,15 @@ impl Database {
                 // made the loss permanent). If writes raced, keep the memtable
                 // intact: already-merged entries are shadow-equal duplicates,
                 // nothing is lost, and the next flush folds the rest.
+                //
+                // The merge itself advances `sequence` once per output file it
+                // names, so the no-race fingerprint is snapshot seq + output
+                // count — plain equality never held once the merge wrote an
+                // output, so the memtable was NEVER cleared and its whole
+                // content (tombstones included) re-folded into a fresh L1
+                // file on every compact.
                 let mut inner = self.inner.write();
-                if inner.sequence == mem_snap_seq {
+                if inner.sequence == mem_snap_seq + outputs.len() as u64 {
                     inner.memtable.clear();
                 }
             }
@@ -2479,7 +2510,10 @@ impl Database {
     ///
     ///   * Newer source wins on duplicate keys (sources are ranked oldest →
     ///     newest; the memtable outranks every SST).
-    ///   * Tombstones (empty values) drop the pair from the output.
+    ///   * Tombstones (empty values) drop the pair from the output only when
+    ///     `drop_tombstones` is set (inputs are the deepest data); otherwise
+    ///     the tombstone is written through so it keeps shadowing older
+    ///     copies at/below the output level.
     ///   * DATA-LOSS GUARD: for v2+ inputs the header `key_count` is
     ///     authoritative — when a stream ends, its yielded count must match,
     ///     and any block/index parse error is fatal. The caller keeps all
@@ -2497,6 +2531,7 @@ impl Database {
         mem_snapshot: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
         input_bytes: u64,
         out_level: u8,
+        drop_tombstones: bool,
         outputs: &mut Vec<(PathBuf, PathBuf)>,
     ) -> Result<(), String> {
         use std::cmp::Ordering;
@@ -2603,8 +2638,10 @@ impl Database {
                     Err(e) => return fail(writer.take(), e),
                 }
             }
-            // Tombstone: drop the pair entirely.
-            if winner.value.is_empty() {
+            // Tombstone: drop the pair entirely — but ONLY when this merge's
+            // inputs are the deepest data (see compact()). Otherwise write it
+            // through; it dies for good once it reaches the bottom level.
+            if winner.value.is_empty() && drop_tombstones {
                 continue;
             }
             if writer.is_none() {
@@ -4243,6 +4280,68 @@ mod tests {
                 assert!(db.get(format!("e2-{i:03}").as_bytes()).unwrap().is_some());
             }
         }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// READ-ORDER regression (task 717647ec): a key updated AFTER a
+    /// compaction pushed its old value to L1 must read back the new L0
+    /// value. The old read order (level ASC, seq ASC — `.rev()` = deepest
+    /// level first) made get()/scan_prefix_recent consult L1 before L0,
+    /// and the iter family applied L1 LAST in their merge — all of them
+    /// returned the stale L1 copy.
+    #[test]
+    fn test_get_sees_l0_update_over_compacted_l1() {
+        let tmp = std::env::temp_dir().join("flux-db-test-l0-over-l1");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        db.put(b"k:upd", b"old").unwrap();
+        db.compact().unwrap(); // memtable folds into an L1 SST
+        assert!(list_ssts_leveled(&tmp).unwrap().iter().any(|h| h.level == 1),
+            "setup: compact must land the old value at L1");
+        db.put(b"k:upd", b"new").unwrap();
+        db.flush().unwrap(); // new value in a fresh L0 SST (higher sequence)
+
+        assert_eq!(db.get(b"k:upd").unwrap(), Some(b"new".to_vec()),
+            "get() must consult L0 before deeper levels");
+        assert_eq!(db.scan_prefix_recent(b"k:", 10),
+            vec![(b"k:upd".to_vec(), b"new".to_vec())],
+            "scan_prefix_recent must apply L0 over deeper levels");
+        let all: Vec<(Vec<u8>, Vec<u8>)> = db.iter().collect();
+        assert_eq!(all, vec![(b"k:upd".to_vec(), b"new".to_vec())],
+            "iter() must apply newest data last in its merge");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// TOMBSTONE-RESURRECTION regression: deleting a key whose live copy
+    /// was compacted to L1 used to lose the delete at the next compact() —
+    /// the L0 merge dropped the tombstone pair while the older L1 copy
+    /// (NOT an input to that merge) stayed on disk and became visible
+    /// again. The pair may only drop when the inputs are the deepest data.
+    #[test]
+    fn test_delete_survives_compaction_above_deeper_levels() {
+        let tmp = std::env::temp_dir().join("flux-db-test-tomb-resurrect");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        db.put(b"zombie", b"v1").unwrap();
+        db.compact().unwrap(); // "zombie" now lives in an L1 SST
+        db.delete(b"zombie").unwrap();
+        db.compact().unwrap(); // tombstone merges to L1 BESIDE the old copy
+        assert_eq!(db.get(b"zombie").unwrap(), None,
+            "tombstone must survive a merge above deeper data");
+        assert_eq!(db.iter().count(), 0, "iter must not resurrect the deleted key");
+
+        // Push the tree deep enough that the tombstone meets the old copy
+        // in a deepest-level merge — there (and only there) the pair drops.
+        for i in 0..20u32 {
+            db.put(format!("fill{:03}", i).as_bytes(), b"x").unwrap();
+            db.compact().unwrap();
+        }
+        assert_eq!(db.get(b"zombie").unwrap(), None, "still deleted after deep merges");
+        let gone = list_ssts(&tmp).unwrap().iter().all(|p| {
+            SstReader::open(p).unwrap().pairs().into_iter()
+                .all(|(k, _)| k.as_slice() != b"zombie")
+        });
+        assert!(gone, "deepest-level merge must drop the tombstone pair entirely");
         let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -1,5 +1,44 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.35.0 — The fast-build release: one wrapper identity, cache restore on (2026-07-02)
+
+The 12-second era restored — and made structural. Warm `fluxc self` measured at **12.4s**
+(0.8s CPU); warm alternation across build/check/test/combo 0.3–10s.
+
+### Fixed
+- **The build-speed regression** (v0.20 built warm in ~12s, lately 2+ minutes): cargo hashes
+  `RUSTC_WRAPPER` into every unit fingerprint, and fluxc entry points disagreed — test/self/MCP
+  spawned cargo WITH the wrapper, build/check/quick/run WITHOUT (gated on `--provenance`).
+  Every alternation flipped the entire workspace fingerprint (~193s rebuild measured, each way)
+  plus ~27 autocfg build-script re-runs. Fix: `apply_wrapper_env()` — one canonical cargo
+  environment on every spawn. RULE: never add a cargo spawn without it.
+- `fluxc test` package resolution honors `--package`.
+
+### Changed
+- **Cache restore is ON by default** (`FLUX_CACHE_RESTORE=0` opts out), guard-hardened after a
+  24-agent adversarial review: the closure-consistency sidecar is now REQUIRED for dep-carrying
+  units (missing sidecar = miss), and the proposed name-bridging was REJECTED (it laundered
+  wrong-metadata-hash blobs into expected names — the historical ICE class) — a name mismatch
+  stays a miss. Invariant preserved: an unverifiable entry can never break a build.
+- Self-build/build cache counters read the file-based per-unit events (wrapper subprocesses
+  never updated the parent's atomics — the permanently-dead 0/N readout).
+
+### Added
+- `fluxc setup | pilot | first-run` native onboarding + `fluxc self-update` (prebuilt fetch).
+- `docs/VERSION_LEDGER.md`: release-provenance section — every release records its recomputable
+  flux-rev identity in-tree.
+
+### Diagnostics worth knowing
+- `FLUXCACHE …` lines on a no-op build are cargo REPLAYING CACHED STDERR from old traced
+  builds, not live wrapper calls.
+- Long-running `fluxc mcp`/`serve` processes hold the pre-rebuild binary — restart them.
+
+### Deferred to next cycle
+- FIP-0002 Phase 2 remainder (shared cache dir surviving `rm -rf target`, eviction defaults),
+  FIP-0001 groundwork (MIR-drift CI, `Frontend` trait, IR spec doc), workspace default-members
+  prune, canonical wrapper path + `rust-toolchain.toml` pins (fleet-wide fingerprint stability).
+
+
 ## v0.34.0 — The type-complexity ladder: enums, generics, named consts (2026-07-01)
 
 Ladder rungs 4–6 land together with the multi-aggregate parameter fixes — tuple/struct/enum

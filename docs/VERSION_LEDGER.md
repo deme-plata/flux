@@ -37,12 +37,13 @@
 | v0.32.0 | 2026-06-25 | Real call signatures; aggregate-returning calls |
 | v0.33.0 | 2026-06-25 | Cache `-L` key fix (tag only; changelog + bump backfilled in 0.34.0) |
 | v0.34.0 | 2026-07-01 | Ladder rungs 4–6: data enums, generics/monomorphization, named consts + multi-aggregate param fixes |
+| v0.35.0 | 2026-07-02 | The fast-build release: one wrapper identity (12.4s self restored), cache restore ON guard-hardened |
 
 ## Track C — Planned / future
 
 | Number | Status | What |
 |---|---|---|
-| 0.35.0 | next | Whatever ships next under rule 1 (candidates: FIP-0001 0.34-groundwork items — frozen IR spec, `RUSTC_VERSION` MIR-diff CI, `Frontend` trait; FIP-0002 Phase 2 — stable `--extern` identity → full-closure cache hits → restore-by-default) |
+| 0.36.0 | next | FIP-0002 Phase 2 remainder (shared cache dir + eviction), FIP-0001 groundwork (MIR-drift CI, `Frontend` trait, IR spec), default-members prune, canonical wrapper path, toolchain pins |
 | 0.36.x | planned (2026-06-10 plan, held) | Security-hardened Flux (SEC-001..022), flux-db ≤2s cold-open, SIGIL sync hardening, musl-static deploy — `docs/RELEASE_0.36.1_PLAN.md` |
 | Phase H | horizon | SIGIL DEX swap engine, yield-farming agent, sigil-vm (RELEASES.md) |
 

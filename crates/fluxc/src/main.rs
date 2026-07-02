@@ -38,7 +38,12 @@ fn main() {
     match subcommand {
         Some("build") | Some("b") => fluxc_core::detect_and_build(&config, &subcommand_args[1..]),
         Some("check") | Some("c") => fluxc_core::run_cargo("check", &config, &subcommand_args[1..]),
-        Some("test") | Some("t") => fluxc_core::run_tests(subcommand_args.get(1).map(|s|s.as_str())),
+        Some("test") | Some("t") => fluxc_core::run_tests(
+            config
+                .package
+                .as_deref()
+                .or_else(|| subcommand_args.get(1).map(String::as_str)),
+        ),
         Some("quick") => fluxc_core::quick_build_run(subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("fluxc"), config.release),
         Some("combo") => {
             // fluxc combo <crate> [--release] [--json]
@@ -671,6 +676,13 @@ fn main() {
             { let _ = std::process::Command::new("open").arg(&url).spawn(); }
             #[cfg(windows)]
             { let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn(); }
+        }
+        Some("setup") | Some("pilot") | Some("first-run") | Some("onboard") => {
+            fluxc_core::run_onboarding_setup(&subcommand_args[1..]);
+        }
+        Some("self-update") => {
+            let force = subcommand_args.iter().any(|a| a == "--force" || a == "-f");
+            fluxc_core::run_self_update(force);
         }
         _ => fluxc_core::print_usage(),
     }

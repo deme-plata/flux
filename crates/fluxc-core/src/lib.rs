@@ -245,6 +245,7 @@ pub fn detect_and_build(config: &BuildConfig, extra: &[String]) {
             println!("🔥 Warming dependency cache (cargo check --workspace)...");
             let mut cmd = std::process::Command::new("cargo");
             cmd.args(["check", "--workspace"]);
+            apply_wrapper_env(&mut cmd);
             let _ = cmd.status();
             println!("✓ Dependencies warmed");
         }
@@ -332,6 +333,23 @@ pub fn detect_and_test(config: &BuildConfig, extra: &[String]) {
 
 // ── Rust Build ──
 
+/// The canonical cargo environment. EVERY cargo spawn in fluxc must apply this.
+///
+/// cargo hashes RUSTC_WRAPPER into every unit's fingerprint, so entry points
+/// that disagree about the wrapper (build/check used to spawn WITHOUT it while
+/// test/self/MCP spawn WITH it) flip the entire workspace fingerprint on every
+/// alternation -- a full multi-minute rebuild each way, plus ~27 build-script
+/// re-runs (autocfg crates declare rerun-if-env-changed=RUSTC_WRAPPER). That
+/// was the "v0.20 built warm in seconds, now 2+ minutes" regression
+/// (root-caused 2026-07-02). One wrapper identity = one fingerprint universe
+/// = warm builds stay warm across build/check/test/combo/self.
+pub fn apply_wrapper_env(cmd: &mut Command) {
+    let fluxc = env::current_exe().expect("current fluxc executable");
+    cmd.env("RUSTC_WRAPPER", fluxc);
+    cmd.env("FLUXC_WRAPPING", "1");
+    cmd.env("REAL_RUSTC", env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string()));
+}
+
 pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
     let mut cmd = Command::new("cargo");
     cmd.arg(cargo_cmd);
@@ -346,10 +364,11 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
 
     for a in extra_args { cmd.arg(a); }
 
-    if config.provenance {
-        cmd.env("RUSTC_WRAPPER", env::current_exe().unwrap());
-        cmd.env("FLUXC_WRAPPING", "1");
-    }
+    // Always-on wrapper (NOT gated on --provenance): a wrapper-less spawn here
+    // would flip every unit's fingerprint vs the test/self/MCP builds. See
+    // apply_wrapper_env. The --provenance flag remains accepted for its other
+    // (signing) semantics; it no longer controls the wrapper.
+    apply_wrapper_env(&mut cmd);
     
 
     let s = cmd.status().expect("cargo");
@@ -743,8 +762,14 @@ pub fn wrapper_mode(args: &[String]) {
         // Non-deterministic rlib keys guarantee partial hits today, so RESTORE is opt-in
         // (FLUX_CACHE_RESTORE=1) until Phase 2 makes keys deterministic enough to hit the whole closure.
         // The cache still POPULATES unconditionally below, so it's primed the moment restore is safe.
-        // Default invariant: the cache can NEVER break a build.
-        if std::env::var("FLUX_CACHE_RESTORE").is_ok() {
+        // Cache restore is ON by default, guarded. The invariant still binds: the
+        // cache can NEVER break a build — an unverifiable entry is a MISS, never a
+        // restore. Guards in apply_cached_outputs: required-ext check, REQUIRED
+        // closure-consistency sidecar for dep-carrying units (no sidecar = miss),
+        // and the exact-name post-restore check (a name mismatch is a miss — never
+        // bridge/rename blobs, the embedded crate identity would be wrong).
+        // FLUX_CACHE_RESTORE=0 opts out for debugging.
+        if std::env::var("FLUX_CACHE_RESTORE").as_deref() != Ok("0") {
             if let Some(entry) = flux_cache::lookup(&cache_key) {
                 if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
                     if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
@@ -954,6 +979,7 @@ pub fn no_cargo_build(config: &BuildConfig) {
             cmd.args(["--package", &ci.name]);
             cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap());
             cmd.env("FLUXC_WRAPPING", "1");
+            cmd.env("FLUX_CACHE_RESTORE", "1");
 
             let status = match cmd.status() {
                 Ok(s) => s,
@@ -1013,6 +1039,10 @@ async fn no_cargo_build_async_inner(config: &BuildConfig) {
                 cmd.arg(if rel { "build" } else { "check" });
                 if rel { cmd.arg("--release"); }
                 cmd.args(["--package", &name]);
+                // Same canonical wrapper env as apply_wrapper_env (tokio Command).
+                cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap());
+                cmd.env("FLUXC_WRAPPING", "1");
+                cmd.env("REAL_RUSTC", std::env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string()));
                 (name, cmd.status().await.map(|s| s.success()).unwrap_or(false))
             }));
         }
@@ -1038,6 +1068,7 @@ pub fn self_build(config: BuildConfig) {
             println!("🔥 Warming dependency cache (cargo check --workspace)...");
             let mut cmd = std::process::Command::new("cargo");
             cmd.args(["check", "--workspace"]);
+            apply_wrapper_env(&mut cmd);
             let _ = cmd.status();
             println!("✓ Dependencies warmed");
         }
@@ -1048,6 +1079,11 @@ pub fn self_build(config: BuildConfig) {
 
     println!("⚡ Flux Self-Build — dogfooding");
     println!("  Phase 1: cargo build with RUSTC_WRAPPER=self");
+
+    // Snapshot file-based cache counters before build — the wrapper runs as
+    // subprocesses and writes to ~/.flux/.cache-unit-{hits,misses}, not the
+    // in-memory atomics (which are in the parent process).
+    let (ch0, cm0) = cache_event_counts();
 
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
@@ -1071,8 +1107,11 @@ pub fn self_build(config: BuildConfig) {
         process::exit(status.code().unwrap_or(1));
     }
 
-    let hits = CACHE_HITS.load(Ordering::Relaxed);
-    let misses = CACHE_MISSES.load(Ordering::Relaxed);
+    // Read the file-based cache counters AFTER the build (wrapper subprocesses
+    // appended to them). Compute the delta from the pre-build snapshot.
+    let (ch1, cm1) = cache_event_counts();
+    let hits = ch1.saturating_sub(ch0);
+    let misses = cm1.saturating_sub(cm0);
     let total = hits + misses;
     let cache_rate = if total > 0 { (hits as f64 / total as f64) * 100.0 } else { 0.0 };
 
@@ -1103,11 +1142,13 @@ pub fn quick_build_run(package: &str, release: bool) {
     cmd.arg(if release { "build" } else { "check" });
     if release { cmd.arg("--release"); }
     cmd.args(["--package", package]);
+    apply_wrapper_env(&mut cmd);
     let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
     if status.success() {
         let mut run_cmd = std::process::Command::new("cargo");
         run_cmd.arg("run"); if release { run_cmd.arg("--release"); }
         run_cmd.args(["--bin", package]);
+        apply_wrapper_env(&mut run_cmd);
         let _ = run_cmd.status();
     } else { eprintln!("Build failed — not running"); }
 }
@@ -1116,6 +1157,7 @@ pub fn run_binary(package: &str, release: bool) {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("run"); if release { cmd.arg("--release"); }
     cmd.args(["--bin", package]);
+    apply_wrapper_env(&mut cmd);
     let _ = cmd.status();
 }
 
@@ -1123,11 +1165,7 @@ pub fn run_tests(package: Option<&str>) {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["-p", pkg]); }
-    let fluxc = env::current_exe().expect("current fluxc executable");
-    let real_rustc = env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    cmd.env("RUSTC_WRAPPER", fluxc);
-    cmd.env("FLUXC_WRAPPING", "1");
-    cmd.env("REAL_RUSTC", real_rustc);
+    apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
     let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
     if !status.success() {
@@ -1166,7 +1204,9 @@ pub fn print_usage() {
     println!("  fluxc release-audit   Show release-lane split and hold status");
     println!("  fluxc plan            AI-optimized build plan (batches, est. time)");
     println!("  fluxc explain CRATE   Explain a crate (path, deps, type)");
-    println!("  fluxc version         Print version\n");
+    println!("  fluxc version         Print version");
+    println!("  fluxc setup | pilot | first-run   Native onboarding (replaces curl|bash)");
+    println!("  fluxc self-update     Fetch latest prebuilt into ~/.flux/bin\n");
     println!("Analysis & Optimization:");
     println!("  fluxc architect       Quantum Architecture Oracle — 6-dim blueprint");
     println!("  fluxc sigil-plan      SIGIL release plan — Cortex-optimized roadmap");
@@ -1218,6 +1258,94 @@ pub fn print_usage() {
     println!("  Frontend: BLAKE3 source-hash (target/flux-cache/frontend/)");
     println!("  Dependencies: cached by lockfile hash");
     println!("  Stats:     fluxc stats — hit rate, build times, project info");
+}
+
+// ── Onboarding / Pilot (native setup, makes new MCP tools unavoidable) ──
+
+pub fn run_onboarding_setup(extra: &[String]) {
+    println!("⚡ Flux Pilot / Setup — native onboarding (no bash required)");
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_str = exe.display().to_string();
+    println!("  Running from: {}", exe_str);
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let flux_bin_dir = format!("{}/.flux/bin", home);
+    let _ = std::fs::create_dir_all(&flux_bin_dir);
+
+    let link = format!("{}/fluxc", flux_bin_dir);
+    // Create symlink or copy
+    if let Err(_) = std::os::unix::fs::symlink(&exe, &link) {
+        let _ = std::fs::copy(&exe, &link);
+    }
+    println!("  ✓ Linked {} → {}", link, exe_str);
+    println!("  Add to PATH if needed: export PATH=\"{}/.flux/bin:$PATH\"", home);
+
+    // Client detection
+    let clients = detect_ai_clients();
+    println!("  Detected clients: {}", clients.join(", "));
+
+    println!("\n  Next steps (new MCP tools are now the way):");
+    println!("    1. Restart your AI client (Claude/Grok/etc) so MCP reconnects.");
+    println!("    2. In your AI: \"flux_mcp_status\"   — health, PATH, skills, exact fixes");
+    println!("    3. In your AI: \"flux_mcp_register\" — get client-specific registration snippet");
+    println!("    4. In your AI: \"flux_quickstart\"   — loads docs + rules + combos");
+    println!("    5. Try: fluxc combo --package fluxc-mcp");
+    println!("\n  The two new tools (flux_mcp_status + flux_mcp_register) are now unavoidable in quickstart and this setup.");
+    println!("  Skills: curl -fsSL https://fluxapp.xyz/flux-skills.tar.gz | tar xz -C ~/.grok/skills ~/.claude/skills");
+    println!("  Canonical script source (ship this): flux/scripts/setup-flux.sh");
+
+    if extra.iter().any(|a| a == "--auto" || a == "-y") {
+        println!("  (auto mode — would attempt more wiring here in future)");
+    }
+}
+
+fn detect_ai_clients() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut out = vec![];
+    if std::path::Path::new(&format!("{}/.claude", home)).exists() { out.push("Claude".to_string()); }
+    if std::path::Path::new(&format!("{}/.grok", home)).exists() { out.push("Grok".to_string()); }
+    if std::path::Path::new(&format!("{}/.cursor", home)).exists() { out.push("Cursor".to_string()); }
+    if std::path::Path::new(&format!("{}/.codex", home)).exists() { out.push("Codex".to_string()); }
+    if out.is_empty() { out.push("none (manual MCP wiring)".to_string()); }
+    out
+}
+
+// ── Self-update (uses the same prebuilt the install script prefers) ──
+
+pub fn run_self_update(force: bool) {
+    println!("⚡ fluxc self-update");
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let bin_dir = format!("{}/.flux/bin", home);
+    let _ = std::fs::create_dir_all(&bin_dir);
+    let target = format!("{}/fluxc", bin_dir);
+
+    let url = "https://fluxapp.xyz/downloads/fluxc-musl-x64";
+    println!("  Fetching {} ...", url);
+
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", url, "-o", &target])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            let _ = std::process::Command::new("chmod").args(["+x", &target]).status();
+            println!("  ✓ Updated {}", target);
+            if let Ok(v) = std::process::Command::new(&target).arg("--version").output() {
+                println!("  New version: {}", String::from_utf8_lossy(&v.stdout).trim());
+            }
+            println!("  Restart clients using this fluxc for MCP.");
+        }
+        _ => {
+            eprintln!("  Failed to download prebuilt. Try manual or source build.");
+            if force {
+                // fallback to current exe copy
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::fs::copy(exe, &target);
+                    println!("  Fallback: copied current exe to {}", target);
+                }
+            }
+        }
+    }
 }
 
 // ── Argument Parsing ──

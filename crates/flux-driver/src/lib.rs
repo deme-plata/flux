@@ -308,17 +308,34 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     // that was a cache MISS (recompiled fresh) leaves this crate's restored rmeta inconsistent ->
     // SIGBUS / "no resolution for an import". Verify every current --extern dep is byte-identical to
     // what the entry was cached against (recorded in the closure sidecar); any mismatch -> miss, so we
-    // recompile THIS crate to match its actual deps. Makes a partial hit safe. (No sidecar = legacy
-    // entry: skip — the build-safe default keeps restore opt-in anyway.)
-    if let Ok(recorded) = std::fs::read_to_string(closure_sidecar_for(&entry.source_hash)) {
-        let want: std::collections::HashMap<&str, &str> =
-            recorded.lines().filter_map(|l| l.split_once(' ')).collect();
-        for (base, path) in extern_dep_paths(rustc_args) {
-            if let Some(&expected) = want.get(base.as_str()) {
-                if flux_cache::hash_file(&path).as_deref() != Some(expected) {
-                    return false; // a dep changed since cache time -> recompile this crate
+    // recompile THIS crate to match its actual deps. Makes a partial hit safe.
+    //
+    // The sidecar is REQUIRED whenever the unit has extern deps: restore is on by
+    // default now, so the old skip-for-legacy-entries would restore pre-sidecar
+    // entries UNVERIFIED — the historical SIGBUS / "no resolution for an import"
+    // ICE class. An unverifiable closure is a MISS (one recompile, repopulates
+    // with a sidecar), never a restore. Dep-less units (no --extern) are vacuously
+    // consistent and need no sidecar.
+    let externs = extern_dep_paths(rustc_args);
+    if !externs.is_empty() {
+        match std::fs::read_to_string(closure_sidecar_for(&entry.source_hash)) {
+            Ok(recorded) => {
+                let want: std::collections::HashMap<&str, &str> =
+                    recorded.lines().filter_map(|l| l.split_once(' ')).collect();
+                for (base, path) in externs {
+                    match want.get(base.as_str()) {
+                        Some(&expected) => {
+                            if flux_cache::hash_file(&path).as_deref() != Some(expected) {
+                                return false; // a dep changed since cache time -> recompile this crate
+                            }
+                        }
+                        // A dep the sidecar never recorded is just as unverifiable
+                        // as a missing sidecar: miss, don't guess.
+                        None => return false,
+                    }
                 }
             }
+            Err(_) => return false, // no sidecar + has deps -> unverifiable -> miss
         }
     }
     let out_dir = find_out_dir(rustc_args);

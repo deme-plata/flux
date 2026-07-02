@@ -72,6 +72,12 @@ const BULK_L0_COMPACT_THRESHOLD: usize = 32;
 /// v0.15: size pyramid factor — Li+1 target is `LEVEL_SIZE_RATIO ×` Li.
 /// Smaller than RocksDB's default 10 to keep the test corpus snappy.
 const LEVEL_SIZE_RATIO: usize = 4;
+/// v0.37 (task #10): rolling size cap for streaming-compaction outputs. A
+/// merge emits a new `flux_L{lvl}_{seq}.sst` every time the current output's
+/// body crosses this, so no single SST grows unbounded (the 2 TB soak
+/// produced ONE monolithic file whose whole-body reader was the RSS wall).
+/// Override with FLUX_DB_COMPACT_OUTPUT_BYTES (>0).
+const DEFAULT_COMPACT_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ── LZ4 compression helpers ──
 
@@ -170,6 +176,10 @@ struct DbInner {
     /// Defer it: ingest fast into many L0 SSTs, then `compact()` ONCE at the tip.
     /// Default false (unchanged behavior for every existing caller).
     defer_compaction: bool,
+    /// v0.37 (task #10): rolling size cap for streaming-compaction outputs
+    /// (see DEFAULT_COMPACT_OUTPUT_BYTES). Lives in DbInner so every clone
+    /// shares it; FLUX_DB_COMPACT_OUTPUT_BYTES overrides at merge time.
+    compact_output_bytes: u64,
 }
 
 /// Snapshot of the database at a point in time (MVCC read).
@@ -347,18 +357,34 @@ impl Database {
         // instead of growing the backlog by another `max_wal_bytes`.
         let wal_bytes = wal_file.metadata().map(|m| m.len()).unwrap_or(0);
 
+        // v0.37 (task #10): seed the in-memory sequence from the highest
+        // sequence embedded in the existing SST filenames. It used to reset
+        // to 0 on every open, while SST names DERIVE from it — so after a
+        // crash-restart a deterministic workload reproduced the same sequence
+        // numbers and compaction outputs RENAMED OVER the previous epoch's
+        // SSTs. Measured in kill -9 chaos: two same-sized flux_L01_...7f82
+        // files from different epochs, three whole deciles (0..255k of 850k
+        // blocks) physically destroyed, presence 60.85%. Monotonic naming
+        // across restarts kills the entire collision class. `+1` so even a
+        // replay-only flush (no new puts) can never reuse the max name.
+        let max_sst_seq = list_ssts_leveled(&path)
+            .map(|hs| hs.iter().map(|h| h.sequence).max().unwrap_or(0))
+            .unwrap_or(0);
+        let seed_sequence = if max_sst_seq == 0 { 0 } else { max_sst_seq.saturating_add(1) };
+
         Ok(Database {
             inner: Arc::new(RwLock::new(DbInner {
                 memtable,
                 wal_file: Some(wal_file),
                 wal_bytes,
                 max_wal_bytes: DEFAULT_MAX_WAL_BYTES,
-                sequence: 0,
+                sequence: seed_sequence,
                 mod_history: std::collections::HashMap::new(),
                 range_tombs: Vec::new(),
                 merge_op: RwLock::new(None),
                 compaction_filter: RwLock::new(None),
                 defer_compaction: false,
+                compact_output_bytes: DEFAULT_COMPACT_OUTPUT_BYTES,
             })),
             path: path.clone(),
             block_cache: Arc::new(cache::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES)),
@@ -441,6 +467,18 @@ impl Database {
     /// v3 (LANE-C): is post-flush compaction currently deferred?
     pub fn is_compaction_deferred(&self) -> bool {
         self.inner.read().defer_compaction
+    }
+
+    /// v0.37 (task #10): configure the rolling size cap for streaming-
+    /// compaction outputs (default ~1 GiB; see DEFAULT_COMPACT_OUTPUT_BYTES).
+    /// Builder-style; shared by every clone of this Database. Values of 0 are
+    /// ignored (keeps the default). FLUX_DB_COMPACT_OUTPUT_BYTES still wins
+    /// at merge time when set.
+    pub fn with_compact_output_bytes(self, bytes: u64) -> Self {
+        if bytes > 0 {
+            self.inner.write().compact_output_bytes = bytes;
+        }
+        self
     }
 
     /// v0.36: if the WAL has outgrown `max_wal_bytes`, flush. MUST be called
@@ -1164,9 +1202,21 @@ impl Database {
         // Write the SST and FSYNC it. sync_all (not the old buffer-only flush) is
         // MANDATORY before truncating the WAL — otherwise a crash between SST write
         // and WAL truncate would lose the memtable's data entirely.
-        let mut f = fs::File::create(&sst_path).map_err(|e| format!("create sst: {}", e))?;
-        f.write_all(&out).map_err(|e| format!("sst write: {}", e))?;
-        f.sync_all().map_err(|e| format!("sst sync: {}", e))?;
+        //
+        // v0.37 (task #10): ATOMIC PUBLISH — write to `.sst.tmp`, fsync, THEN
+        // rename. flush() used to create the final `.sst` path directly, so a
+        // kill -9 mid-write left a TORN file that `SstReader::open` rejects —
+        // and one unopenable SST fails every subsequent `get()` (observed as a
+        // total read outage in crash-chaos runs). A torn tmp is swept at the
+        // next open (`ingest::sweep_stale_tmp`) and the data is still covered
+        // by the un-truncated WAL, so the crash costs nothing.
+        let sst_tmp = sst_path.with_extension("sst.tmp");
+        {
+            let mut f = fs::File::create(&sst_tmp).map_err(|e| format!("create sst: {}", e))?;
+            f.write_all(&out).map_err(|e| format!("sst write: {}", e))?;
+            f.sync_all().map_err(|e| format!("sst sync: {}", e))?;
+        }
+        fs::rename(&sst_tmp, &sst_path).map_err(|e| format!("sst rename: {}", e))?;
         // v3 (LANE-C): a new L0 SST now exists — drop the cached path list so readers see it.
         self.invalidate_sst_paths();
 
@@ -1512,6 +1562,14 @@ pub struct SstReader {
     /// Header key_count — authoritative entry count for v2+; 0 for legacy.
     /// The compaction data-loss guard compares parsed pairs against this.
     key_count: u64,
+    /// v0.37 (task #10): sparse fence index for FILE-BACKED block reads on
+    /// v2/v3 SSTs. Built lazily on the first lookup that survives the bloom
+    /// filter; the whole body is NEVER materialized for v2+ (the OnceLock
+    /// `payload` above now serves ONLY legacy/v1 files). A parse failure
+    /// yields an empty index (all lookups miss) — same observable behavior
+    /// as a torn SST, never a panic; compaction has its own error-propagating
+    /// path (`stream()`), so the data-loss guard is unaffected.
+    index: std::sync::OnceLock<SstIndex>,
 }
 
 impl SstReader {
@@ -1532,6 +1590,7 @@ impl SstReader {
                 payload_len: flen as usize,
                 payload: std::sync::OnceLock::new(),
                 key_count: 0,
+                index: std::sync::OnceLock::new(),
             });
         }
         // Bytes 4..22 of the header (we already consumed the 4-byte magic).
@@ -1590,6 +1649,7 @@ impl SstReader {
             payload_len,
             payload: std::sync::OnceLock::new(),
             key_count,
+            index: std::sync::OnceLock::new(),
         })
     }
 
@@ -1597,6 +1657,10 @@ impl SstReader {
     /// failure (file vanished mid-run, truncation) logs and yields an empty
     /// body — lookups then find nothing, the same observable behavior as a
     /// torn SST today, never a panic.
+    ///
+    /// v0.37 (task #10): LEGACY/v1 ONLY. v2/v3 lookups are file-backed (see
+    /// [`Self::load_index`]) and never call this — caching a whole multi-GiB
+    /// body per SST was the RSS blow-up that OOM-killed the 2 TB soak.
     fn payload(&self) -> &[u8] {
         self.payload.get_or_init(|| {
             use std::io::{Read, Seek, SeekFrom};
@@ -1617,35 +1681,52 @@ impl SstReader {
         })
     }
 
-    /// Point lookup. On v2 files, uses the index to find the single relevant
-    /// data block, decompresses just that block, and searches it. On v1 /
-    /// legacy files, decompresses the whole payload (slow path kept for
-    /// backwards compat with old on-disk SSTs).
+    /// Point lookup. On v2/v3 files, uses the (sparse, lazily-built) fence
+    /// index to find the single relevant data block and READS THAT BLOCK FROM
+    /// THE FILE — the body is never materialized (v0.37, task #10; before
+    /// this the first lookup per SST slurped the entire body into a OnceLock,
+    /// which at TB scale is an unbounded resident set). On v1 / legacy files,
+    /// decompresses the whole payload (slow path kept for backwards compat
+    /// with old on-disk SSTs).
     ///
-    /// If `cache` is provided, v2 reads consult and populate it.
+    /// If `cache` is provided, v2+ reads consult and populate it — both for
+    /// decompressed data blocks (keyed by body-relative block offset, exactly
+    /// as before) and for raw index slices (keyed by their body-relative
+    /// offset, which is always >= index_off > any data-block offset, so the
+    /// two key spaces cannot collide).
     pub fn lookup_cached(&self, key: &[u8], cache: Option<&cache::BlockCache>) -> Option<Vec<u8>> {
         if self.version >= 2 {
-            let body = self.payload(); // v0.35: lazy — first access reads the file body
-            let reader = match block::BlockSstReader::new(body) {
-                Ok(r) => r,
-                Err(_) => return None,
+            let idx = self.load_index();
+            let fence = idx.locate_group(key)?;
+            // Fetch the group's raw index slice (through the cache when given).
+            let slice_body_off = idx.index_off + fence.start as u64;
+            let slice_len = (fence.end - fence.start) as usize;
+            let slice: std::sync::Arc<Vec<u8>> = if let Some(c) = cache {
+                let ck = cache::BlockKey { sst_path: self.path.clone(), block_offset: slice_body_off };
+                if let Some(buf) = c.get(&ck) {
+                    buf
+                } else {
+                    let raw = pread(&self.path, self.payload_off + slice_body_off, slice_len).ok()?;
+                    let arc = std::sync::Arc::new(raw);
+                    c.put(ck, arc.clone());
+                    arc
+                }
+            } else {
+                std::sync::Arc::new(pread(&self.path, self.payload_off + slice_body_off, slice_len).ok()?)
             };
-            let handle = reader.locate_block(key)?;
-            // Cache key uses (path, block_offset_within_body).
+            let (blk_off, clen, ulen) = scan_index_slice(&slice, key)?;
+            // Read + decompress the single data block (through the cache).
             if let Some(c) = cache {
-                let ck = cache::BlockKey {
-                    sst_path: self.path.clone(),
-                    block_offset: handle.offset,
-                };
+                let ck = cache::BlockKey { sst_path: self.path.clone(), block_offset: blk_off };
                 if let Some(buf) = c.get(&ck) {
                     return block::BlockSstReader::lookup_in_block(&buf, key);
                 }
-                let decompressed = reader.read_block(handle).ok()?;
+                let decompressed = self.read_block_at(blk_off, clen, ulen).ok()?;
                 let arc = std::sync::Arc::new(decompressed);
                 c.put(ck, arc.clone());
                 return block::BlockSstReader::lookup_in_block(&arc, key);
             }
-            let decompressed = reader.read_block(handle).ok()?;
+            let decompressed = self.read_block_at(blk_off, clen, ulen).ok()?;
             return block::BlockSstReader::lookup_in_block(&decompressed, key);
         }
 
@@ -1678,15 +1759,33 @@ impl SstReader {
 
     /// v0.35: borrowing variant of [`Self::into_pairs`] so cached `Arc<SstReader>`s
     /// (the Database reader cache) can be drained without cloning the reader.
+    ///
+    /// v0.37 (task #10): v2+ walks the file block-by-block via [`Self::stream`]
+    /// instead of materializing the whole body first. The RESULT is still fully
+    /// materialized (that is this method's contract); a parse error mid-file
+    /// logs and returns the pairs decoded so far (previously: empty vec).
+    /// Compaction does NOT use this — it drives `stream()` directly so errors
+    /// propagate to the data-loss guard.
     pub fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let _ = self.legacy;
         if self.version >= 2 {
-            if let Ok(r) = block::BlockSstReader::new(self.payload()) {
-                if let Ok(p) = r.pairs() {
-                    return p;
+            let mut out = Vec::new();
+            match self.stream() {
+                Ok(mut s) => loop {
+                    match s.next_pair() {
+                        Ok(Some(kv)) => out.push(kv),
+                        Ok(None) => break,
+                        Err(e) => {
+                            eprintln!("[flux-db] pairs() stream error on {}: {}", self.path.display(), e);
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[flux-db] pairs() stream open error on {}: {}", self.path.display(), e);
                 }
             }
-            return Vec::new();
+            return out;
         }
         // v1 / legacy.
         let data = decompress(self.payload());
@@ -1703,6 +1802,474 @@ impl SstReader {
             pos += kl + vl;
         }
         out
+    }
+
+    /// v0.37 (task #10): the sparse fence index, built ON FIRST USE by one
+    /// sequential scan of the index region (never the data blocks). Build
+    /// failure logs and degrades to an empty index — lookups miss, no panic.
+    fn load_index(&self) -> &SstIndex {
+        self.index.get_or_init(|| {
+            match build_sst_index(&self.path, self.payload_off, self.payload_len) {
+                Ok(ix) => ix,
+                Err(e) => {
+                    eprintln!("[flux-db] SST index parse failed {}: {}", self.path.display(), e);
+                    SstIndex::empty()
+                }
+            }
+        })
+    }
+
+    /// v0.37 (task #10): read + decompress ONE data block straight from the
+    /// file. `off` is body-relative (as recorded in the index).
+    fn read_block_at(&self, off: u64, clen: u32, ulen: u32) -> Result<Vec<u8>, String> {
+        let comp = pread(&self.path, self.payload_off + off, clen as usize)?;
+        let d = lz4::block::decompress(&comp, None)
+            .map_err(|e| format!("decompress block at {} in {}: {}", off, self.path.display(), e))?;
+        if d.len() != ulen as usize {
+            return Err(format!(
+                "block decompress size mismatch at {} in {}: expected {}, got {}",
+                off, self.path.display(), ulen, d.len()));
+        }
+        Ok(d)
+    }
+
+    /// v0.37 (task #10): sequential streaming scan of every (key, value) pair,
+    /// block-at-a-time — RAM is O(one block), not O(body). This is the
+    /// compaction input path: errors PROPAGATE (they feed the data-loss
+    /// guard), and [`SstStream::yielded`] reports the exact entry count so the
+    /// caller can compare against the header `key_count`.
+    pub fn stream(&self) -> Result<SstStream, String> {
+        if self.version < 2 {
+            // v1/legacy: monolithic LZ4 payload; these files predate blocks
+            // and are small — decode whole (unchanged behavior), iterate.
+            return Ok(SstStream {
+                inner: StreamInner::Whole(self.pairs().into_iter()),
+                yielded: 0,
+            });
+        }
+        use std::io::{Seek, SeekFrom};
+        if self.payload_len < block::FOOTER_LEN {
+            return Err(format!("SST body too short for footer: {}", self.payload_len));
+        }
+        let footer = pread(&self.path, self.payload_off + self.payload_len as u64 - block::FOOTER_LEN as u64, block::FOOTER_LEN)?;
+        let index_off = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+        let index_len = u32::from_le_bytes(footer[8..12].try_into().unwrap()) as u64;
+        let magic = u32::from_le_bytes(footer[12..16].try_into().unwrap());
+        if magic != block::BLK_MAGIC {
+            return Err(format!("bad block-SST footer magic 0x{magic:08x} in {}", self.path.display()));
+        }
+        if index_off + index_len > (self.payload_len - block::FOOTER_LEN) as u64 {
+            return Err(format!("index range overruns footer in {}", self.path.display()));
+        }
+        if index_len < 4 {
+            return Err(format!("index too short in {}", self.path.display()));
+        }
+        let mut fidx = fs::File::open(&self.path).map_err(|e| format!("open {}: {}", self.path.display(), e))?;
+        fidx.seek(SeekFrom::Start(self.payload_off + index_off))
+            .map_err(|e| format!("seek index {}: {}", self.path.display(), e))?;
+        let mut index_rd = std::io::BufReader::with_capacity(64 * 1024, fidx);
+        let mut nbuf = [0u8; 4];
+        index_rd.read_exact(&mut nbuf).map_err(|e| format!("read index count {}: {}", self.path.display(), e))?;
+        let n_entries = u32::from_le_bytes(nbuf);
+        let mut fblk = fs::File::open(&self.path).map_err(|e| format!("open {}: {}", self.path.display(), e))?;
+        fblk.seek(SeekFrom::Start(self.payload_off))
+            .map_err(|e| format!("seek body {}: {}", self.path.display(), e))?;
+        Ok(SstStream {
+            inner: StreamInner::Blocks {
+                path: self.path.clone(),
+                index_rd: std::io::Read::take(index_rd, index_len - 4),
+                entries_left: n_entries,
+                block_rd: std::io::BufReader::with_capacity(256 * 1024, fblk),
+                block_pos: self.payload_off,
+                payload_off: self.payload_off,
+                cur: Vec::new().into_iter(),
+            },
+            yielded: 0,
+        })
+    }
+}
+
+// ── v0.37 (task #10): file-backed SST reads — sparse fence index, streaming
+//    scan, and a streaming compaction writer ──
+
+/// One fence per group of up to `INDEX_FENCE_GROUP` index entries. At the
+/// chronos shape (8 KiB incompressible values → one entry per block, ~131 K
+/// blocks per GiB) a fully-materialized `Vec<BlockHandle>` index costs
+/// ~12 MB/GiB-of-SST resident FOREVER per cached reader — at TB scale that is
+/// gigabytes. Fences keep 1/64th of that (~0.2 MB/GiB); the group's raw index
+/// slice (~2.5 KB) is read from the file on demand and LRU-cached in the
+/// existing BlockCache, so total index residency is BOUNDED by cache capacity.
+const INDEX_FENCE_GROUP: usize = 64;
+
+/// Sparse in-memory view of one v2/v3 SST's block index.
+struct SstIndex {
+    /// Body-relative offset where the index region starts.
+    index_off: u64,
+    /// Flat fence-key storage (one allocation for all fences).
+    fence_keys: Vec<u8>,
+    fences: Vec<Fence>,
+}
+
+/// Covers index entries whose raw bytes live at `[start, end)` WITHIN the
+/// index region. `key` (in `fence_keys`) is the `last_key` of the LAST entry
+/// in the group — i.e. the max key this group of blocks can contain.
+struct Fence {
+    key_off: u32,
+    key_len: u32,
+    start: u32,
+    end: u32,
+}
+
+impl SstIndex {
+    fn empty() -> Self {
+        SstIndex { index_off: 0, fence_keys: Vec::new(), fences: Vec::new() }
+    }
+
+    fn fence_key(&self, i: usize) -> &[u8] {
+        let f = &self.fences[i];
+        &self.fence_keys[f.key_off as usize..(f.key_off + f.key_len) as usize]
+    }
+
+    /// First group whose max last_key >= `key` (binary search — fences are in
+    /// ascending key order because blocks are). None ⇒ key is past the end.
+    fn locate_group(&self, key: &[u8]) -> Option<&Fence> {
+        let (mut lo, mut hi) = (0usize, self.fences.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.fence_key(mid) < key { lo = mid + 1; } else { hi = mid; }
+        }
+        self.fences.get(lo)
+    }
+}
+
+/// Positional read helper — opens the file PER CALL so cached readers hold no
+/// long-lived fd (a TB-scale store has 1000+ SSTs; one fd each would exhaust
+/// default ulimits). Open+read costs ~µs against the block I/O it fronts, and
+/// warm lookups are served by the BlockCache without reaching here.
+fn pread(path: &std::path::Path, off: u64, len: usize) -> Result<Vec<u8>, String> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = fs::File::open(path).map_err(|e| format!("pread open {}: {}", path.display(), e))?;
+    f.seek(SeekFrom::Start(off)).map_err(|e| format!("pread seek {}: {}", path.display(), e))?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf)
+        .map_err(|e| format!("pread {} B at {} from {}: {}", len, off, path.display(), e))?;
+    Ok(buf)
+}
+
+/// Build the sparse fence index with ONE sequential pass over the index
+/// region (a few MB read once per open reader; data blocks are not touched).
+fn build_sst_index(path: &std::path::Path, payload_off: u64, payload_len: usize) -> Result<SstIndex, String> {
+    use std::io::{Seek, SeekFrom};
+    if payload_len < block::FOOTER_LEN {
+        return Err(format!("body too short for footer: {}", payload_len));
+    }
+    let footer = pread(path, payload_off + payload_len as u64 - block::FOOTER_LEN as u64, block::FOOTER_LEN)?;
+    let index_off = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+    let index_len = u32::from_le_bytes(footer[8..12].try_into().unwrap());
+    let magic = u32::from_le_bytes(footer[12..16].try_into().unwrap());
+    if magic != block::BLK_MAGIC {
+        return Err(format!("bad block-SST footer magic 0x{magic:08x}"));
+    }
+    if index_off + index_len as u64 > (payload_len - block::FOOTER_LEN) as u64 {
+        return Err("index range overruns into footer".into());
+    }
+    if index_len < 4 {
+        return Err("index too short".into());
+    }
+    let mut f = fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
+    f.seek(SeekFrom::Start(payload_off + index_off)).map_err(|e| format!("seek {}: {}", path.display(), e))?;
+    let mut rd = std::io::BufReader::with_capacity(256 * 1024, f);
+    let mut b4 = [0u8; 4];
+    rd.read_exact(&mut b4).map_err(|e| format!("read index count: {}", e))?;
+    let n = u32::from_le_bytes(b4);
+    let mut fences: Vec<Fence> = Vec::with_capacity((n as usize + INDEX_FENCE_GROUP - 1) / INDEX_FENCE_GROUP);
+    let mut fence_keys: Vec<u8> = Vec::new();
+    let mut key_scratch: Vec<u8> = Vec::new();
+    let mut pos: u32 = 4; // byte cursor within the index region
+    let mut group_start: u32 = 4;
+    let mut skip16 = [0u8; 16];
+    for i in 0..n {
+        rd.read_exact(&mut b4).map_err(|_| "index truncated at key_len".to_string())?;
+        let klen = u32::from_le_bytes(b4);
+        if klen > index_len.saturating_sub(pos) {
+            return Err("index entry key_len overruns index".into());
+        }
+        key_scratch.resize(klen as usize, 0);
+        rd.read_exact(&mut key_scratch).map_err(|_| "index truncated at key".to_string())?;
+        rd.read_exact(&mut skip16).map_err(|_| "index truncated at handle".to_string())?;
+        pos = pos
+            .checked_add(4 + klen + 16)
+            .ok_or_else(|| "index cursor overflow".to_string())?;
+        if pos > index_len {
+            return Err("index entries overrun declared index_len".into());
+        }
+        if (i + 1) % INDEX_FENCE_GROUP as u32 == 0 || i + 1 == n {
+            fences.push(Fence {
+                key_off: fence_keys.len() as u32,
+                key_len: klen,
+                start: group_start,
+                end: pos,
+            });
+            fence_keys.extend_from_slice(&key_scratch);
+            group_start = pos;
+        }
+    }
+    Ok(SstIndex { index_off, fence_keys, fences })
+}
+
+/// Scan one raw index slice (a fence group's entries) for the first block
+/// whose `last_key >= key`. Returns (body-relative offset, compressed len,
+/// uncompressed len). Malformed slices yield None (lookup miss, no panic).
+fn scan_index_slice(slice: &[u8], key: &[u8]) -> Option<(u64, u32, u32)> {
+    let mut pos = 0usize;
+    while pos + 4 <= slice.len() {
+        let klen = u32::from_le_bytes(slice[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + klen + 16 > slice.len() {
+            return None;
+        }
+        let last_key = &slice[pos..pos + klen];
+        pos += klen;
+        let off = u64::from_le_bytes(slice[pos..pos + 8].try_into().unwrap());
+        let clen = u32::from_le_bytes(slice[pos + 8..pos + 12].try_into().unwrap());
+        let ulen = u32::from_le_bytes(slice[pos + 12..pos + 16].try_into().unwrap());
+        pos += 16;
+        if last_key >= key {
+            return Some((off, clen, ulen));
+        }
+    }
+    None
+}
+
+enum StreamInner {
+    /// v2/v3: walk the index region and data blocks with two buffered readers.
+    Blocks {
+        path: PathBuf,
+        index_rd: std::io::Take<std::io::BufReader<fs::File>>,
+        entries_left: u32,
+        block_rd: std::io::BufReader<fs::File>,
+        /// Absolute file offset `block_rd` is currently positioned at.
+        block_pos: u64,
+        payload_off: u64,
+        /// Decoded pairs of the current block, drained in order.
+        cur: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
+    },
+    /// v1/legacy: pre-decoded (small, pre-block-format files).
+    Whole(std::vec::IntoIter<(Vec<u8>, Vec<u8>)>),
+}
+
+/// Streaming SST scan (see [`SstReader::stream`]). Peak RAM: one compressed +
+/// one decompressed block + two read buffers, regardless of SST size.
+pub struct SstStream {
+    inner: StreamInner,
+    yielded: u64,
+}
+
+impl SstStream {
+    /// Next (key, value) in file (= key-sorted) order. `Ok(None)` = clean end
+    /// of file; `Err` = parse/IO failure (compaction aborts on these).
+    pub fn next_pair(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+        match &mut self.inner {
+            StreamInner::Whole(it) => {
+                let n = it.next();
+                if n.is_some() { self.yielded += 1; }
+                Ok(n)
+            }
+            StreamInner::Blocks { path, index_rd, entries_left, block_rd, block_pos, payload_off, cur } => {
+                loop {
+                    if let Some(kv) = cur.next() {
+                        self.yielded += 1;
+                        return Ok(Some(kv));
+                    }
+                    if *entries_left == 0 {
+                        return Ok(None);
+                    }
+                    // Next index entry → next data block.
+                    let mut b4 = [0u8; 4];
+                    index_rd.read_exact(&mut b4).map_err(|e| format!("stream index key_len {}: {}", path.display(), e))?;
+                    let klen = u32::from_le_bytes(b4) as u64;
+                    if klen > index_rd.limit() {
+                        return Err(format!("stream index key_len {} overruns index of {}", klen, path.display()));
+                    }
+                    // Skip the last_key — the stream doesn't need it.
+                    let mut skip = vec![0u8; klen as usize];
+                    index_rd.read_exact(&mut skip).map_err(|e| format!("stream index key skip {}: {}", path.display(), e))?;
+                    let mut b16 = [0u8; 16];
+                    index_rd.read_exact(&mut b16).map_err(|e| format!("stream index handle {}: {}", path.display(), e))?;
+                    let off = u64::from_le_bytes(b16[0..8].try_into().unwrap());
+                    let clen = u32::from_le_bytes(b16[8..12].try_into().unwrap());
+                    let ulen = u32::from_le_bytes(b16[12..16].try_into().unwrap());
+                    *entries_left -= 1;
+                    // Blocks are laid out in index order, so this is a pure
+                    // sequential read; seek only if the file disagrees.
+                    let abs = *payload_off + off;
+                    if abs != *block_pos {
+                        use std::io::{Seek, SeekFrom};
+                        block_rd.seek(SeekFrom::Start(abs)).map_err(|e| format!("stream block seek {}: {}", path.display(), e))?;
+                    }
+                    let mut comp = vec![0u8; clen as usize];
+                    block_rd.read_exact(&mut comp).map_err(|e| format!("stream block read {}: {}", path.display(), e))?;
+                    *block_pos = abs + clen as u64;
+                    let d = lz4::block::decompress(&comp, None)
+                        .map_err(|e| format!("stream block decompress at {} in {}: {}", off, path.display(), e))?;
+                    if d.len() != ulen as usize {
+                        return Err(format!("stream block size mismatch at {} in {}: expected {}, got {}",
+                            off, path.display(), ulen, d.len()));
+                    }
+                    // Decode the block's entries.
+                    let mut pairs = Vec::new();
+                    let mut pos = 0usize;
+                    while pos + 8 <= d.len() {
+                        let kl = u32::from_le_bytes(d[pos..pos + 4].try_into().unwrap()) as usize;
+                        let vl = u32::from_le_bytes(d[pos + 4..pos + 8].try_into().unwrap()) as usize;
+                        pos += 8;
+                        if pos + kl + vl > d.len() {
+                            return Err(format!("malformed block payload at {} in {}", off, path.display()));
+                        }
+                        pairs.push((d[pos..pos + kl].to_vec(), d[pos + kl..pos + kl + vl].to_vec()));
+                        pos += kl + vl;
+                    }
+                    *cur = pairs.into_iter();
+                }
+            }
+        }
+    }
+
+    /// Total pairs yielded so far — compared against the header `key_count`
+    /// by the compaction data-loss guard once the stream is exhausted.
+    pub fn yielded(&self) -> u64 {
+        self.yielded
+    }
+}
+
+/// v0.37 (task #10): streaming SST writer for compaction outputs. Writes the
+/// EXACT [`encode_sst`] on-disk framing, but incrementally: the header region
+/// (whose size is known upfront — bloom bit-arrays are sized at construction
+/// and never grow) is reserved with a seek, data blocks stream out as they
+/// fill, and `finish()` writes index + footer, back-patches the header, and
+/// fsyncs. Peak RAM: one 4 KiB block + the (flat, ~40 B/block) index bytes —
+/// NOT the ~2× body that `encode_sst` + a materialized merge map cost.
+///
+/// Output lands at `<final>.sst.tmp`; the caller renames after ALL outputs of
+/// a merge pass finish cleanly, so a mid-merge failure leaves inputs intact.
+struct FileSstWriter {
+    f: fs::File,
+    tmp_path: PathBuf,
+    final_path: PathBuf,
+    bloom: BloomFilter,
+    cur_block: Vec<u8>,
+    last_key: Vec<u8>,
+    /// Flat index-entry bytes (count prefix added at finish).
+    index: Vec<u8>,
+    n_blocks: u32,
+    /// Compressed data-block bytes written so far (== body-relative offset of
+    /// the next block).
+    data_pos: u64,
+    key_count: u64,
+}
+
+impl FileSstWriter {
+    fn create(final_path: PathBuf, bloom_capacity: usize) -> Result<Self, String> {
+        use std::io::{Seek, SeekFrom};
+        let bloom = BloomFilter::new(bloom_capacity.max(16), 0.01);
+        let bloom_bytes = bloom.bits.len() * 8;
+        let tmp_path = final_path.with_extension("sst.tmp");
+        let mut f = fs::File::create(&tmp_path).map_err(|e| format!("create {}: {}", tmp_path.display(), e))?;
+        // Reserve the header (magic..bloom..body_len); body starts right after.
+        f.seek(SeekFrom::Start((22 + bloom_bytes + 8) as u64))
+            .map_err(|e| format!("seek past header {}: {}", tmp_path.display(), e))?;
+        Ok(FileSstWriter {
+            f,
+            tmp_path,
+            final_path,
+            bloom,
+            cur_block: Vec::with_capacity(block::TARGET_BLOCK_SIZE * 2),
+            last_key: Vec::new(),
+            index: Vec::new(),
+            n_blocks: 0,
+            data_pos: 0,
+            key_count: 0,
+        })
+    }
+
+    /// Keys MUST arrive in ascending order (the merge guarantees it).
+    fn add(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        self.bloom.insert(key);
+        self.key_count += 1;
+        self.cur_block.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        self.cur_block.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        self.cur_block.extend_from_slice(key);
+        self.cur_block.extend_from_slice(value);
+        self.last_key.clear();
+        self.last_key.extend_from_slice(key);
+        if self.cur_block.len() >= block::TARGET_BLOCK_SIZE {
+            self.flush_block()?;
+        }
+        Ok(())
+    }
+
+    fn flush_block(&mut self) -> Result<(), String> {
+        if self.cur_block.is_empty() {
+            return Ok(());
+        }
+        // Unlike SstBuilder's `.unwrap_or_else(clone)` fallback (which would
+        // store bytes the reader can't decompress), a compression failure here
+        // ABORTS the merge — inputs are kept, nothing is lost.
+        let compressed = lz4::block::compress(
+            &self.cur_block,
+            Some(lz4::block::CompressionMode::FAST(1)),
+            true,
+        ).map_err(|e| format!("compact block compress: {}", e))?;
+        self.f.write_all(&compressed).map_err(|e| format!("compact block write {}: {}", self.tmp_path.display(), e))?;
+        self.index.extend_from_slice(&(self.last_key.len() as u32).to_le_bytes());
+        self.index.extend_from_slice(&self.last_key);
+        self.index.extend_from_slice(&self.data_pos.to_le_bytes());
+        self.index.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        self.index.extend_from_slice(&(self.cur_block.len() as u32).to_le_bytes());
+        self.n_blocks += 1;
+        self.data_pos += compressed.len() as u64;
+        self.cur_block.clear();
+        Ok(())
+    }
+
+    /// Approximate body bytes so far — the rolling-output cap check.
+    fn body_bytes(&self) -> u64 {
+        self.data_pos + self.cur_block.len() as u64
+    }
+
+    /// Write index + footer, back-patch the header, fsync. Returns
+    /// (tmp_path, final_path) for the caller's rename phase.
+    fn finish(mut self) -> Result<(PathBuf, PathBuf), String> {
+        use std::io::{Seek, SeekFrom};
+        self.flush_block()?;
+        let index_offset = self.data_pos;
+        let index_len = (4 + self.index.len()) as u32;
+        self.f.write_all(&self.n_blocks.to_le_bytes()).map_err(|e| format!("compact index count: {}", e))?;
+        self.f.write_all(&self.index).map_err(|e| format!("compact index write: {}", e))?;
+        self.f.write_all(&index_offset.to_le_bytes()).map_err(|e| format!("compact footer: {}", e))?;
+        self.f.write_all(&index_len.to_le_bytes()).map_err(|e| format!("compact footer: {}", e))?;
+        self.f.write_all(&block::BLK_MAGIC.to_le_bytes()).map_err(|e| format!("compact footer: {}", e))?;
+        // Body = data blocks + index (incl. its 4-byte count prefix) + 16-byte
+        // footer — the exact bytes a reader finds between header and EOF.
+        let body_len = self.data_pos + index_len as u64 + block::FOOTER_LEN as u64;
+        let bloom_bytes: Vec<u8> = self.bloom.bits.iter().flat_map(|w| w.to_le_bytes()).collect();
+        self.f.seek(SeekFrom::Start(0)).map_err(|e| format!("compact header seek: {}", e))?;
+        self.f.write_all(&SST_MAGIC).map_err(|e| format!("compact header: {}", e))?;
+        self.f.write_all(&[SST_VERSION, 0u8]).map_err(|e| format!("compact header: {}", e))?;
+        self.f.write_all(&self.key_count.to_le_bytes()).map_err(|e| format!("compact header: {}", e))?;
+        self.f.write_all(&(self.bloom.num_hashes as u32).to_le_bytes()).map_err(|e| format!("compact header: {}", e))?;
+        self.f.write_all(&(bloom_bytes.len() as u32).to_le_bytes()).map_err(|e| format!("compact header: {}", e))?;
+        self.f.write_all(&bloom_bytes).map_err(|e| format!("compact header bloom: {}", e))?;
+        self.f.write_all(&body_len.to_le_bytes()).map_err(|e| format!("compact header body_len: {}", e))?;
+        self.f.sync_all().map_err(|e| format!("compact sync {}: {}", self.tmp_path.display(), e))?;
+        Ok((self.tmp_path, self.final_path))
+    }
+
+    /// Drop the partial output (merge aborted).
+    fn abort(self) {
+        let path = self.tmp_path.clone();
+        drop(self);
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -1821,113 +2388,247 @@ impl Database {
                 continue;
             }
 
-            // COMPACTION RAM CAP (chronos-v035 finding #2): the merge below
-            // materializes ALL input pairs in a BTreeMap — a multi-10GB merge
-            // OOM-killed the 2TB soak at 58.8GB RSS the moment the u64 fix made
-            // big inputs actually readable. Until the streaming k-way merge
-            // lands, refuse merges whose input bytes exceed the cap: the level
-            // keeps its SSTs (correct, higher read amplification) instead of
-            // taking down the process. FLUX_DB_COMPACT_MAX_BYTES overrides;
-            // 0 disables the cap.
+            // v0.37 (task #10): STREAMING K-WAY MERGE. Inputs are key-sorted
+            // SSTs, so a heap over per-SST streaming cursors merges them in
+            // O(inputs × block) RAM — the old BTreeMap materialization
+            // OOM-killed the 2 TB soak at 58.8 GB RSS, then hid behind a
+            // hard 8 GiB skip-cap. The cap is now an OPT-IN escape hatch:
+            // FLUX_DB_COMPACT_MAX_BYTES > 0 skips oversized merges; default
+            // is uncapped because the merge no longer scales RAM with input.
             let compact_cap: u64 = std::env::var("FLUX_DB_COMPACT_MAX_BYTES").ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(8 * 1024 * 1024 * 1024);
+                .unwrap_or(0);
             let input_bytes: u64 = at_level.iter()
                 .filter_map(|h| fs::metadata(&h.path).ok().map(|m| m.len()))
                 .sum();
             if compact_cap > 0 && input_bytes > compact_cap {
-                eprintln!("[flux-db] compact SKIP at L{}: {} input bytes > cap {} (streaming merge pending)",
+                eprintln!("[flux-db] compact SKIP at L{}: {} input bytes > FLUX_DB_COMPACT_MAX_BYTES {}",
                     current_level, input_bytes, compact_cap);
                 break;
             }
-            // Merge input. Oldest-first so newer entries win on conflict.
-            let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
             at_level.sort_by_key(|h| h.sequence);
-            for h in &at_level {
-                let table = SstReader::open(&h.path)?;
-                let expect = table.key_count;
-                let vers = table.version;
-                let pairs = table.into_pairs();
-                // DATA-LOSS GUARD (chronos-v035 finding): a body-parse failure used
-                // to yield an empty vec here, so compaction merged "nothing" and
-                // then DELETED the inputs — physically destroying ~1 TB in the 2 TB
-                // soak. For versioned SSTs the header key_count is authoritative:
-                // any mismatch means the body did not fully parse — abort the whole
-                // pass and keep every input on disk.
-                if vers >= 2 && pairs.len() as u64 != expect {
-                    return Err(format!(
-                        "compact ABORT (data-loss guard): {:?} parsed {} of {} entries — inputs kept",
-                        h.path, pairs.len(), expect));
-                }
-                for (k, v) in pairs {
-                    if v.is_empty() {
-                        merged.remove(&k);
-                    } else {
-                        merged.insert(k, v);
-                    }
-                }
-            }
-            if current_level == 0 {
-                // Also fold the memtable on the L0 pass — same semantics as
-                // pre-v0.15 compact() with no memtable flush required.
+
+            // Memtable snapshot rides along on the L0 pass as the newest
+            // source (rank above every SST — same shadowing as before).
+            let (mem_snapshot, mem_snap_seq) = if current_level == 0 {
                 let inner = self.inner.read();
-                for (k, v) in &inner.memtable {
-                    if v.is_empty() {
-                        merged.remove(k);
-                    } else {
-                        merged.insert(k.clone(), v.clone());
-                    }
-                }
-            }
+                (Some(inner.memtable.clone()), inner.sequence)
+            } else {
+                (None, 0)
+            };
 
-            // Write merged output as a single file at current_level + 1.
-            let seq = self.inner.read().sequence + 1;
-            {
-                let mut inner = self.inner.write();
-                inner.sequence += 1;
-            }
             let out_level = current_level + 1;
-            let out_path = self.path.join(sst_name(out_level, seq));
-
-            let mut bloom = BloomFilter::new(merged.len().max(16), 0.01);
-            let mut builder = block::SstBuilder::new();
-            for (k, v) in &merged {
-                builder.add(k, v);
-                bloom.insert(k);
+            let mut outputs: Vec<(PathBuf, PathBuf)> = Vec::new(); // (tmp, final)
+            let merge_res = self.merge_level_streaming(&at_level, mem_snapshot, input_bytes, out_level, &mut outputs);
+            if let Err(e) = merge_res {
+                // Data-loss guard semantics: ANY parse mismatch or IO failure
+                // aborts the whole pass — partial outputs are dropped, every
+                // input stays on disk.
+                for (tmp, _) in &outputs {
+                    let _ = fs::remove_file(tmp);
+                }
+                return Err(e);
             }
-            let block_body = builder.finish();
-            // v3 (LANE 1): shared framing — byte-identical to flush() and the SST-ingest path.
-            let out = encode_sst(merged.len() as u64, &bloom, &block_body);
 
-            let tmp_path = out_path.with_extension("sst.tmp");
-            {
-                let mut f = fs::File::create(&tmp_path)
-                    .map_err(|e| format!("create compacted: {}", e))?;
-                f.write_all(&out).map_err(|e| format!("compact w: {}", e))?;
-                f.flush().map_err(|e| format!("compact flush: {}", e))?;
+            // All outputs are written + fsynced — atomically publish them.
+            for (tmp, fin) in &outputs {
+                fs::rename(tmp, fin).map_err(|e| format!("compact rename {}: {}", fin.display(), e))?;
             }
-            fs::rename(&tmp_path, &out_path)
-                .map_err(|e| format!("compact rename: {}", e))?;
-            // v3 (LANE-C): the merged output now exists alongside the inputs (both still valid —
+            // v3 (LANE-C): the merged outputs now exist alongside the inputs (both still valid —
             // newer seq shadows older). Invalidate so a reader re-lists BOTH before we remove the
-            // inputs; a second invalidate follows the removals so the next read sees output-only.
+            // inputs; a second invalidate follows the removals so the next read sees outputs-only.
             self.invalidate_sst_paths();
             for h in &at_level {
                 // Drop cached blocks for the file we're about to remove —
                 // otherwise they sit as zombies until evicted by capacity.
                 self.block_cache.invalidate_sst(&h.path);
-                // v0.35: drop the cached reader too (frees its lazily-loaded body;
-                // the path will never be listed again).
+                // v0.35: drop the cached reader too; the path will never be
+                // listed again.
                 self.sst_readers.write().remove(&h.path);
                 let _ = fs::remove_file(&h.path);
             }
-            // v3 (LANE-C): inputs removed — re-list so the next read sees the merged output only.
+            // v3 (LANE-C): inputs removed — re-list so the next read sees the merged outputs only.
             self.invalidate_sst_paths();
             if current_level == 0 {
-                // Memtable's content is now durable on disk; clear it.
-                self.inner.write().memtable.clear();
+                // Memtable content is durable in the outputs. Clear it ONLY if
+                // no write raced the merge — the old blind `clear()` could drop
+                // entries that were put after the snapshot (they lived on in
+                // the WAL but vanished from live reads, and a later truncation
+                // made the loss permanent). If writes raced, keep the memtable
+                // intact: already-merged entries are shadow-equal duplicates,
+                // nothing is lost, and the next flush folds the rest.
+                let mut inner = self.inner.write();
+                if inner.sequence == mem_snap_seq {
+                    inner.memtable.clear();
+                }
             }
             // Keep iterating — out_level may now exceed its own threshold.
+        }
+        Ok(())
+    }
+
+    /// v0.37 (task #10): heap-based k-way merge of one level's SSTs (plus an
+    /// optional memtable snapshot) into rolling ~1 GiB outputs at `out_level`.
+    ///
+    ///   * Newer source wins on duplicate keys (sources are ranked oldest →
+    ///     newest; the memtable outranks every SST).
+    ///   * Tombstones (empty values) drop the pair from the output.
+    ///   * DATA-LOSS GUARD: for v2+ inputs the header `key_count` is
+    ///     authoritative — when a stream ends, its yielded count must match,
+    ///     and any block/index parse error is fatal. The caller keeps all
+    ///     inputs and removes partial outputs on ANY `Err`.
+    ///   * Outputs land as `flux_L{lvl}_{seq}.sst.tmp` (fresh sequence each,
+    ///     fsynced in `finish`) and are pushed onto `outputs`; the caller
+    ///     renames them into place only after the whole pass succeeds.
+    ///
+    /// Peak RAM: one block + read buffers per input stream (~0.5 MB each),
+    /// the current output block + its flat index, and the heap (one head
+    /// entry per source) — independent of input bytes.
+    fn merge_level_streaming(
+        &self,
+        at_level: &[&SstHandle],
+        mem_snapshot: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
+        input_bytes: u64,
+        out_level: u8,
+        outputs: &mut Vec<(PathBuf, PathBuf)>,
+    ) -> Result<(), String> {
+        use std::cmp::Ordering;
+
+        enum Source {
+            Sst { stream: SstStream, expect: u64, vers: u8, path: PathBuf },
+            Mem(std::collections::btree_map::IntoIter<Vec<u8>, Vec<u8>>),
+        }
+        impl Source {
+            fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+                match self {
+                    Source::Mem(it) => Ok(it.next()),
+                    Source::Sst { stream, expect, vers, path } => {
+                        let n = stream.next_pair()?;
+                        if n.is_none() && *vers >= 2 && stream.yielded() != *expect {
+                            return Err(format!(
+                                "compact ABORT (data-loss guard): {:?} streamed {} of {} entries — inputs kept",
+                                path, stream.yielded(), expect));
+                        }
+                        Ok(n)
+                    }
+                }
+            }
+        }
+
+        struct HeapEntry {
+            key: Vec<u8>,
+            value: Vec<u8>,
+            rank: usize,
+        }
+        // BinaryHeap is a max-heap → invert key order (smallest key pops
+        // first); among equal keys the HIGHEST rank (newest source) pops first.
+        impl Ord for HeapEntry {
+            fn cmp(&self, o: &Self) -> Ordering {
+                o.key.cmp(&self.key).then(self.rank.cmp(&o.rank))
+            }
+        }
+        impl PartialOrd for HeapEntry {
+            fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
+        }
+        impl PartialEq for HeapEntry {
+            fn eq(&self, o: &Self) -> bool { self.key == o.key && self.rank == o.rank }
+        }
+        impl Eq for HeapEntry {}
+
+        // Open sources oldest-first: index in this vec == rank.
+        let mut sources: Vec<Source> = Vec::with_capacity(at_level.len() + 1);
+        let mut total_keys: u64 = 0;
+        for h in at_level {
+            let table = SstReader::open(&h.path)?;
+            total_keys += table.key_count;
+            sources.push(Source::Sst {
+                expect: table.key_count,
+                vers: table.version,
+                path: h.path.clone(),
+                stream: table.stream()?,
+            });
+        }
+        if let Some(mem) = mem_snapshot {
+            total_keys += mem.len() as u64;
+            sources.push(Source::Mem(mem.into_iter()));
+        }
+
+        // Rolling output cap (~1 GiB) + bloom sizing per output: estimate the
+        // keys landing in one output by scaling total input keys to the cap,
+        // with 25% headroom (an undersized bloom only raises the FP rate).
+        let out_cap: u64 = std::env::var("FLUX_DB_COMPACT_OUTPUT_BYTES").ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or_else(|| self.inner.read().compact_output_bytes);
+        let bloom_capacity: usize = if input_bytes <= out_cap {
+            total_keys.max(16) as usize
+        } else {
+            (((total_keys as u128 * out_cap as u128 / input_bytes.max(1) as u128) as u64)
+                .saturating_mul(5) / 4).max(16) as usize
+        };
+
+        let mut heap: std::collections::BinaryHeap<HeapEntry> = std::collections::BinaryHeap::new();
+        for (rank, src) in sources.iter_mut().enumerate() {
+            if let Some((key, value)) = src.next()? {
+                heap.push(HeapEntry { key, value, rank });
+            }
+        }
+
+        let mut writer: Option<FileSstWriter> = None;
+        let fail = |w: Option<FileSstWriter>, e: String| -> Result<(), String> {
+            if let Some(w) = w { w.abort(); }
+            Err(e)
+        };
+
+        while let Some(winner) = heap.pop() {
+            // Advance the winner's source.
+            match sources[winner.rank].next() {
+                Ok(Some((key, value))) => heap.push(HeapEntry { key, value, rank: winner.rank }),
+                Ok(None) => {}
+                Err(e) => return fail(writer.take(), e),
+            }
+            // Drain + discard older duplicates of this key.
+            while heap.peek().map(|h| h.key == winner.key).unwrap_or(false) {
+                let dup = heap.pop().unwrap();
+                match sources[dup.rank].next() {
+                    Ok(Some((key, value))) => heap.push(HeapEntry { key, value, rank: dup.rank }),
+                    Ok(None) => {}
+                    Err(e) => return fail(writer.take(), e),
+                }
+            }
+            // Tombstone: drop the pair entirely.
+            if winner.value.is_empty() {
+                continue;
+            }
+            if writer.is_none() {
+                let seq = {
+                    let mut inner = self.inner.write();
+                    inner.sequence += 1;
+                    inner.sequence
+                };
+                let final_path = self.path.join(sst_name(out_level, seq));
+                match FileSstWriter::create(final_path, bloom_capacity) {
+                    Ok(w) => writer = Some(w),
+                    Err(e) => return fail(None, e),
+                }
+            }
+            let w = writer.as_mut().unwrap();
+            if let Err(e) = w.add(&winner.key, &winner.value) {
+                return fail(writer.take(), e);
+            }
+            if w.body_bytes() >= out_cap {
+                let full = writer.take().unwrap();
+                match full.finish() {
+                    Ok(pair) => outputs.push(pair),
+                    Err(e) => return fail(None, e),
+                }
+            }
+        }
+        if let Some(w) = writer.take() {
+            match w.finish() {
+                Ok(pair) => outputs.push(pair),
+                Err(e) => return fail(None, e),
+            }
         }
         Ok(())
     }
@@ -3363,6 +4064,178 @@ mod tests {
             "streaming replay of a {} MiB WAL grew RSS by {} MiB (budget 64 MiB) — slurp regressed?",
             file_len / 1048576, peak_delta_kb / 1024
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── v0.37 (task #10): file-backed reads + streaming k-way merge ──
+
+    /// Deterministic incompressible value: blake3 keystream over (key, round).
+    /// Incompressibility matters — lz4 collapses repetitive test values so a
+    /// tiny rolling-output cap would never trip.
+    fn v37_keystream(key: &str, round: u32, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let seed = blake3::hash(format!("{key}|{round}").as_bytes());
+        let mut ctr = 0u64;
+        while out.len() < len {
+            let mut h = blake3::Hasher::new();
+            h.update(seed.as_bytes());
+            h.update(&ctr.to_le_bytes());
+            out.extend_from_slice(h.finalize().as_bytes());
+            ctr += 1;
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// >64 data blocks forces multiple fence groups (INDEX_FENCE_GROUP = 64),
+    /// so lookups cross the sparse-index → slice-read → block-read path for
+    /// every group, through the real get() (bloom + block cache).
+    #[test]
+    fn test_v37_fence_index_multiblock_lookup() {
+        let tmp = std::env::temp_dir().join("flux-db-test-v37-fence");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        // 4 KiB values → every add crosses TARGET_BLOCK_SIZE → one block per
+        // entry → 200 blocks (4 fence groups).
+        let val = |i: u32| vec![(i % 251) as u8; 4096];
+        for i in 0..200u32 {
+            db.put(format!("key{:05}", i).as_bytes(), &val(i)).unwrap();
+        }
+        db.flush().unwrap();
+        assert_eq!(db.len(), 0, "memtable flushed");
+        for i in 0..200u32 {
+            let got = db.get(format!("key{:05}", i).as_bytes()).unwrap();
+            assert_eq!(got, Some(val(i)), "key{:05} must read back through the fence index", i);
+        }
+        assert_eq!(db.get(b"key99999").unwrap(), None);
+        assert_eq!(db.get(b"aaa").unwrap(), None);
+        // Cache must have warmed (index slices + data blocks).
+        let (hits, misses, bytes) = db.block_cache_stats();
+        assert!(bytes > 0, "block cache should hold blocks (hits={hits} misses={misses})");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Rolling outputs: a tiny output cap must split one merge into MULTIPLE
+    /// key-disjoint L1 SSTs; every live key must survive, the newest write
+    /// must win on duplicate keys, and tombstones must drop pairs.
+    #[test]
+    fn test_v37_streaming_compact_rolls_outputs() {
+        let tmp = std::env::temp_dir().join("flux-db-test-v37-roll");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap().with_compact_output_bytes(16 * 1024);
+        // 4 L0 SSTs (flush count stays ≤ AUTO_COMPACT_THRESHOLD — no auto-
+        // compaction before the deletes land). Even rounds write keys i*5,
+        // odd rounds i*5+1, so rounds 0/2 and 1/3 overlap → duplicate-key
+        // resolution is exercised: round 2 must beat round 0, 3 must beat 1.
+        for round in 0..4u32 {
+            for i in 0..40u32 {
+                let k = format!("k{:04}", i * 5 + (round % 2));
+                db.put(k.as_bytes(), &v37_keystream(&k, round, 1024)).unwrap();
+            }
+            db.flush().unwrap();
+        }
+        // Tombstones ride the memtable into the L0 merge pass.
+        db.delete(b"k0005").unwrap();
+        db.delete(b"k0100").unwrap();
+        db.compact().unwrap();
+
+        let handles = list_ssts_leveled(&tmp).unwrap();
+        let l1plus: Vec<_> = handles.iter().filter(|h| h.level >= 1).collect();
+        assert!(l1plus.len() >= 2,
+            "16 KiB cap over ~160 KiB of incompressible input must roll multiple outputs, got {}",
+            l1plus.len());
+        for h in &l1plus {
+            let sz = fs::metadata(&h.path).unwrap().len();
+            assert!(sz <= 64 * 1024, "output {} is {} B — cap plus one block max", h.path.display(), sz);
+        }
+        assert_eq!(db.get(b"k0005").unwrap(), None, "tombstone dropped the pair");
+        assert_eq!(db.get(b"k0100").unwrap(), None);
+        // Newest-wins across the merged outputs.
+        assert_eq!(db.get(b"k0000").unwrap(), Some(v37_keystream("k0000", 2, 1024)),
+            "round 2 must shadow round 0");
+        assert_eq!(db.get(b"k0021").unwrap(), Some(v37_keystream("k0021", 3, 1024)),
+            "round 3 must shadow round 1");
+        // 80 distinct keys - 2 tombstoned.
+        assert_eq!(db.iter().count(), 78, "merged view retains exactly the live key space");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// DATA-LOSS GUARD (streaming edition): an input whose stream yields a
+    /// different entry count than its header key_count must ABORT the merge,
+    /// keep every input file on disk, and leave no partial .sst.tmp behind.
+    #[test]
+    fn test_v37_streaming_guard_aborts_and_keeps_inputs() {
+        let tmp = std::env::temp_dir().join("flux-db-test-v37-guard");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        for round in 0..4u32 {
+            for i in 0..20u32 {
+                db.put(format!("g{:03}-{}", i, round).as_bytes(), &[round as u8; 512]).unwrap();
+            }
+            db.flush().unwrap();
+        }
+        drop(db);
+        // Doctor one input's header key_count (bytes 6..14) — the stream
+        // parses fine but yields a different count → the guard must trip.
+        let victim = list_ssts_leveled(&tmp).unwrap()
+            .into_iter().find(|h| h.level == 0).expect("an L0 SST").path;
+        let mut raw = fs::read(&victim).unwrap();
+        raw[6..14].copy_from_slice(&999_999u64.to_le_bytes());
+        fs::write(&victim, &raw).unwrap();
+
+        let before: Vec<PathBuf> = list_ssts(&tmp).unwrap();
+        let db = Database::open(&tmp).unwrap();
+        // A sentinel write makes the L0 pass run (4 files ≤ threshold alone).
+        db.put(b"sentinel", b"s").unwrap();
+        let err = db.compact().expect_err("guard must abort the merge");
+        assert!(err.contains("data-loss guard"), "unexpected error: {err}");
+        let after: Vec<PathBuf> = list_ssts(&tmp).unwrap();
+        assert_eq!(before, after, "every input must remain on disk after an aborted merge");
+        let tmps = fs::read_dir(&tmp).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".sst.tmp"))
+            .count();
+        assert_eq!(tmps, 0, "aborted merge must clean its partial outputs");
+        // The sentinel survived the abort (memtable untouched on Err).
+        assert_eq!(db.get(b"sentinel").unwrap(), Some(b"s".to_vec()));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Cross-restart SST name collisions: `sequence` used to reset to 0 at
+    /// open while SST filenames derive from it, so a restarted deterministic
+    /// workload reproduced the same names and flush/compact RENAMED OVER the
+    /// previous epoch's SSTs (kill -9 chaos measured 3 deciles destroyed).
+    /// The sequence must now seed past every on-disk SST name.
+    #[test]
+    fn test_v37_sequence_seeds_from_ssts_across_reopen() {
+        let tmp = std::env::temp_dir().join("flux-db-test-v37-seqseed");
+        let _ = fs::remove_dir_all(&tmp);
+        {
+            let db = Database::open(&tmp).unwrap();
+            for i in 0..50u32 {
+                db.put(format!("e1-{i:03}").as_bytes(), &[1u8; 64]).unwrap();
+            }
+            db.flush().unwrap();
+        }
+        assert_eq!(list_ssts(&tmp).unwrap().len(), 1);
+        {
+            let db = Database::open(&tmp).unwrap();
+            assert!(db.sequence() > 50,
+                "sequence must seed past on-disk SST names, got {}", db.sequence());
+            // Same put-count as epoch 1 — without seeding this flush reused
+            // the exact filename and silently destroyed epoch 1's SST.
+            for i in 0..50u32 {
+                db.put(format!("e2-{i:03}").as_bytes(), &[2u8; 64]).unwrap();
+            }
+            db.flush().unwrap();
+            assert_eq!(list_ssts(&tmp).unwrap().len(), 2,
+                "epoch-2 flush must NOT rename over epoch-1's SST");
+            for i in 0..50u32 {
+                assert!(db.get(format!("e1-{i:03}").as_bytes()).unwrap().is_some(),
+                    "epoch-1 key e1-{i:03} must survive the second epoch");
+                assert!(db.get(format!("e2-{i:03}").as_bytes()).unwrap().is_some());
+            }
+        }
         let _ = fs::remove_dir_all(&tmp);
     }
 }

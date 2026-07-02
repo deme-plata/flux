@@ -54,6 +54,17 @@
 - **FIP-0002**: cache strategy. Phase 1 done (build-safe, populate-only default). Phase 2 = stable
   `--extern` identity → full-closure hits → re-enable restore by default.
 
+## Release provenance (flux-rev)
+
+Every release cut records its BLAKE3 content-address here AND in the release commit
+message. Verify any of them by re-running `flux-rev snapshot .` on the tagged tree and
+comparing — the identity is recomputable, not asserted.
+
+| Release | flux-rev identity | Chain position |
+|---|---|---|
+| v0.34.0 | `full:6f2eaff4e1536478ce99a5d2f21deaacb9d7b4ec352738be9c0277e7a431bfa3` | head (parent `d40667bf1c40658d`, genesis `c370dc321e0caa4a`) |
+| v0.29.0--v0.33.0 | pre-ledger -- tagged before the stamp-every-release rule; not retro-stamped | --- |
+
 ## Known reconciliation debts (deliberate, tracked)
 
 - `Cargo.lock` was not committed with v0.34.0 (it carries deps from in-flight flux-context WIP owned

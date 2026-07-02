@@ -1821,6 +1821,25 @@ impl Database {
                 continue;
             }
 
+            // COMPACTION RAM CAP (chronos-v035 finding #2): the merge below
+            // materializes ALL input pairs in a BTreeMap — a multi-10GB merge
+            // OOM-killed the 2TB soak at 58.8GB RSS the moment the u64 fix made
+            // big inputs actually readable. Until the streaming k-way merge
+            // lands, refuse merges whose input bytes exceed the cap: the level
+            // keeps its SSTs (correct, higher read amplification) instead of
+            // taking down the process. FLUX_DB_COMPACT_MAX_BYTES overrides;
+            // 0 disables the cap.
+            let compact_cap: u64 = std::env::var("FLUX_DB_COMPACT_MAX_BYTES").ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8 * 1024 * 1024 * 1024);
+            let input_bytes: u64 = at_level.iter()
+                .filter_map(|h| fs::metadata(&h.path).ok().map(|m| m.len()))
+                .sum();
+            if compact_cap > 0 && input_bytes > compact_cap {
+                eprintln!("[flux-db] compact SKIP at L{}: {} input bytes > cap {} (streaming merge pending)",
+                    current_level, input_bytes, compact_cap);
+                break;
+            }
             // Merge input. Oldest-first so newer entries win on conflict.
             let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
             at_level.sort_by_key(|h| h.sequence);

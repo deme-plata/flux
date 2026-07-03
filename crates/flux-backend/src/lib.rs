@@ -386,6 +386,34 @@ fn compile_mir_into_function(
                         if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, val); }
                         continue;
                     }
+                    // Whole-aggregate passthrough: `_0 = copy _2` where BOTH sides are
+                    // scalar-replaced aggregates. The generic path below resolves the rhs
+                    // to a SINGLE value (leaf 0) and the tuple fallback writes only
+                    // dst.0 — every later leaf stays undefined and Return zero-fills it
+                    // (measured: `fn pick(a,b:(i64,i64))->(i64,i64){ b }` returned (3,0),
+                    // exit 30 not 34). Copy every leaf src.(i) -> dst.(i) instead.
+                    if (op == "copy" || op == "move" || op.is_empty()) && args.len() == 1 {
+                        let a0 = args[0].as_str();
+                        if !a0.contains('.') && !a0.contains('|') {
+                            if let Some(src_idx) = parse_mir_local_idx(a0) {
+                                if tuple_vars.contains_key(&(dst_idx, 0)) && tuple_vars.contains_key(&(src_idx, 0)) {
+                                    let nfields = aggregate_fields(
+                                        &mir_type_strs.get(&dst_idx).cloned().unwrap_or_default(), structs)
+                                        .map(|f| f.len()).unwrap_or(0);
+                                    let mut i = 0usize;
+                                    while i < nfields && tuple_vars.contains_key(&(dst_idx, i)) {
+                                        let src_field = format!("_{}.{}", src_idx, i);
+                                        let val = resolve_mir_operand_to_value(&src_field, &vars, &tuple_vars, &mut bc);
+                                        if let Some(&var) = tuple_vars.get(&(dst_idx, i)) {
+                                            bc.def_var(var, val);
+                                        }
+                                        i += 1;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     let unsigned = operand_is_unsigned(args.first().map(|s| s.as_str()).unwrap_or(""), &mir_type_strs);
                     let val = compile_mir_op_to_value(op, args, &vars, &tuple_vars, unsigned, module, &mut bc);
 

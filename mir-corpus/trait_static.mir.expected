@@ -1,0 +1,37 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn <impl at trait_static.rs:5:1: 5:17>::area(_1: &Sq) -> i64 {
+    debug self => _1;
+    let mut _0: i64;
+    let mut _2: i64;
+    let mut _3: i64;
+    let mut _4: (i64, bool);
+
+    bb0: {
+        _2 = copy ((*_1).0: i64);
+        _3 = copy ((*_1).0: i64);
+        _4 = MulWithOverflow(copy _2, copy _3);
+        assert(!move (_4.1: bool), "attempt to compute `{} * {}`, which would overflow", move _2, move _3) -> [success: bb1, unwind continue];
+    }
+
+    bb1: {
+        _0 = move (_4.0: i64);
+        return;
+    }
+}
+
+fn static_call(_1: Sq) -> i64 {
+    debug x => _1;
+    let mut _0: i64;
+    let mut _2: &Sq;
+
+    bb0: {
+        _2 = &_1;
+        _0 = <Sq as Area>::area(move _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}

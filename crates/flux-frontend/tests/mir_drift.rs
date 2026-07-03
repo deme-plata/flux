@@ -109,10 +109,15 @@ fn mir_dialect_matches_pinned_baselines() {
             continue;
         }
         let mir_out = tmp.join(format!("{}.mir", base));
+        // Invoke exactly like check.sh: cwd = mir-corpus, RELATIVE source path.
+        // Impl fn names embed the source path (`<impl at trait_dyn.rs:5:1: …>`),
+        // so an absolute path here would drift against the committed baselines.
+        let src_rel = src.file_name().unwrap();
         let run = Command::new("rustc")
+            .current_dir(&corpus)
             .args(["--crate-type", "lib", "--emit=mir", "-o"])
             .arg(&mir_out)
-            .arg(&src)
+            .arg(src_rel)
             .stdin(Stdio::null())
             .output()
             .expect("spawn pinned rustc");

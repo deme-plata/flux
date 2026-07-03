@@ -359,6 +359,34 @@ pub fn canonical_wrapper_path() -> std::path::PathBuf {
     env::current_exe().expect("current fluxc executable")
 }
 
+/// Quarantine a poisoned cargo target-info probe cache before spawning cargo.
+/// A crashlooping host process (a jq / ssh-keygen status feed observed on this
+/// box) can spray text onto the stdin cargo hands its `rustc - --print` probe;
+/// cargo then caches `"success":false` in `<target>/.rustc_info.json` and REPLAYS
+/// that failure on every later build WITHOUT re-probing. The `main.rs` fd0-null
+/// guard protects only a LIVE probe, so it cannot clear a cached failure — this
+/// does. Rename any poisoned cache aside so cargo re-probes clean (the null-stdin
+/// guard then keeps the regeneration clean). Cheap (stat + small read); a no-op
+/// when the cache is healthy or absent.
+pub fn quarantine_poisoned_probe_cache() {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        if !td.is_empty() { candidates.push(std::path::Path::new(&td).join(".rustc_info.json")); }
+    }
+    candidates.push(std::path::PathBuf::from("target/.rustc_info.json"));
+    for c in candidates {
+        if let Ok(txt) = std::fs::read_to_string(&c) {
+            if txt.contains("\"success\":false") {
+                let aside = c.with_extension(format!("json.poisoned-{}", std::process::id()));
+                if std::fs::rename(&c, &aside).is_ok() {
+                    eprintln!("  \u{26a0} quarantined poisoned probe cache {} (host feed contamination) \u{2014} cargo will re-probe clean",
+                        c.display());
+                }
+            }
+        }
+    }
+}
+
 pub fn apply_wrapper_env(cmd: &mut Command) {
     cmd.env("RUSTC_WRAPPER", canonical_wrapper_path());
     cmd.env("FLUXC_WRAPPING", "1");
@@ -366,6 +394,7 @@ pub fn apply_wrapper_env(cmd: &mut Command) {
 }
 
 pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
+    quarantine_poisoned_probe_cache();
     let mut cmd = Command::new("cargo");
     cmd.arg(cargo_cmd);
 

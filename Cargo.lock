@@ -3547,7 +3547,9 @@ dependencies = [
  "flux-sigil-releases",
  "fluxc-core",
  "fluxc-mcp",
+ "libc",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

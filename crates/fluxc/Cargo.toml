@@ -14,3 +14,9 @@ fluxc-mcp = { path = "../fluxc-mcp" }
 flux-sigil-releases = { path = "../flux-sigil-releases" }
 flux-graph = { path = "../flux-graph" }
 serde_json = "1"
+# prune-report: parse workspace/crate manifests for the dep-graph walk
+toml = "0.8"
+
+# stdin-poison guard: dup2(/dev/null, 0) before build-family subcommands
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

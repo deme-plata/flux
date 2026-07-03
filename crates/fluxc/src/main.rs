@@ -1,5 +1,7 @@
 // fluxc — CLI entry point for the Flux build orchestrator
 
+mod prune;
+
 use std::env;
 
 fn main() {
@@ -34,6 +36,34 @@ fn main() {
 
     let (config, subcommand_args) = fluxc_core::parse_args(&args[1..]);
     let subcommand = subcommand_args.first().map(|s| s.as_str());
+
+    // EPSILON STDIN-POISON GUARD (v0.36): on shared boxes a concurrent
+    // status-feed `jq` can race onto an inherited stdin pipe. cargo hands that
+    // fd to its DIRECT rustc target probe (`rustc - --print=…` — cargo does
+    // NOT route probes through RUSTC_WRAPPER), and rustc parses the jq filter
+    // as Rust source → "unclosed delimiter … jq: 1 compile error" → the whole
+    // build aborts. Build-family subcommands never legitimately read stdin,
+    // so detach fd0 to /dev/null BEFORE spawning cargo; every child (cargo,
+    // its probes, rustc, the wrapper) inherits the clean fd. `mcp` (stdio
+    // JSON-RPC) is deliberately NOT in this list, and neither are `run`/
+    // `quick` — they execute the user's program, which may read stdin.
+    #[cfg(unix)]
+    {
+        if matches!(
+            subcommand,
+            Some("build") | Some("b") | Some("check") | Some("c") | Some("test") | Some("t")
+                | Some("combo") | Some("test-native")
+                | Some("clean") | Some("watch") | Some("w") | Some("dev") | Some("d")
+                | Some("self") | Some("prune-report")
+        ) {
+            use std::os::unix::io::AsRawFd;
+            if let Ok(devnull) = std::fs::File::open("/dev/null") {
+                // dup2 replaces fd0; dropping `devnull` afterwards closes only
+                // the temporary fd, never the fresh fd0.
+                unsafe { libc::dup2(devnull.as_raw_fd(), 0); }
+            }
+        }
+    }
 
     match subcommand {
         Some("build") | Some("b") => fluxc_core::detect_and_build(&config, &subcommand_args[1..]),
@@ -396,6 +426,13 @@ fn main() {
         }
         Some("release-audit") | Some("rel-audit") => fluxc_core::release_audit::print_release_audit(),
         Some("mcp") => fluxc_mcp::run_mcp_server(),
+        Some("prune-report") => {
+            // v0.36 SDE (semantic dependency elimination, report-only): walk the
+            // workspace dep graph from the default-members roots and write
+            // docs/PRUNE_REPORT.md listing every member crate the core can't reach.
+            let rc = prune::run(&subcommand_args[1..]);
+            std::process::exit(rc);
+        }
         Some("version") | Some("-V") => println!("{}", fluxc_core::version()),
         Some("api") => {
             let title = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("Flux API");

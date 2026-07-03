@@ -2548,10 +2548,13 @@ dependencies = [
 name = "flux-frontend"
 version = "0.35.0"
 dependencies = [
+ "blake3",
+ "flux-cache",
  "flux-driver",
  "proc-macro2",
  "quote",
  "serde",
+ "serde_json",
  "syn 2.0.117",
 ]
 

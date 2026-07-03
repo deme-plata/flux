@@ -83,8 +83,91 @@ impl Frontend for RustcMirFrontend {
     }
 }
 
+// ── v0.36 parse-mir IR cache (phase 3, DeepSeek adapt) ─────────────────────
+//
+// parse_mir output is a pure function of its input text, so it is cached
+// content-addressably: BLAKE3(mir_text) → JSON of Vec<MirFunction> at
+// `<flux_cache::cache_dir()>/mir-ir/<2ch>/<rest>-v<IR_VERSION>.json`.
+// The IR_VERSION suffix invalidates every entry on an intentional IR bump
+// (and serde shape drift falls back to a re-parse anyway). Transparent to
+// callers — phase3's compile path (`fluxc run`) just calls parse_mir.
+// FLUX_MIR_CACHE=0 disables; FLUX_MIR_CACHE_TRACE=1 prints HIT/MISS/STORE.
+
+static MIR_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MIR_CACHE_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MIR_CACHE_STORES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// (hits, misses, stores) for this process — proof hook for the phase-3 gate.
+pub fn mir_parse_cache_stats() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        MIR_CACHE_HITS.load(Relaxed),
+        MIR_CACHE_MISSES.load(Relaxed),
+        MIR_CACHE_STORES.load(Relaxed),
+    )
+}
+
+fn mir_ir_cache_path(key: &str) -> std::path::PathBuf {
+    flux_cache::cache_dir()
+        .join("mir-ir")
+        .join(&key[..2])
+        .join(format!("{}-v{}.json", &key[2..], crate::IR_VERSION))
+}
+
 /// Parse MIR text output from rustc --emit=mir.
+///
+/// v0.36: cached — see the block comment above. The actual parser is
+/// `parse_mir_uncached`; behavior is byte-for-byte identical on hit vs miss
+/// for every Ok result (parse errors are never cached).
 pub fn parse_mir(mir_text: &str) -> Result<Vec<MirFunction>, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if std::env::var("FLUX_MIR_CACHE").as_deref() == Ok("0") {
+        return parse_mir_uncached(mir_text);
+    }
+    let trace = std::env::var("FLUX_MIR_CACHE_TRACE").is_ok();
+    let key = blake3::hash(mir_text.as_bytes()).to_hex().to_string();
+    let path = mir_ir_cache_path(&key);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(funcs) = serde_json::from_slice::<Vec<MirFunction>>(&bytes) {
+            MIR_CACHE_HITS.fetch_add(1, Relaxed);
+            if trace {
+                eprintln!("FLUXMIR HIT key={} ({} fns, parse skipped)", &key[..16], funcs.len());
+            }
+            return Ok(funcs);
+        }
+        // Unreadable/stale-shape entry: fall through to a real parse (re-stored below).
+    }
+    MIR_CACHE_MISSES.fetch_add(1, Relaxed);
+    if trace {
+        eprintln!("FLUXMIR MISS key={}", &key[..16]);
+    }
+    let funcs = parse_mir_uncached(mir_text)?;
+    // Best-effort atomic store (tmp + rename). Any I/O failure is silent —
+    // the cache must never break a compile.
+    if let Ok(json) = serde_json::to_vec(&funcs) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &json).is_ok() {
+            if std::fs::rename(&tmp, &path).is_ok() {
+                MIR_CACHE_STORES.fetch_add(1, Relaxed);
+                flux_cache::add_external_bytes(json.len() as u64);
+                if trace {
+                    eprintln!("FLUXMIR STORE key={}", &key[..16]);
+                }
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+    Ok(funcs)
+}
+
+/// The raw rustc `--emit=mir` text parser (the single place that knows the
+/// dialect — FIP-0001). Public for benchmarks/diagnostics; production code
+/// should call `parse_mir` (cached).
+pub fn parse_mir_uncached(mir_text: &str) -> Result<Vec<MirFunction>, String> {
     let mut functions = Vec::new();
     let mut lines = mir_text.lines().peekable();
 
@@ -1032,6 +1115,28 @@ mod tests {
         assert_eq!(via_trait.len(), via_fn.len());
         assert_eq!(via_trait[0].name, "add");
         assert_eq!(via_trait[0].name, via_fn[0].name);
+    }
+
+    #[test]
+    fn parse_mir_cache_roundtrip_and_hit() {
+        // Pin an isolated cache dir if we're first; if another test already
+        // resolved it, content-addressing keeps this test correct anyway.
+        let _ = flux_cache::set_cache_dir(
+            std::env::temp_dir().join(format!("flux-frontend-test-{}", std::process::id())),
+        );
+        let mir = "fn cache_probe(_1: i64, _2: i64) -> i64 {\n    let mut _0: i64;\n    bb0: {\n        _0 = Add(_1, _2);\n        return;\n    }\n}";
+        let (h0, _, _) = mir_parse_cache_stats();
+        let a = parse_mir(mir).unwrap();
+        let b = parse_mir(mir).unwrap();
+        let (h1, _, _) = mir_parse_cache_stats();
+        assert!(h1 > h0, "second parse of identical MIR must HIT the IR cache (h0={h0} h1={h1})");
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a[0].name, "cache_probe");
+        assert_eq!(a[0].name, b[0].name);
+        assert_eq!(a[0].blocks.len(), b[0].blocks.len());
+        // And the cached result must equal a fresh uncached parse.
+        let fresh = parse_mir_uncached(mir).unwrap();
+        assert_eq!(serde_json::to_string(&fresh).unwrap(), serde_json::to_string(&b).unwrap());
     }
 
     #[test]

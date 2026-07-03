@@ -10,6 +10,11 @@ syn = { version = "2", features = ["full", "parsing", "printing"] }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }
+# v0.36 phase-3 parse-mir IR cache: BLAKE3 content key + JSON payload,
+# rooted in the shared flux_cache::cache_dir().
+blake3 = "1"
+serde_json = "1"
+flux-cache = { path = "../flux-cache" }
 
 [dev-dependencies]
 # tests/mir_drift.rs pins its toolchain check to flux_driver::RUSTC_VERSION —

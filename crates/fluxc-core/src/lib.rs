@@ -343,9 +343,24 @@ pub fn detect_and_test(config: &BuildConfig, extra: &[String]) {
 /// was the "v0.20 built warm in seconds, now 2+ minutes" regression
 /// (root-caused 2026-07-02). One wrapper identity = one fingerprint universe
 /// = warm builds stay warm across build/check/test/combo/self.
+/// The wrapper path cargo hashes into every unit fingerprint. Default = this
+/// binary (env::current_exe). But cargo keys the fingerprint on the wrapper
+/// PATH, so two agents running fluxc from different checkouts
+/// (/checkout-a/target/debug/fluxc vs /checkout-b/...) get DIFFERENT fingerprints
+/// → the cross-agent rebuild storm returns even though each is internally warm.
+/// FLUX_WRAPPER_PATH pins a single canonical path (e.g. ~/.flux/bin/fluxc, kept
+/// symlinked to the live binary) so a whole fleet shares ONE fingerprint universe.
+/// Opt-in: unset = today's per-binary behavior (safe); the operator who sets it
+/// owns keeping that path pointed at a current fluxc.
+pub fn canonical_wrapper_path() -> std::path::PathBuf {
+    if let Ok(p) = env::var("FLUX_WRAPPER_PATH") {
+        if !p.is_empty() { return std::path::PathBuf::from(p); }
+    }
+    env::current_exe().expect("current fluxc executable")
+}
+
 pub fn apply_wrapper_env(cmd: &mut Command) {
-    let fluxc = env::current_exe().expect("current fluxc executable");
-    cmd.env("RUSTC_WRAPPER", fluxc);
+    cmd.env("RUSTC_WRAPPER", canonical_wrapper_path());
     cmd.env("FLUXC_WRAPPING", "1");
     cmd.env("REAL_RUSTC", env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string()));
 }
@@ -977,7 +992,7 @@ pub fn no_cargo_build(config: &BuildConfig) {
             cmd.arg(if config.release { "build" } else { "check" });
             if config.release { cmd.arg("--release"); }
             cmd.args(["--package", &ci.name]);
-            cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap());
+            cmd.env("RUSTC_WRAPPER", canonical_wrapper_path());
             cmd.env("FLUXC_WRAPPING", "1");
             cmd.env("FLUX_CACHE_RESTORE", "1");
 
@@ -1040,7 +1055,7 @@ async fn no_cargo_build_async_inner(config: &BuildConfig) {
                 if rel { cmd.arg("--release"); }
                 cmd.args(["--package", &name]);
                 // Same canonical wrapper env as apply_wrapper_env (tokio Command).
-                cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap());
+                cmd.env("RUSTC_WRAPPER", canonical_wrapper_path());
                 cmd.env("FLUXC_WRAPPING", "1");
                 cmd.env("REAL_RUSTC", std::env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string()));
                 (name, cmd.status().await.map(|s| s.success()).unwrap_or(false))

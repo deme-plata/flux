@@ -147,6 +147,10 @@ pub struct Database {
     /// (adds+removes); both invalidate this cache; between them the set is immutable, so caching
     /// is sound and negative lookups become O(bloom) with ZERO syscalls. Shared across clones.
     sst_paths: Arc<RwLock<Option<Vec<PathBuf>>>>,
+    /// v0.37 (chronos-v035 finding): true while a background compaction thread is
+    /// running. flush() spawns compaction on a side thread so a large merge no longer
+    /// freezes ingestion; this flag admits only ONE at a time. Shared across clones.
+    compacting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct DbInner {
@@ -391,6 +395,7 @@ impl Database {
             cfs: Arc::new(cf::CfRegistry::new(path)),
             sst_readers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sst_paths: Arc::new(RwLock::new(None)),
+            compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -408,6 +413,7 @@ impl Database {
             cfs: self.cfs,
             sst_readers: self.sst_readers,
             sst_paths: self.sst_paths,
+            compacting: self.compacting,
         }
     }
 
@@ -1005,6 +1011,7 @@ impl Clone for Database {
             cfs: Arc::clone(&self.cfs),
             sst_readers: Arc::clone(&self.sst_readers),
             sst_paths: Arc::clone(&self.sst_paths),
+            compacting: Arc::clone(&self.compacting),
         }
     }
 }
@@ -1332,7 +1339,56 @@ impl Database {
         };
         let sst_count = list_ssts(&self.path)?.len();
         if sst_count > threshold {
-            self.compact()?;
+            // v0.37 (chronos-v035 finding): compaction runs in the BACKGROUND so a large
+            // L{n}->L{n+1} merge no longer freezes ingestion (measured: a synchronous merge
+            // at ~480GB stalled the writer 20+ min). Safe because compact() releases the
+            // write lock during its streaming disk merge, its L0 memtable-clear is guarded on
+            // `sequence == snap+N` (puts racing the merge survive), and a concurrent flush
+            // writes NEW L0 files that don't conflict with the merge removing OLDER levels.
+            // Only ONE compaction at a time (the flag); a Drop guard resets it even on panic.
+            // defer_compaction (bulk load) keeps the inline path — it wants the settle now.
+            let deferring = self.inner.read().defer_compaction;
+            if deferring {
+                self.compact()?;
+            } else if self.compacting
+                .compare_exchange(false, true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst).is_ok()
+            {
+                // NOTE: this flag guards ONLY the flush-spawned background compaction.
+                // The inline defer path above, compact_async, and the ingest bulk paths
+                // reach compact() without it — harmless today (fresh sequences => distinct
+                // output names, duplicate remove_file is NotFound-tolerant, both
+                // memtable-clear guards decline under a racing sequence bump), but unify
+                // all entry points under this gate before any caller toggles
+                // defer_compaction at runtime mid-ingest. (adversarial review, follow-up 2)
+                let db = self.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("flux-db-compact".into())
+                    .spawn(move || {
+                        // Drop guard resets the flag even if compact() panics.
+                        struct Guard(Database);
+                        impl Drop for Guard {
+                            fn drop(&mut self) {
+                                self.0.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                        let _g = Guard(db.clone());
+                        let _ = db.compact();
+                    });
+                if spawned.is_err() {
+                    // thread::Builder::spawn returned Err (the OS refused a thread under
+                    // resource pressure — the epsilon overload condition). The Drop guard
+                    // lives inside the closure that never ran, so WITHOUT this reset the
+                    // flag would be stuck true forever and auto-compaction would be silently
+                    // disabled (unbounded L0 growth). Reset it and fall back to an INLINE
+                    // compaction so the store still settles. (adversarial review, follow-up 1)
+                    self.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.compact()?;
+                }
+            }
+            // else: a compaction is already in flight; this flush's L0 files are
+            // merged by the next spawn once it finishes.
         }
         Ok(())
     }
@@ -3083,8 +3139,17 @@ mod tests {
             db.put(&[i], &[i * 10]).unwrap();
             db.flush().unwrap();
         }
-        let ssts = list_ssts(&tmp).unwrap();
-        assert!(ssts.len() <= 2, "auto-compact didn't fire: {} ssts left", ssts.len());
+        // v0.37: compaction is now BACKGROUND (async) for non-defer stores, so it
+        // settles shortly after the triggering flush rather than inline. Poll for the
+        // eventual result instead of asserting synchronously (still verifies compaction
+        // fires -- just allows it to be async).
+        let mut ssts = list_ssts(&tmp).unwrap();
+        for _ in 0..200 {
+            if ssts.len() <= 2 { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            ssts = list_ssts(&tmp).unwrap();
+        }
+        assert!(ssts.len() <= 2, "auto-compact didn't fire (async): {} ssts left", ssts.len());
         // All keys still visible.
         for i in 0u8..5 {
             assert_eq!(db.get(&[i]).unwrap(), Some(vec![i * 10]));

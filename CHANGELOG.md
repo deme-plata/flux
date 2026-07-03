@@ -1,5 +1,70 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.36.0 — Durable storage + fleet-warm builds (2026-07-03)
+
+The release the chronos TB-scale campaign forced. flux-db went from "105 unit
+tests green" to proven-correct at 1 TB+ with terabytes of adversarial data
+thrown at it; the build system extended the 12.4s warm loop across the whole
+agent fleet.
+
+### flux-db — correctness at scale (found + fixed by chronos storage testing)
+- **SST body length is u64 (format v3)**: v2 framed it as u32, so any SST body
+  >= 4 GiB wrapped mod 2^32 -> reader saw a prefix -> footer parse failed
+  silently -> gets returned None and compaction merged "empty" inputs then
+  DELETED them. Measured: 1.06 TB written -> 4 GB on disk, 0.02% readable.
+  Reader **wrap-recovery** restores existing v2 SSTs (baseline 15.9% -> 100.00%,
+  wal1g 1.08% -> 100.00%, ~52 GB recovered with zero rewrite).
+- **Streaming k-way merge compaction** (BinaryHeap over per-SST cursors, ~1 GiB
+  output parts) + **file-backed block reads** (footer/fence-index/4 KiB block
+  preads, no whole-body caching): writer RSS held flat at 2.1 GiB through an
+  86 GB merge; the store now ingests 1 TB+ at ~82 MB/s with a flat memory curve
+  (was OOM-killed at 43 GB / 58.8 GB RSS before).
+- **Compaction data-loss guard**: header key_count is authoritative — any
+  parse-count mismatch aborts the pass and keeps every input on disk.
+- **Crash durability**: crash-epoch SST sequence seeding (kill -9 no longer
+  renames over prior epochs), atomic tmp+fsync+rename for flush and compaction,
+  env-tunable WAL quarantine cap (default 4 GiB, was a 256 MiB data set-aside).
+  kill -9 chaos: 60.85% -> **100.00% presence**.
+- **Read ordering fix**: newest-first across levels + bottom-only tombstone drop
+  (no more stale reads after update-post-compaction). flux-db 110/110.
+
+### Build system — fleet-warm
+- **Shared cache dir**: cache lives at `$HOME/.flux/cache` (`FLUX_CACHE_DIR`
+  override) and survives `rm -rf target`; cold target-dir builds now get restore
+  HITs. Eviction wired (`FLUX_CACHE_DISK_CAP`, default 50 GiB). Dropped
+  `-C incremental=<dir>` / `--diagnostic-width` from the cache key (residual
+  instability).
+- **Canonical wrapper path** (`FLUX_WRAPPER_PATH`): a fleet sharing one wrapper
+  path shares one cargo fingerprint universe — warm builds ACROSS agents and
+  checkouts, not just within one binary.
+- **rust-toolchain.toml** (1.93.1): declarative FIP-0001 frontend pin.
+- Killed the recurring jq/stdin build poison at its source (fluxc build-family
+  nulls fd0 before spawning cargo).
+
+### Frontend / contract (FIP-0001 groundwork)
+- **MIR-drift CI** over the pinned mir-corpus (10 enforced `.mir.expected`
+  baselines, now incl. static/generic/dyn trait dispatch for rung 7).
+- **`Frontend` trait** seam (default impl wraps `parse_mir`) + `docs/IR_SPEC.md`
+  frozen IR_VERSION=3 contract.
+- **`parse_mir` IR cache**: BLAKE3(mir_text) -> lowered IR, transparent to
+  `fluxc run` (second run skips parsing, e2e values unchanged).
+
+### Workspace / tooling
+- **`default-members`** = 60 load-bearing crates (of 143); bare builds skip the
+  83 experimental crates.
+- **`fluxc prune-report`** (semantic dependency elimination, report-only):
+  83 unreachable crates / 61,921 LOC catalogued for archive review.
+- **`fluxc setup|pilot`** onboarding, `flux_db_open_probe`, `chronos_verify`.
+
+### Design (v0.37 groundwork, review requested)
+- `docs/fips/FIP-0003-tdg-persistence.md` (task-dependency graph in flux-db for
+  incremental swarm rebuilds), `docs/LADDER_RUNG_TRAITS.md` (rung 7 plan).
+
+### Deployment note
+- Binaries older than v0.36 cannot read v3 SSTs — upgrade fluxc/sigil-node
+  builds before new SSTs are written at scale.
+
+
 ## v0.35.0 — The fast-build release: one wrapper identity, cache restore on (2026-07-02)
 
 The 12-second era restored — and made structural. Warm `fluxc self` measured at **12.4s**

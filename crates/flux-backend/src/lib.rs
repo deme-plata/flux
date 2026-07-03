@@ -303,8 +303,11 @@ fn compile_mir_into_function(
         for s in &mir_block.statements {
             if let MirStmt::Assign { dst, op, args } = s {
                 if let Some(dst_idx) = parse_mir_local_idx(dst) {
-                    // Tuple aggregate construction: parse_rhs emits op="" for `(a, b, ...)`.
-                    if op.is_empty() && args.len() > 1 {
+                    // Aggregate construction: parse_rhs emits op="" for `(a, b, ...)` / `S { f }`.
+                    // Fires for a SINGLE-field aggregate too (a 1-field struct/tuple `S { v: 7 }`),
+                    // guarded on the dst actually being scalar-replaced — previously `> 1` skipped
+                    // 1-field aggregates, so `let s = S { v: 7 }; s.v` silently returned 0.
+                    if op.is_empty() && !args.is_empty() && tuple_vars.contains_key(&(dst_idx, 0)) {
                         for (i, arg) in args.iter().enumerate() {
                             if let Some(&var) = tuple_vars.get(&(dst_idx, i)) {
                                 let val = resolve_mir_operand_to_value(arg, &vars, &tuple_vars, &mut bc);

@@ -2508,6 +2508,15 @@ impl Database {
             }
             at_level.sort_by_key(|h| h.sequence);
 
+            // Observability (chronos-v035 5TB finding): a large L{n}->L{n+1} merge runs
+            // SYNCHRONOUSLY in the put()->flush()->compact() path and can block ingestion
+            // for MINUTES at deep levels (measured: ~480GB / 300+ L3 tables -> a 10min+
+            // write stall that looks like a hang). Log the merge so it is diagnosable as
+            // progress, not a freeze. (Async/background compaction is the roadmap fix.)
+            let t_compact = std::time::Instant::now();
+            eprintln!("[flux-db] compact L{}->L{}: merging {} tables ({} MiB) ...",
+                current_level, current_level + 1, at_level.len(), input_bytes / (1024*1024));
+
             // Memtable snapshot rides along on the L0 pass as the newest
             // source (rank above every SST — same shadowing as before).
             let (mem_snapshot, mem_snap_seq) = if current_level == 0 {
@@ -2577,6 +2586,8 @@ impl Database {
                     inner.memtable.clear();
                 }
             }
+            eprintln!("[flux-db] compact L{}->L{}: done in {:.1}s",
+                current_level, current_level + 1, t_compact.elapsed().as_secs_f64());
             // Keep iterating — out_level may now exceed its own threshold.
         }
         Ok(())

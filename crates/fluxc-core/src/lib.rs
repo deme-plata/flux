@@ -776,7 +776,7 @@ pub fn wrapper_mode(args: &[String]) {
                     record_cache_event(true);
                     return;
                 }
-                if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, std::path::Path::new("target/flux-cache/blobs").join(&entry.source_hash).exists()); }
+                if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, flux_cache::cache_dir().join("blobs").join(&entry.source_hash).exists()); }
             } else if trace {
                 eprintln!("FLUXCACHE LOOKUPMISS {} key={}", cn, kp);
             }

@@ -713,6 +713,83 @@ impl Database {
         Ok(())
     }
 
+    /// v0.51 (LANE-B bulk-ingest): insert MANY key/value pairs under a SINGLE
+    /// write-lock acquisition, coalescing every WAL record into ONE buffer that
+    /// is written with ONE `write_all` + ONE `flush` syscall for the whole batch.
+    ///
+    /// Why this exists (measured on 8 KB chronos blocks, defer_compaction, 4 GiB WAL):
+    ///   * `put()` per entry:            ~168 MB/s  (lock + 3 syscalls PER 8 KB block)
+    ///   * `write(WriteBatch=64)`:       ~346 MB/s  (lock once, but still 3 syscalls/entry
+    ///                                                and a double key/val copy into BatchOp)
+    ///   * `put_many(batch=256)`:        see SHARDED-WRITER.md — one syscall per batch,
+    ///                                    no BatchOp staging, direct memtable insert.
+    ///
+    /// The per-entry WAL framing is IDENTICAL to `write_wal_entry` — each record is
+    /// `[crc32(le)][key_len(le u32)][val_len(le u32)][key][val]`, independently CRC-
+    /// covered — so `replay_wal_streaming` is unchanged and torn-write recovery still
+    /// stops cleanly at the first bad record. We simply concatenate the framed records
+    /// in memory and flush them in one shot.
+    ///
+    /// Durability is UNCHANGED from `put()`: entries are written to the WAL and
+    /// `flush()`ed to the OS (one syscall), but NOT fsync'd here — callers batch the
+    /// durability barrier via `sync_wal()` exactly as they do for `put()` (chronos_scale
+    /// fsyncs before advancing its height marker). An empty `value` is a tombstone,
+    /// matching `delete()`.
+    ///
+    /// Auto-flush (memtable -> SST when the WAL outgrows `max_wal_bytes`) is honored
+    /// once, AFTER the lock is released — same non-reentrancy rule as `put()`.
+    pub fn put_many<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, entries: &[(K, V)]) -> Result<(), String> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // Pre-size the coalesced WAL buffer: 12-byte header per entry + payloads.
+        let approx: usize = entries.iter()
+            .map(|(k, v)| 12 + k.as_ref().len() + v.as_ref().len())
+            .sum();
+        let mut wal_buf: Vec<u8> = Vec::with_capacity(approx);
+        for (k, v) in entries {
+            let (key, val) = (k.as_ref(), v.as_ref());
+            // header: key_len ++ val_len (the CRC covers header ++ key ++ val,
+            // i.e. everything except the leading crc field itself).
+            let mut header = [0u8; 8];
+            header[0..4].copy_from_slice(&(key.len() as u32).to_le_bytes());
+            header[4..8].copy_from_slice(&(val.len() as u32).to_le_bytes());
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(&header);
+            crc.update(key);
+            crc.update(val);
+            let crc = crc.finalize();
+            wal_buf.extend_from_slice(&crc.to_le_bytes());
+            wal_buf.extend_from_slice(&header);
+            wal_buf.extend_from_slice(key);
+            wal_buf.extend_from_slice(val);
+        }
+
+        let need_flush = {
+            let mut inner = self.inner.write();
+            // ONE write + ONE flush for the entire batch (vs 3 syscalls/entry).
+            if let Some(w) = inner.wal_file.as_mut() {
+                w.write_all(&wal_buf).map_err(|e| format!("wal write batch: {}", e))?;
+                w.flush().map_err(|e| format!("wal flush batch: {}", e))?;
+            }
+            inner.wal_bytes += wal_buf.len() as u64;
+            // Bulk-apply to the memtable + mod_history. One sequence stamp per entry
+            // keeps mod_history / snapshot semantics identical to N separate put()s.
+            for (k, v) in entries {
+                inner.sequence += 1;
+                let seq = inner.sequence;
+                let key = k.as_ref().to_vec();
+                inner.memtable.insert(key.clone(), v.as_ref().to_vec());
+                inner.mod_history.insert(key, seq);
+            }
+            inner.max_wal_bytes > 0 && inner.wal_bytes > inner.max_wal_bytes
+        };
+        if need_flush {
+            self.auto_flush_if_needed();
+        }
+        Ok(())
+    }
+
     /// Get a value by key. Searches memtable first, then the newest-to-oldest
     /// SSTs (skipping any whose persisted Bloom filter says "definitely not").
     /// A tombstone in either layer (empty value) means "deleted" and overrides
@@ -4342,6 +4419,86 @@ mod tests {
                 .all(|(k, _)| k.as_slice() != b"zombie")
         });
         assert!(gone, "deepest-level merge must drop the tombstone pair entirely");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_put_many_basic_and_equivalence() {
+        // put_many must be observably identical to N separate put()s.
+        let tmp = std::env::temp_dir().join("flux-db-test-putmany-basic");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..500u32)
+            .map(|i| (format!("k{:05}", i).into_bytes(), format!("v{}", i).into_bytes()))
+            .collect();
+        db.put_many(&entries).unwrap();
+        for (k, v) in &entries {
+            assert_eq!(db.get(k).unwrap(), Some(v.clone()), "put_many key {:?} missing", k);
+        }
+        assert_eq!(db.get(b"nope").unwrap(), None);
+        // empty batch is a no-op, not an error
+        db.put_many::<&[u8], &[u8]>(&[]).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_put_many_wal_replay() {
+        // The coalesced WAL buffer must replay byte-for-byte like per-entry puts:
+        // reopen from the WAL and every key survives.
+        let tmp = std::env::temp_dir().join("flux-db-test-putmany-wal");
+        let _ = fs::remove_dir_all(&tmp);
+        {
+            let db = Database::open(&tmp).unwrap();
+            let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..300u32)
+                .map(|i| (format!("blk{:05}", i).into_bytes(), vec![i as u8; 100]))
+                .collect();
+            db.put_many(&entries).unwrap();
+            db.sync_wal().unwrap();
+        } // drop WITHOUT flush() — force recovery from the WAL alone
+        {
+            let db = Database::open(&tmp).unwrap();
+            for i in 0..300u32 {
+                let k = format!("blk{:05}", i).into_bytes();
+                assert_eq!(db.get(&k).unwrap(), Some(vec![i as u8; 100]),
+                    "put_many entry {} lost across WAL replay", i);
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_put_many_tombstone() {
+        // An empty value in put_many is a tombstone, exactly like delete().
+        let tmp = std::env::temp_dir().join("flux-db-test-putmany-tomb");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        db.put(b"live", b"1").unwrap();
+        db.put(b"doomed", b"2").unwrap();
+        db.flush().unwrap(); // push to SST so the tombstone must shadow disk data
+        let batch: Vec<(&[u8], &[u8])> = vec![(b"doomed", b""), (b"fresh", b"3")];
+        db.put_many(&batch).unwrap();
+        assert_eq!(db.get(b"doomed").unwrap(), None, "put_many empty value must tombstone");
+        assert_eq!(db.get(b"live").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(db.get(b"fresh").unwrap(), Some(b"3".to_vec()));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_put_many_survives_flush() {
+        // put_many entries must survive a memtable -> SST flush (read-through).
+        let tmp = std::env::temp_dir().join("flux-db-test-putmany-flush");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..400u32)
+            .map(|i| (format!("f{:05}", i).into_bytes(), vec![7u8; 64]))
+            .collect();
+        db.put_many(&entries).unwrap();
+        db.flush().unwrap();
+        assert_eq!(db.len(), 0, "memtable flushed");
+        for i in 0..400u32 {
+            let k = format!("f{:05}", i).into_bytes();
+            assert_eq!(db.get(&k).unwrap(), Some(vec![7u8; 64]), "flushed put_many key {} lost", i);
+        }
         let _ = fs::remove_dir_all(&tmp);
     }
 }

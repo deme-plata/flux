@@ -10,3 +10,8 @@ syn = { version = "2", features = ["full", "parsing", "printing"] }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# tests/mir_drift.rs pins its toolchain check to flux_driver::RUSTC_VERSION —
+# the single source of truth for the contracted rustc (FIP-0001 keep-A-open #2).
+flux-driver = { path = "../flux-driver" }

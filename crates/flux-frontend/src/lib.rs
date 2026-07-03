@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 pub mod mir;
+/// FIP-0001 #3 swap-point, re-exported at the crate root: the pipeline
+/// depends on `flux_frontend::Frontend`, never on where MIR text came from.
+/// Contract documented in docs/IR_SPEC.md.
+pub use mir::{Frontend, RustcMirFrontend};
 use std::path::Path;
 
 // ── FROZEN IR (FIP-0001 keep-A-open #1) ──

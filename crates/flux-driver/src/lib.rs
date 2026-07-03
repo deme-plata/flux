@@ -7,12 +7,13 @@
 // empty `outputs` maps — useless for restore. And `apply_cached_outputs`
 // only wrote a stub `.d` marker. Both fixed here.
 //
-// New layout:
+// New layout (v0.36: rooted in the SHARED flux_cache::cache_dir(), i.e.
+// $HOME/.flux/cache by default / FLUX_CACHE_DIR override — no longer under
+// the workspace's target/, so `rm -rf target` keeps the cache):
 //
-//   target/flux-cache/blobs/<source_hash>/
+//   <cache_dir>/blobs/<source_hash>/
 //       lib<crate>-<rustc-hash>.rmeta    ← byte copy of rustc's output
 //       lib<crate>-<rustc-hash>.rlib     ← byte copy
-//       <crate>-<rustc-hash>.d           ← byte copy
 //
 // `collect_outputs` scans --out-dir AFTER rustc ran, finds files matching
 // the crate name + recognised extensions, copies them to the blob dir,
@@ -33,13 +34,16 @@ use std::path::{Path, PathBuf};
 /// turning the rustc dependency into an enforced contract rather than an implicit assumption.
 pub const RUSTC_VERSION: &str = "1.93.1";
 
-/// Where blobs live for a given source-hash key. Relative to current
-/// working directory's `target/` — matches `flux_cache::clean`'s convention.
-fn blob_dir_for(source_hash: &str) -> PathBuf {
-    PathBuf::from("target")
-        .join("flux-cache")
-        .join("blobs")
-        .join(source_hash)
+/// Where blobs live for a given source-hash key.
+///
+/// v0.36: rooted in `flux_cache::cache_dir()` — the SAME directory the entry
+/// index lives in ($HOME/.flux/cache by default, FLUX_CACHE_DIR to override).
+/// Pre-0.36 this was a LITERAL CWD-relative `target/flux-cache` while
+/// flux-cache itself walked up from CWD looking for a `target/` dir — two
+/// subtly different roots that could disagree (and both were wiped by
+/// `rm -rf target`, which is why cold builds never restored).
+pub fn blob_dir_for(source_hash: &str) -> PathBuf {
+    flux_cache::cache_dir().join("blobs").join(source_hash)
 }
 
 /// Extract `--crate-name foo` from rustc args. Returns empty string when
@@ -118,10 +122,11 @@ fn extern_dep_paths(args: &[String]) -> Vec<(String, String)> {
     v
 }
 
-/// T2c closure-consistency sidecar: target/flux-cache/closure/<cache_key> records the content-hash of
-/// every --extern dep the entry was built against, so a restore can verify the CURRENT deps still match.
+/// T2c closure-consistency sidecar: `<cache_dir>/closure/<cache_key>` records the content-hash of
+/// every --extern dep the entry was built against, so a restore can verify the CURRENT deps still
+/// match. v0.36: rooted in the shared `flux_cache::cache_dir()`, same as the blobs.
 fn closure_sidecar_for(cache_key: &str) -> PathBuf {
-    PathBuf::from("target").join("flux-cache").join("closure").join(cache_key)
+    flux_cache::cache_dir().join("closure").join(cache_key)
 }
 
 /// Recognised emit extensions. The empty string covers static-libs / binaries
@@ -164,11 +169,15 @@ fn scan_outputs(out_dir: &Path, crate_name: &str) -> Vec<String> {
 }
 
 /// Side-blob a single output file. Returns the file name on success.
+/// v0.36: reports the copied bytes to flux-cache's running disk total so the
+/// FLUX_CACHE_DISK_CAP eviction sees blob growth (blobs are the bulk of the
+/// cache by bytes; the index entries alone are ~KiB).
 fn copy_output_to_blob(out_dir: &Path, blob_dir: &Path, file_name: &str) -> Option<String> {
     let src = out_dir.join(file_name);
     let dst = blob_dir.join(file_name);
     fs::create_dir_all(blob_dir).ok()?;
-    fs::copy(&src, &dst).ok()?;
+    let bytes = fs::copy(&src, &dst).ok()?;
+    flux_cache::add_external_bytes(bytes);
     Some(file_name.to_string())
 }
 
@@ -371,11 +380,23 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
-    // Tests below mutate the process-global CWD (blob_dir_for is CWD-relative); serialize them so
-    // cargo's parallel runner (what a `fluxc combo` invokes) can't race them. Poison-tolerant.
+    // Tests below mutate the process-global CWD (source paths are relative in some fixtures);
+    // serialize them so cargo's parallel runner (what a `fluxc combo` invokes) can't race them.
+    // Poison-tolerant.
     static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
         CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// v0.36: blob/closure paths now root in `flux_cache::cache_dir()` — by
+    /// default the user's REAL shared cache ($HOME/.flux/cache). Pin an
+    /// isolated per-process dir before any cache-touching test so tests never
+    /// write into (or evict) the real cache. OnceLock semantics: the first
+    /// call wins for the whole test binary.
+    fn iso() {
+        let _ = flux_cache::set_cache_dir(
+            std::env::temp_dir().join(format!("flux-driver-test-{}", std::process::id())),
+        );
     }
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -413,6 +434,7 @@ mod tests {
 
     #[test]
     fn collect_then_apply_roundtrip() {
+        iso();
         let _cwd = cwd_guard();
         // We can't run rustc in unit tests — simulate by:
         // 1. pre-populating an `out_dir` with fake "outputs"
@@ -431,7 +453,7 @@ mod tests {
         fs::write(out_dir.join("libdemo-deadbeef.rmeta"), rmeta_content).unwrap();
         fs::write(out_dir.join("libdemo-deadbeef.rlib"), rlib_content).unwrap();
 
-        // CWD has to be the workspace for blob_dir_for("target/...") to land somewhere we can clean up.
+        // CWD change kept for path-relativity realism; blobs land in the iso() cache dir now.
         let orig_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&workspace).unwrap();
 
@@ -464,6 +486,7 @@ mod tests {
 
     #[test]
     fn stable_key_survives_volatile_args() {
+        iso();
         let _cwd = cwd_guard();
         // 0.33 core property: blobs+entry are keyed on the STABLE cache_key, so a
         // hit succeeds even when the raw rustc args differ (e.g. a different absolute
@@ -478,21 +501,31 @@ mod tests {
         fs::write(&src_file, b"// x").unwrap();
         fs::write(out_dir.join("libdemo-deadbeef.rmeta"), b"meta").unwrap();
         fs::write(out_dir.join("libdemo-deadbeef.rlib"), b"lib").unwrap();
+        // T2c-era update: cross-workspace reuse holds when the dep keeps its FILENAME
+        // identity (lib<crate>-<metahash>) and byte-identical content at a different
+        // absolute path. Two fake workspaces, same dep file in both.
+        let ws1_deps = workspace.join("ws1").join("deps");
+        let ws2_deps = workspace.join("ws2").join("deps");
+        fs::create_dir_all(&ws1_deps).unwrap();
+        fs::create_dir_all(&ws2_deps).unwrap();
+        fs::write(ws1_deps.join("libserde-AAAA.rlib"), b"identical dep bytes").unwrap();
+        fs::write(ws2_deps.join("libserde-AAAA.rlib"), b"identical dep bytes").unwrap();
         let orig_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&workspace).unwrap();
 
         let args1: Vec<String> = vec![
             "--crate-name".into(), "demo".into(),
             "-C".into(), "extra-filename=-deadbeef".into(),
-            "--extern".into(), "serde=/ws1/target/libserde-AAAA.rlib".into(),
+            "--extern".into(), format!("serde={}", ws1_deps.join("libserde-AAAA.rlib").display()),
             "--out-dir".into(), out_dir.to_string_lossy().to_string(),
             src_file.to_string_lossy().to_string(),
         ];
-        // Same logical compile, DIFFERENT absolute --extern path (a second workspace).
+        // Same logical compile, DIFFERENT absolute --extern path (a second workspace),
+        // same dep identity + content — the closure sidecar verifies and passes.
         let args2: Vec<String> = vec![
             "--crate-name".into(), "demo".into(),
             "-C".into(), "extra-filename=-deadbeef".into(),
-            "--extern".into(), "serde=/ws2/target/libserde-BBBB.rlib".into(),
+            "--extern".into(), format!("serde={}", ws2_deps.join("libserde-AAAA.rlib").display()),
             "--out-dir".into(), out_dir.to_string_lossy().to_string(),
             src_file.to_string_lossy().to_string(),
         ];
@@ -503,10 +536,11 @@ mod tests {
 
         fs::remove_dir_all(&out_dir).unwrap();
         fs::create_dir_all(&out_dir).unwrap();
-        // apply with args2 (different abs paths) — succeeds because the blob dir is
-        // keyed on entry.source_hash == STABLE, independent of the raw args.
+        // apply with args2 (different abs paths, same dep identity+bytes) — succeeds
+        // because the blob dir is keyed on entry.source_hash == STABLE and the T2c
+        // closure sidecar verifies the ws2 dep is byte-identical to what was recorded.
         assert!(apply_cached_outputs(&entry, &args2),
-            "stable-key hit must restore regardless of volatile raw args");
+            "stable-key hit must restore when volatile args move but dep identity+content match");
         assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rmeta")).unwrap(), b"meta");
 
         std::env::set_current_dir(&orig_cwd).unwrap();
@@ -515,6 +549,7 @@ mod tests {
 
     #[test]
     fn apply_returns_false_when_blob_dir_missing() {
+        iso();
         let _cwd = cwd_guard();
         let workspace = tmp_dir("missing");
         let orig_cwd = std::env::current_dir().unwrap();
@@ -554,6 +589,7 @@ mod tests {
 
     #[test]
     fn t2_required_exts_and_link_rejection() {
+        iso();
         // T2: --emit drives required artifacts, and a metadata-only entry is REFUSED for a link pass
         // (the rc=101 root: serving a .rmeta-only entry to a --emit=link unit leaves no .rlib).
         assert_eq!(required_exts(&["--emit=link".to_string()]), vec!["rlib"]);
@@ -576,6 +612,7 @@ mod tests {
 
     #[test]
     fn t2c_extern_dep_paths_and_sidecar() {
+        iso();
         let deps = extern_dep_paths(&[
             "--extern".into(), "libc=/x/deps/liblibc-361b.rmeta".into(),
             "--extern".into(), "noeq".into(), // malformed (no '='), skipped
@@ -584,6 +621,6 @@ mod tests {
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0], ("liblibc-361b.rmeta".to_string(), "/x/deps/liblibc-361b.rmeta".to_string()));
         assert_eq!(deps[1].0, "libhttp-cc42.rlib");
-        assert!(closure_sidecar_for("abc123").ends_with("flux-cache/closure/abc123"));
+        assert!(closure_sidecar_for("abc123").ends_with("closure/abc123"));
     }
 }

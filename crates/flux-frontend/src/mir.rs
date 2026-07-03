@@ -70,14 +70,15 @@ pub enum MirTerminator {
 /// (static dispatch); it exists to mark the intent and give the native parser a clean injection point.
 pub trait Frontend {
     /// Produce Flux MIR for a translation unit from this frontend's source form.
-    fn to_mir(&self, source: &str) -> Result<Vec<MirFunction>, String>;
+    /// (v0.36: named `parse` per the IR_SPEC contract; was `to_mir`.)
+    fn parse(&self, mir_text: &str) -> Result<Vec<MirFunction>, String>;
 }
 
 /// The default, contracted frontend: parse rustc's `--emit=mir` textual output.
 pub struct RustcMirFrontend;
 
 impl Frontend for RustcMirFrontend {
-    fn to_mir(&self, mir_text: &str) -> Result<Vec<MirFunction>, String> {
+    fn parse(&self, mir_text: &str) -> Result<Vec<MirFunction>, String> {
         parse_mir(mir_text)
     }
 }
@@ -1026,7 +1027,7 @@ mod tests {
         // FIP-0001 #3: the default RustcMirFrontend must be a transparent wrapper over parse_mir,
         // so swapping in a native (Option A) frontend later changes nothing downstream.
         let mir = "fn add(_1: i64, _2: i64) -> i64 {\n    let mut _0: i64;\n    bb0: {\n        _0 = Add(_1, _2);\n        return;\n    }\n}";
-        let via_trait = RustcMirFrontend.to_mir(mir).unwrap();
+        let via_trait = RustcMirFrontend.parse(mir).unwrap();
         let via_fn = parse_mir(mir).unwrap();
         assert_eq!(via_trait.len(), via_fn.len());
         assert_eq!(via_trait[0].name, "add");

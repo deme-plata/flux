@@ -11,8 +11,11 @@
 // entirely. Git-style: content keys are BLAKE3 hashes, so identical
 // outputs collapse to one entry naturally.
 //
-// Cache directory: target/flux-cache/
-// Cache entries:    target/flux-cache/<blake3>.json
+// Cache directory (v0.36): $HOME/.flux/cache by default — a SHARED, per-user
+// location that survives `rm -rf target` / `cargo clean`. Override with the
+// FLUX_CACHE_DIR env var or `set_cache_dir()`. Legacy CWD-relative
+// `target/flux-cache` is only the last-resort fallback when no HOME exists.
+// Cache entries:    <cache_dir>/objects/<2-char>/<rest>.bin
 
 use blake3::Hasher;
 use parking_lot::Mutex;
@@ -71,9 +74,15 @@ static STORES: AtomicU64 = AtomicU64::new(0);
 static TTL_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 /// v0.11: count of entries evicted to keep total bytes under the disk cap.
 static DISK_EVICTIONS: AtomicU64 = AtomicU64::new(0);
-/// v0.11: disk size cap in bytes. `0` means "uncapped" (legacy behavior).
+/// v0.11: disk size cap in bytes, set programmatically via `set_disk_capacity`.
+/// v0.36: `0` no longer means "uncapped" — it means "defer to the
+/// FLUX_CACHE_DISK_CAP env var, default 50 GiB" (see `effective_disk_capacity`).
 /// AtomicU64 so callers can set it from any thread.
 static DISK_CAPACITY: AtomicU64 = AtomicU64::new(0);
+/// v0.36: default disk cap when neither `set_disk_capacity` nor
+/// FLUX_CACHE_DISK_CAP says otherwise. A shared per-user cache dir must not
+/// grow unbounded now that `rm -rf target` no longer wipes it.
+pub const DEFAULT_DISK_CAP_BYTES: u64 = 50 * 1024 * 1024 * 1024; // 50 GiB
 /// v0.11.1 hotpatch (post-bench): cached running total of bytes on disk.
 /// `store` and eviction maintain this; reading it is O(1) instead of an
 /// O(n) directory walk. Reconciled to the truth via
@@ -150,15 +159,73 @@ pub fn stats_v11() -> (u64, u64, u64, u64, u64, u64, u64) {
 
 /// v0.11: set the maximum total bytes flux-cache may keep on disk. When a
 /// `store` would push the cache over the cap, the oldest entries (by mtime)
-/// are evicted until the cap holds. Passing `0` disables the cap (legacy
-/// behavior — bound only by free disk).
+/// are evicted until the cap holds.
+///
+/// v0.36 semantics change: passing `0` no longer means "uncapped" — it means
+/// "defer to FLUX_CACHE_DISK_CAP / the 50 GiB default". To truly uncap, set
+/// the env var `FLUX_CACHE_DISK_CAP=0`.
 pub fn set_disk_capacity(bytes: u64) {
     DISK_CAPACITY.store(bytes, Ordering::Relaxed);
 }
 
-/// v0.11: read the current disk capacity setting (0 = uncapped).
+/// v0.11: read the programmatic disk capacity setting (0 = defer to env/default).
 pub fn disk_capacity() -> u64 {
     DISK_CAPACITY.load(Ordering::Relaxed)
+}
+
+/// v0.36: the cap that eviction actually enforces.
+///
+/// Resolution order:
+///   1. a non-zero programmatic `set_disk_capacity()` value
+///   2. the `FLUX_CACHE_DISK_CAP` env var — plain bytes, or with a K/M/G/T
+///      suffix (optionally `iB`/`B`), e.g. `FLUX_CACHE_DISK_CAP=20GiB`.
+///      An explicit `0` disables the cap entirely.
+///   3. `DEFAULT_DISK_CAP_BYTES` (50 GiB)
+///
+/// The env var is read once per process (the rustc-wrapper is one process per
+/// compilation unit, so this is effectively per-invocation).
+pub fn effective_disk_capacity() -> u64 {
+    let explicit = DISK_CAPACITY.load(Ordering::Relaxed);
+    if explicit != 0 {
+        return explicit;
+    }
+    static ENV_CAP: OnceLock<u64> = OnceLock::new();
+    *ENV_CAP.get_or_init(|| match std::env::var("FLUX_CACHE_DISK_CAP") {
+        Ok(v) => parse_capacity(&v).unwrap_or(DEFAULT_DISK_CAP_BYTES),
+        Err(_) => DEFAULT_DISK_CAP_BYTES,
+    })
+}
+
+/// Parse a human capacity string: `53687091200`, `50G`, `50GiB`, `512M`, `0`.
+/// Returns None on anything unparseable (caller falls back to the default).
+fn parse_capacity(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t.is_empty() { return None; }
+    let lower = t.to_ascii_lowercase();
+    let (num_part, mult) = {
+        let stripped = lower
+            .strip_suffix("ib")
+            .or_else(|| lower.strip_suffix('b'))
+            .unwrap_or(&lower);
+        match stripped.chars().last() {
+            Some('k') => (&stripped[..stripped.len() - 1], 1024u64),
+            Some('m') => (&stripped[..stripped.len() - 1], 1024u64.pow(2)),
+            Some('g') => (&stripped[..stripped.len() - 1], 1024u64.pow(3)),
+            Some('t') => (&stripped[..stripped.len() - 1], 1024u64.pow(4)),
+            _ => (stripped, 1u64),
+        }
+    };
+    num_part.trim().parse::<u64>().ok().and_then(|n| n.checked_mul(mult))
+}
+
+/// v0.36: account bytes written to the cache dir OUTSIDE flux-cache's own
+/// `store` path (flux-driver's blob side-copies). Keeps the O(1) running
+/// total honest so the disk-cap eviction fires when blobs — the bulk of the
+/// cache by bytes — grow, not just when index entries do.
+pub fn add_external_bytes(n: u64) {
+    if CACHED_DISK_BYTES_VALID.load(Ordering::Relaxed) {
+        CACHED_DISK_BYTES.fetch_add(n, Ordering::Relaxed);
+    }
 }
 
 /// v0.11: total bytes of every cache entry on disk.
@@ -203,7 +270,7 @@ fn walk_bytes(p: &std::path::Path) -> u64 {
 /// cap. Returns the number of files removed. No-op if cap is 0 or current
 /// usage is already below cap.
 pub fn evict_to_capacity() -> usize {
-    let cap = DISK_CAPACITY.load(Ordering::Relaxed);
+    let cap = effective_disk_capacity();
     if cap == 0 { return 0; }
     let mut current = current_disk_bytes();
     if current <= cap { return 0; }
@@ -232,10 +299,11 @@ pub fn evict_to_capacity() -> usize {
     count
 }
 
-/// Only enforce capacity if the user has set one. Called on every `store`
-/// so a misconfigured (or default) cache pays just the one `Atomic::load`.
+/// v0.36: enforce the effective disk cap on every `store`. The common case
+/// (under cap) costs one atomic load + one O(1) cached-total read; the full
+/// mtime-sorted walk only happens when the cache is actually over cap.
 fn evict_to_capacity_if_set(_just_wrote_size: u64) {
-    if DISK_CAPACITY.load(Ordering::Relaxed) > 0 {
+    if effective_disk_capacity() > 0 {
         evict_to_capacity();
     }
 }
@@ -347,11 +415,33 @@ pub fn compute_hash(source_file: Option<&str>, args: &[String]) -> String {
 }
 
 fn finish_hash(mut hasher: Hasher, args: &[String]) -> String {
-    for arg in args {
-        if !arg.starts_with("--out-dir") && !arg.contains("/tmp/") {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        // v0.36 (the cold-CARGO_TARGET_DIR gate fix): drop `-C incremental=<dir>`
+        // (cargo's pair form) and `-Cincremental=<dir>` (fused). The incremental
+        // scratch dir lives under CARGO_TARGET_DIR and doesn't affect the compiled
+        // artifact — hashing it made every key vary per target dir, so a cold
+        // target dir could NEVER hit the shared cache even with identical inputs.
+        if arg == "-C"
+            && args.get(i + 1).map_or(false, |v| v.starts_with("incremental="))
+        {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with("-Cincremental=") {
+            i += 1;
+            continue;
+        }
+        // `--diagnostic-width=N` tracks the invoking terminal, not the artifact.
+        if !arg.starts_with("--out-dir")
+            && !arg.starts_with("--diagnostic-width")
+            && !arg.contains("/tmp/")
+        {
             hasher.update(arg.as_bytes());
             hasher.update(b"\0");
         }
+        i += 1;
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -498,16 +588,65 @@ pub fn clean() {
     mem_lru().lock().order.clear();
 }
 
-fn cache_dir() -> PathBuf {
-    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    loop {
-        let target = dir.join("target");
-        if target.exists() && target.is_dir() {
-            return target.join("flux-cache");
-        }
-        if !dir.pop() { break; }
+/// v0.36: programmatic cache-dir override. First writer wins (OnceLock);
+/// mainly for tests and embedders that must not touch the user's real cache.
+static CACHE_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+/// Memoized env/default resolution — one resolution, stable for the process.
+static CACHE_DIR_RESOLVED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pin the cache directory for this process. Returns false when a directory
+/// was already pinned or resolved by first use — the running process keeps
+/// its original dir; callers should treat that as "too late".
+pub fn set_cache_dir(dir: PathBuf) -> bool {
+    if CACHE_DIR_RESOLVED.get().is_some() {
+        return false;
     }
-    PathBuf::from("target").join("flux-cache")
+    CACHE_DIR_OVERRIDE.set(dir).is_ok()
+}
+
+/// v0.36: resolve the shared flux cache directory. THE fix for "rm -rf target
+/// wipes the cache": the default now lives OUTSIDE any workspace.
+///
+/// Resolution order (memoized per process — one resolution, stable for the
+/// process lifetime):
+///   1. `set_cache_dir()` programmatic override
+///   2. `FLUX_CACHE_DIR` env var
+///   3. `$HOME/.flux/cache` (the default)
+///   4. legacy fallback (no HOME at all): nearest `target/` up from CWD,
+///      i.e. the pre-v0.36 behavior.
+///
+/// `pub` so flux-driver roots its blob/closure sidecars in the SAME dir
+/// instead of a separately-hardcoded `target/flux-cache` (the v0.35
+/// inconsistency: flux-cache walked up from CWD while flux-driver used a
+/// literal relative path — the two could disagree under `cargo -p` subdirs).
+pub fn cache_dir() -> PathBuf {
+    if let Some(d) = CACHE_DIR_OVERRIDE.get() {
+        return d.clone();
+    }
+    CACHE_DIR_RESOLVED
+        .get_or_init(|| {
+            if let Ok(d) = std::env::var("FLUX_CACHE_DIR") {
+                if !d.trim().is_empty() {
+                    return PathBuf::from(d);
+                }
+            }
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                if !home.is_empty() {
+                    return PathBuf::from(home).join(".flux").join("cache");
+                }
+            }
+            // Legacy fallback: nearest target/ dir up from CWD.
+            let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            loop {
+                let target = dir.join("target");
+                if target.exists() && target.is_dir() {
+                    return target.join("flux-cache");
+                }
+                if !dir.pop() { break; }
+            }
+            PathBuf::from("target").join("flux-cache")
+        })
+        .clone()
 }
 
 /// Canonical v0.11 path for a key: `<cache_dir>/objects/<2-char>/<rest>.bin`.
@@ -529,6 +668,60 @@ fn cache_path(key: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// v0.36: the default cache dir is now the user's REAL shared cache
+    /// ($HOME/.flux/cache). Every disk-touching test must pin an isolated
+    /// per-process temp dir FIRST, or the eviction tests would garbage-collect
+    /// the developer's actual cache. OnceLock: first call wins, all tests in
+    /// this binary share the same isolated dir.
+    fn iso() {
+        let _ = set_cache_dir(
+            std::env::temp_dir().join(format!("flux-cache-test-{}", std::process::id())),
+        );
+    }
+
+    #[test]
+    fn test_v036_cache_dir_is_isolated_and_not_cwd_target() {
+        iso();
+        let d = cache_dir();
+        assert!(
+            d.starts_with(std::env::temp_dir()),
+            "override must win: {}", d.display()
+        );
+        // Too late to re-pin now.
+        assert!(!set_cache_dir(PathBuf::from("/nope")));
+    }
+
+    #[test]
+    fn test_v036_parse_capacity() {
+        assert_eq!(parse_capacity("0"), Some(0));
+        assert_eq!(parse_capacity("53687091200"), Some(53_687_091_200));
+        assert_eq!(parse_capacity("50G"), Some(50 * 1024u64.pow(3)));
+        assert_eq!(parse_capacity("50GiB"), Some(50 * 1024u64.pow(3)));
+        assert_eq!(parse_capacity("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_capacity(" 2TiB "), Some(2 * 1024u64.pow(4)));
+        assert_eq!(parse_capacity("1024K"), Some(1024 * 1024));
+        assert_eq!(parse_capacity("junk"), None);
+        assert_eq!(parse_capacity(""), None);
+    }
+
+    #[test]
+    fn test_v036_effective_capacity_defaults_and_override() {
+        let _g = CACHE_TEST_LOCK.lock();
+        // With no programmatic cap, the effective cap is the env/default
+        // (either FLUX_CACHE_DISK_CAP or 50 GiB) — never the raw 0.
+        set_disk_capacity(0);
+        let eff = effective_disk_capacity();
+        let env_expected = std::env::var("FLUX_CACHE_DISK_CAP")
+            .ok()
+            .and_then(|v| parse_capacity(&v))
+            .unwrap_or(DEFAULT_DISK_CAP_BYTES);
+        assert_eq!(eff, env_expected);
+        // A non-zero programmatic cap wins over env/default.
+        set_disk_capacity(1234);
+        assert_eq!(effective_disk_capacity(), 1234);
+        set_disk_capacity(0);
+    }
+
     #[test]
     fn test_compute_hash_deterministic() {
         let args1 = vec!["--crate-name".into(), "test".into(), "src/lib.rs".into()];
@@ -536,6 +729,28 @@ mod tests {
         let h1 = compute_hash(Some("src/lib.rs"), &args1);
         let h2 = compute_hash(Some("src/lib.rs"), &args2);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_v036_key_invariant_to_target_dir_args() {
+        // The cold-CARGO_TARGET_DIR gate: `-C incremental=<dir>` (both forms) and
+        // `--diagnostic-width` must NOT flow into the key — they vary per target
+        // dir / terminal while the compiled artifact is identical.
+        let base = vec!["--crate-name".to_string(), "a".to_string(), "--emit=metadata,link".to_string()];
+        let mut t1 = base.clone();
+        t1.extend(["-C".into(), "incremental=/ws/t1/debug/incremental".into(), "--diagnostic-width=120".into()]);
+        let mut t2 = base.clone();
+        t2.extend(["-C".into(), "incremental=/ws/t2/debug/incremental".into(), "--diagnostic-width=80".into()]);
+        let mut t3 = base.clone();
+        t3.push("-Cincremental=/ws/t3/debug/incremental".into());
+        let k_base = compute_hash(None, &base);
+        assert_eq!(k_base, compute_hash(None, &t1));
+        assert_eq!(k_base, compute_hash(None, &t2));
+        assert_eq!(k_base, compute_hash(None, &t3));
+        // Sanity: a REAL arg change still changes the key.
+        let mut differ = base.clone();
+        differ.push("--edition=2024".into());
+        assert_ne!(k_base, compute_hash(None, &differ));
     }
 
     #[test]
@@ -549,6 +764,7 @@ mod tests {
 
     #[test]
     fn test_store_and_lookup() {
+        iso();
         let entry = CacheEntry {
             source_hash: "abc123".into(),
             args_hash: "def456".into(),
@@ -563,6 +779,7 @@ mod tests {
 
     #[test]
     fn test_batch_store() {
+        iso();
         let entries: Vec<(String, CacheEntry)> = (0..3).map(|i| {
             (format!("batch_{}", i), CacheEntry {
                 source_hash: format!("hash_{}", i),
@@ -581,6 +798,7 @@ mod tests {
 
     #[test]
     fn test_lookup_missing() {
+        iso();
         assert!(lookup("nonexistent_key_xyz").is_none());
     }
 
@@ -593,6 +811,7 @@ mod tests {
 
     #[test]
     fn test_lru_warms_on_disk_hit() {
+        iso();
         let _stats_guard = CACHE_TEST_LOCK.lock();
         reset_stats();
         let key = "lru_warm_test_key";
@@ -616,6 +835,7 @@ mod tests {
 
     #[test]
     fn test_stats_counts_misses() {
+        iso();
         let _stats_guard = CACHE_TEST_LOCK.lock();
         reset_stats();
         let _ = lookup("definitely_not_a_real_cache_key_zzz");
@@ -646,6 +866,7 @@ mod tests {
 
     #[test]
     fn test_v11_sharded_path() {
+        iso();
         let p = cache_path("abcdef1234");
         assert!(p.to_string_lossy().contains("objects"));
         assert!(p.to_string_lossy().contains("/ab/"));
@@ -654,6 +875,7 @@ mod tests {
 
     #[test]
     fn test_v11_store_and_lookup_bin() {
+        iso();
         let key = "v11_round_trip_aabbcc";
         let _ = fs::remove_file(cache_path(key));
         let entry = fresh_entry(7);
@@ -666,6 +888,7 @@ mod tests {
 
     #[test]
     fn test_v11_legacy_json_fallback() {
+        iso();
         // Hand-craft a pre-v0.11 entry at the flat JSON path; lookup() must
         // find it via the tier-3 legacy fallback.
         let key = "v11_legacy_fallback_xx";
@@ -683,6 +906,7 @@ mod tests {
 
     #[test]
     fn test_v11_atomic_write_no_tmp_leak_on_success() {
+        iso();
         let key = "v11_atomic_clean_zz";
         let _ = fs::remove_file(cache_path(key));
         store(key, &fresh_entry(1));
@@ -702,6 +926,7 @@ mod tests {
 
     #[test]
     fn test_v11_current_disk_bytes_grows_with_store() {
+        iso();
         let _g = CACHE_TEST_LOCK.lock();
         // Use unique keys so we don't trample concurrent test runs.
         let k1 = "v11_disk_bytes_1_a1b2c3";
@@ -717,6 +942,7 @@ mod tests {
 
     #[test]
     fn test_v11_evict_to_capacity_no_cap_noop() {
+        iso();
         let _g = CACHE_TEST_LOCK.lock();
         set_disk_capacity(0);
         let removed = evict_to_capacity();
@@ -725,6 +951,7 @@ mod tests {
 
     #[test]
     fn test_v11_evict_to_capacity_drops_oldest() {
+        iso();
         let _g = CACHE_TEST_LOCK.lock();
         // Write a few entries, then set a tiny cap, then evict.
         // Use unique-prefixed keys so this test doesn't compete with peers.
@@ -748,6 +975,7 @@ mod tests {
 
     #[test]
     fn test_v11_stats_v11_shape() {
+        iso();
         let s = stats_v11();
         // Just check the tuple length / type by destructuring.
         let (_a, _b, _c, _d, _e, _f, _g) = s;
@@ -755,6 +983,7 @@ mod tests {
 
     #[test]
     fn test_evict_older_than_drops_old_files() {
+        iso();
         let key = "evict_test_key";
         let entry = CacheEntry {
             source_hash: "h".into(),

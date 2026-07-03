@@ -1,0 +1,149 @@
+diff --git a/crates/flux-frontend/src/mir.rs b/crates/flux-frontend/src/mir.rs
+index cf61f8d6..f93b9ea7 100644
+--- a/crates/flux-frontend/src/mir.rs
++++ b/crates/flux-frontend/src/mir.rs
+@@ -434,6 +434,48 @@ where I: Iterator<Item = &'a str>
+ }
+ 
+ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
++    // Rung 7 (traits): a qualified-path call `<Sq as Area>::area(move _2)`. The ` as `
++    // inside the path would otherwise trip the cast handler below (func -> "as"), so
++    // recognize the call FIRST: func = the whole `<..>::method`, args from the list after
++    // it. normalize_traits() later canonicalizes the func to `Type__method`.
++    {
++        let t = rhs.trim();
++        if t.starts_with('<') {
++            if let Some(gp) = t.find(">::") {
++                if let Some(pp) = t[gp..].find('(') {
++                    let paren = gp + pp;
++                    let func = t[..paren].to_string();
++                    let args_str = &t[paren + 1..];
++                    if let Some(close) = args_str.rfind(')') {
++                        let args: Vec<String> = args_str[..close].split(',')
++                            .map(|a| a.trim().trim_start_matches("copy ").trim_start_matches("move ").trim().to_string())
++                            .filter(|a| !a.is_empty()).collect();
++                        return (func, args);
++                    }
++                }
++            }
++        }
++    }
++    // Rung 7 (traits, by-value &self elision): `&_N` / `&mut _N` — a reference to a
++    // by-value scalar-replaced local. Flux passes aggregates by value, so a shared
++    // reference is identity: treat it as `copy _N`. The whole-aggregate passthrough
++    // (flux-backend) then copies every leaf, and a later deref `(*_N).K` reads field K.
++    {
++        let t = rhs.trim();
++        let inner = t.strip_prefix("&mut ").or_else(|| t.strip_prefix("&"));
++        if let Some(inner) = inner {
++            let inner = inner.trim();
++            if inner.starts_with('_') && inner[1..].chars().all(|c| c.is_ascii_digit()) && inner.len() > 1 {
++                return ("copy".to_string(), vec![inner.to_string()]);
++            }
++        }
++    }
++    // Rung 7: `&self` field read renders as a deref-projection `((*_N).K: T)` (opt
++    // copy/move). By-value elision makes `*_N == _N`, so this is field K of the
++    // aggregate: emit `_N.K`, reusing the tuple/struct `_N.F` resolver.
++    if let Some(proj) = strip_deref_projection(rhs) {
++        return ("copy".to_string(), vec![proj]);
++    }
+     // Data-carrying enum payload extraction: `copy ((_N as Variant).K: T)` — rustc downcasts an enum
+     // local to a variant and projects its K-th field. Map it to aggregate field (K+1): field 0 is the
+     // discriminant tag, payload slots start at 1. Emitting `copy _N.(K+1)` reuses the existing
+@@ -491,6 +533,22 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
+     (trimmed.to_string(), vec![])
+ }
+ 
++/// Recognise a by-value `&self` field read `((*_N).K: T)` (optionally `copy `/`move `
++/// prefixed) and return the aggregate-field operand `_N.K`. Under Flux's by-value
++/// aggregate ABI a shared reference is identity, so a deref-then-project is just field
++/// access. Returns None for anything without the `(*_` deref shape.
++fn strip_deref_projection(rhs: &str) -> Option<String> {
++    let s = rhs.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
++    let rest = s.strip_prefix("((*_")?;                 // ((*_1).0: i64)
++    let ndigits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
++    if ndigits.is_empty() { return None; }
++    let after = &rest[ndigits.len()..];
++    let after = after.strip_prefix(").")?;              // ).0: i64)
++    let kdigits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
++    if kdigits.is_empty() { return None; }
++    Some(format!("_{}.{}", ndigits, kdigits))
++}
++
+ /// Recognise a data-carrying enum downcast-projection `((_N as Variant).K: T)` (optionally prefixed
+ /// `copy `/`move `) and return the operand encoded as `_N|Variant|K` (raw payload index K — the
+ /// backend computes the real field offset from the enum layout). Returns None for anything else — crucially
+@@ -625,10 +683,72 @@ fn specialize(template: &MirFunction, targs: &[String], mangled: &str) -> MirFun
+     f
+ }
+ 
++/// Canonicalize a trait method name to a receiver-qualified symbol both the impl
++/// DEFINITION and the CALL SITE agree on. rustc renders the impl body as
++/// `<impl at FILE:L:C: L:C>::method` and the call as `<Type as Trait>::method` — two
++/// different strings for one function, which link as an undefined symbol. We map both to
++/// `Type__method`: the call encodes the type directly; the impl derives it from the
++/// receiver (param 0) type, `&Sq`/`&mut Sq`/`Sq` -> `Sq`.
++fn trait_canon_from_call(name: &str) -> Option<String> {
++    // <Sq as Area>::area  ->  Sq__area
++    let inner = name.strip_prefix('<')?;
++    let as_pos = inner.find(" as ")?;
++    let ty = inner[..as_pos].trim();
++    let method = name.rsplit(">::").next()?.trim();
++    if ty.is_empty() || method.is_empty() || method == name { return None; }
++    Some(format!("{}__{}", ty, method))
++}
++fn recv_base(ty: &str) -> String {
++    let t = ty.trim().trim_start_matches("&mut ").trim_start_matches('&').trim();
++    t.split(|c: char| c == '<' || c == ' ' || c == ',').next().unwrap_or(t).to_string()
++}
++fn trait_canon_from_impl(f: &MirFunction) -> Option<String> {
++    if !f.name.starts_with("<impl") { return None; }
++    let method = f.name.rsplit(">::").next()?.trim();
++    let recv = f.params.first().map(|p| recv_base(&p.ty)).unwrap_or_default();
++    if recv.is_empty() || method.is_empty() { return None; }
++    Some(format!("{}__{}", recv, method))
++}
++
++/// Rung 7 (static trait dispatch): unify impl-definition and call-site trait method names,
++/// and strip `&`/`&mut ` from receiver param types so `&self` methods scalar-replace their
++/// by-value receiver. Programs with no trait syntax are returned unchanged.
++pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
++    let touches = funcs.iter().any(|f| f.name.starts_with("<impl")
++        || f.blocks.iter().any(|b| matches!(&b.terminator,
++            Some(MirTerminator::Call { func, .. }) if func.starts_with('<') && func.contains(" as "))));
++    if !touches { return funcs; }
++    for f in &mut funcs {
++        if let Some(canon) = trait_canon_from_impl(f) {
++            f.name = canon;
++        }
++        // Whole-program by-value elision: strip &/&mut from EVERY param and local
++        // type, so reference-typed carriers ( in a caller, ) become
++        // their pointee and get scalar-replaced by value. Consistent caller+callee; the
++        // deref/ref-op rewrites in parse_rhs make the bodies agree.
++        for pp in &mut f.params {
++            let b = recv_base(&pp.ty);
++            if pp.ty.trim_start().starts_with('&') { pp.ty = b; }
++        }
++        for l in &mut f.locals {
++            if l.ty.trim_start().starts_with('&') { l.ty = recv_base(&l.ty); }
++        }
++        for b in &mut f.blocks {
++            if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
++                if let Some(canon) = trait_canon_from_call(func) { *func = canon; }
++            }
++        }
++    }
++    funcs
++}
++
+ /// Monomorphize a parsed MIR function list. See the module-section comment above. No turbofish calls →
+ /// the input is returned unchanged.
+ pub fn monomorphize(funcs: Vec<MirFunction>) -> Vec<MirFunction> {
+     use std::collections::{HashMap, HashSet};
++    // Rung 7: unify trait method names + elide &self references BEFORE monomorphization,
++    // so generic trait calls (`<T as Tr>::m`) canonicalize alongside concrete ones.
++    let funcs = normalize_traits(funcs);
+     let mut by_name: HashMap<String, MirFunction> = HashMap::new();
+     for f in &funcs { by_name.entry(f.name.clone()).or_insert_with(|| f.clone()); }
+ 

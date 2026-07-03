@@ -1,7 +1,44 @@
 # LADDER RUNG 7 — Traits: static & dyn dispatch (design, v0.37 groundwork)
 
-**Status:** Draft / design-only — scope cut + corpus baselines, NO codegen in this doc.
-**Author:** claude-cw-win-bg2 · **Date:** 2026-07-03
+**Status (updated 2026-07-03):** IN PROGRESS. Prerequisite CLEARED (aggregate pass-through
+fix, commit a2a31b93). Frontend static-dispatch scaffolding IMPLEMENTED and its first
+milestone VERIFIED; backend by-value-receiver codegen is the remaining work. Full WIP saved
+at `docs/traits-rung7-frontend-wip.patch` (flux-frontend/src/mir.rs) — deliberately NOT
+committed to the compiler, because a trait program currently returns a wrong value (0), and
+the project does not ship silent value bugs. Apply the patch to resume.
+
+### Done + verified (frontend, in the WIP patch)
+- **Name unification**: `<impl at FILE:L:C>::method` (definition) and `<Type as Trait>::method`
+  (call) both canonicalize to `Type__method` (`normalize_traits`, keyed off the impl's param-0
+  receiver type). This CLEARS the link error (`undefined reference to '...'` / mis-parsed `as`) —
+  verified: the trait sample now compiles + links, where before it failed at `ld`.
+- **Qualified-path call guard** in `parse_rhs`: recognizes `<T as Tr>::m(args)` as a call BEFORE
+  the ` as ` cast handler mis-splits it into a bogus `as` callee.
+- **By-value `&self` elision (parse)**: `&_N`/`&mut _N` -> `copy _N`; deref-projection
+  `((*_N).K: T)` -> `_N.K`; and `&T`/`&mut T` stripped from every param+local type so reference
+  carriers scalar-replace by value. (Leans on the a2a31b93 aggregate pass-through fix.)
+
+### Remaining (backend codegen — why it returns 0 today)
+The by-value receiver does not flow through a trait call yet: `q.area()` on `Sq{s:6}` returns 0,
+not 6 (field-only) / 36 (with `self.s*self.s`). Two concrete gaps, both isolated and measurable:
+1. **Aggregate-arg flattening at the trait call site.** `_2 = &_1` becomes `copy _1` (an aggregate
+   pass-through), but the subsequent `Type__method(move _2)` must pass `_2`'s scalar-replaced
+   FIELDS as the flattened args to match the callee's flattened params. Verify with the field-only
+   sample (`impl Area for Sq { fn area(&self)->i64 { self.s } }`, gate = 6) FIRST — it isolates the
+   receiver path from arithmetic.
+2. **`MulWithOverflow`** (checked `*`): `_4 = MulWithOverflow(copy _2, copy _3); _0 = move (_4.0: i64)`
+   — the backend must lower it to a plain multiply and project `.0` as the product (drop the `.1`
+   overflow bool + its assert). Needed for the `s*s`=36 gate; not for the field-only=6 gate.
+
+### e2e gates (unchanged, from the original design)
+```
+field-only: Sq{s:6}.area()==6   (isolates receiver flattening — do this one first)
+static:     static_call(Sq{s:6})==36
+generic:    call_generic(Sq{s:5})==25
+dyn:        &dyn Area area()==16
+```
+
+**Author:** claude-cw-win-bg2 (design) · claude-cw-win (frontend impl) · **Date:** 2026-07-03
 **Corpus:** `mir-corpus/trait_static.rs`, `trait_generic.rs`, `trait_dyn.rs` (+ committed
 `.mir.expected` baselines against the pinned rustc 1.93.1 — now enforced by the drift test).
 

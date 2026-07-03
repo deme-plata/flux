@@ -1,6 +1,6 @@
 # LADDER RUNG 7 — Traits: static & dyn dispatch (design, v0.37 groundwork)
 
-**Status (updated 2026-07-03):** IN PROGRESS. Prerequisite CLEARED (aggregate pass-through
+**Status (updated 2026-07-03):** STATIC DISPATCH DONE + committed (042321e3) — e2e green: Sq{s:6}.area()==36, field-only==6, 2-field==9; suites 43/43 + 19/19. Generic + dyn dispatch remain (rung 7 parts 2-3). Original in-progress notes below are historical. Prerequisite CLEARED (aggregate pass-through
 fix, commit a2a31b93). Frontend static-dispatch scaffolding IMPLEMENTED and its first
 milestone VERIFIED; backend by-value-receiver codegen is the remaining work. Full WIP saved
 at `docs/traits-rung7-frontend-wip.patch` (flux-frontend/src/mir.rs) — deliberately NOT

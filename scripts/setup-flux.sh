@@ -69,7 +69,7 @@ ARCH="$(uname -m 2>/dev/null)"
 if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; then
   echo "  ${B}[1/2]${R} Fetching prebuilt fluxc ${D}(musl static — no build, ~2s)${R}…"
   mkdir -p "$FLUX_HOME/bin"
-  if curl -fsSL "https://quillon.xyz/downloads/fluxc-musl-x64" -o "$FLUX_HOME/bin/fluxc" && chmod +x "$FLUX_HOME/bin/fluxc" && "$FLUX_HOME/bin/fluxc" version >/dev/null 2>&1; then
+  if curl -fsSL "https://fluxapp.xyz/downloads/fluxc-musl-x64" -o "$FLUX_HOME/bin/fluxc" && chmod +x "$FLUX_HOME/bin/fluxc" && "$FLUX_HOME/bin/fluxc" version >/dev/null 2>&1; then
     FLUXC="$FLUX_HOME/bin/fluxc"; GOT_PREBUILT=1
     echo "  ${GRN}✓${R} $("$FLUXC" version 2>/dev/null | head -c 60) ${D}($(du -h "$FLUXC" 2>/dev/null | cut -f1))${R} → ${VIO}$FLUXC${R}"
   else
@@ -105,7 +105,7 @@ source "$HOME/.cargo/env" 2>/dev/null || true
 # ── 4. fetch + compile fluxc from source ─────────────────────────────────
 # The tarball ships BOTH the flux and sigil trees (flux/ has ../sigil path deps).
 echo "  ${B}[3/4]${R} Fetching Flux source ${D}(flux + sigil trees)${R}…"
-curl -fsSL "https://quillon.xyz/downloads/flux-src.tar.gz" -o /tmp/flux-src.tar.gz
+curl -fsSL "https://fluxapp.xyz/downloads/flux-src.tar.gz" -o /tmp/flux-src.tar.gz
 mkdir -p "$FLUX_HOME/src"
 tar xzf /tmp/flux-src.tar.gz -C "$FLUX_HOME/src" && rm -f /tmp/flux-src.tar.gz
 echo "      source → $SRC_DIR"
@@ -205,7 +205,7 @@ cat <<DONE
      ${VIO}"run a 100-node chronos sim"${R}              ${D}→ deterministic network test${R}
 
    ${B}Stay current:${R}  ${CYN}fluxc self-update${R}   ${D}(pulls the latest prebuilt)${R}
-   ${B}Docs:${R}   https://quillon.xyz/garden.html      ${D}(live Compile Garden)${R}
+   ${B}Docs:${R}   https://fluxapp.xyz/garden.html      ${D}(live Compile Garden)${R}
    ${B}fluxc:${R}  $FLUXC $([ -n "$MCP_VER" ] && echo "· v$MCP_VER · MCP verified")
 
 DONE

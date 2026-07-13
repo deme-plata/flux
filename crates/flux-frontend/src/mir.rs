@@ -670,6 +670,22 @@ fn rewrite_calls(f: &mut MirFunction, templates: &std::collections::HashSet<Stri
     }
 }
 
+/// Ladder rung 7 part 2 (generic trait dispatch): a generic template's body may call a trait
+/// method through the still-generic receiver (`<T as Area>::area`), already canonicalized by
+/// `normalize_traits` (which runs before monomorphize) to `T__area`. Once `specialize` pins `T` to
+/// a concrete type, the callee must follow — rewrite `T__area` -> `Sq__area` so the instance calls
+/// the real, already-canonicalized impl function emitted alongside it, not a name that never
+/// exists. A non-trait callee (no `__`, or a prefix that isn't a substituted type param) passes
+/// through unchanged.
+fn subst_trait_callee(func: &str, map: &std::collections::HashMap<String, String>) -> String {
+    if let Some(pos) = func.find("__") {
+        if let Some(concrete) = map.get(&func[..pos]) {
+            return format!("{}__{}", concrete, &func[pos + 2..]);
+        }
+    }
+    func.to_string()
+}
+
 /// Generate a concrete instance of `template` for `targs`: substitute type params, rename to `mangled`.
 fn specialize(template: &MirFunction, targs: &[String], mangled: &str) -> MirFunction {
     let tparams = detect_type_params(template);
@@ -680,6 +696,11 @@ fn specialize(template: &MirFunction, targs: &[String], mangled: &str) -> MirFun
     f.return_type = subst_type(&f.return_type, &map);
     for p in &mut f.params { p.ty = subst_type(&p.ty, &map); }
     for l in &mut f.locals { l.ty = subst_type(&l.ty, &map); }
+    for b in &mut f.blocks {
+        if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
+            *func = subst_trait_callee(func, &map);
+        }
+    }
     f
 }
 
@@ -1301,6 +1322,49 @@ mod tests {
             locals: vec![], blocks: vec![] };
         assert_eq!(detect_type_params(&f), vec!["A".to_string(), "B".to_string()]);
         // (end-to-end monomorphization is proven by the compile-native `run()=100` gate)
+    }
+
+    #[test]
+    fn monomorphize_generic_trait_callee_rewrite() {
+        // Ladder rung 7 part 2 (generic trait dispatch): area_of<T> calls `<T as Area>::area`,
+        // canonicalized pre-monomorphize to `T__area`. specialize()-ing area_of for T=Sq must
+        // rewrite that callee to `Sq__area` (the concrete impl's canon name) -- otherwise the
+        // instance calls a function that never exists (silently mis-linked / wrong value).
+        let mir = "fn <impl at t.rs:1:1: 1:1>::area(_1: &Sq) -> i64 {
+    bb0: {
+        _0 = copy ((*_1).0: i64);
+        return;
+    }
+}
+fn area_of(_1: &T) -> i64 {
+    bb0: {
+        _0 = <T as Area>::area(copy _1) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+fn call_generic(_1: Sq) -> i64 {
+    bb0: {
+        _2 = &_1;
+        _0 = area_of::<Sq>(copy _2) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+";
+        let funcs = monomorphize(parse_mir(mir).unwrap());
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"Sq__area"), "impl must canonicalize to Sq__area: {:?}", names);
+        assert!(names.contains(&"area_of$Sq"), "generic must specialize to area_of$Sq: {:?}", names);
+        let inst = funcs.iter().find(|f| f.name == "area_of$Sq").unwrap();
+        let callee = match &inst.blocks[0].terminator {
+            Some(MirTerminator::Call { func, .. }) => func.clone(),
+            other => panic!("expected a call terminator, got {:?}", other),
+        };
+        assert_eq!(callee, "Sq__area",
+            "specialized area_of$Sq must call the CONCRETE impl (Sq__area), not the still-generic T__area");
     }
 
     #[test]

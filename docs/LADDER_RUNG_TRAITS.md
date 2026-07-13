@@ -1,6 +1,35 @@
 # LADDER RUNG 7 — Traits: static & dyn dispatch (design, v0.37 groundwork)
 
-**Status (updated 2026-07-03):** STATIC DISPATCH DONE + committed (042321e3) — e2e green: Sq{s:6}.area()==36, field-only==6, 2-field==9; suites 43/43 + 19/19. Generic + dyn dispatch remain (rung 7 parts 2-3). Original in-progress notes below are historical. Prerequisite CLEARED (aggregate pass-through
+**Status (updated 2026-07-13):** STATIC DISPATCH DONE (042321e3) + **GENERIC DISPATCH DONE**
+(this commit) — e2e green: `Sq{s:6}.area()==36`, field-only==6, 2-field==9,
+**`call_generic(Sq{s:5})==25`** (the design-doc generic gate). Dyn dispatch (rung 7 part 3,
+the vtable subsystem) remains — see the Vtable layout plan section below, unchanged.
+
+**Generic dispatch — what shipped and why it was the whole gap:** `normalize_traits` (which
+runs before `monomorphize`) already canonicalizes a still-generic trait call `<T as Area>::area`
+to `T__area`, same scheme as a concrete call. `specialize()` substituted types in
+params/locals/return_type when pinning `T` to a concrete arg, but never rewrote CALL
+TERMINATORS — so a specialized `area_of$Sq` kept calling `T__area`, a function that never
+exists (the concrete impl is canonicalized to `Sq__area`). Fix: `specialize()` now also rewrites
+any call terminator's callee via a new `subst_trait_callee` helper — `T__area` + `{T: Sq}` →
+`Sq__area` — reusing the exact substitution map already built for type params, since a trait
+callee's mangled prefix IS a type-param name post-canonicalization. No backend change needed:
+static dispatch already proved the call/aggregate/arithmetic path (`MulWithOverflow` lowering,
+by-value receiver flattening) that a resolved `Sq__area` call exercises identically.
+flux-frontend 18/18, flux-backend 43/43 (no regression). e2e verified live via `fluxc run` on
+`docs/../` sample matching `mir-corpus/trait_generic.rs`'s shape (own copy used `fn main() -> i64`,
+the idiom established by other rungs' e2e gates — NOT `std::process::exit`, which is a
+diverging external call the MIR terminator parser doesn't yet handle: rustc renders it as
+`-> [unwind continue]` with no `return:` branch, which the parser's fallback mis-reads as a
+literal block-name target. That is a pre-existing, separate gap, unrelated to this fix — noted
+here so it isn't rediscovered blind.
+
+**Known pre-existing gap (not from this change):** `mir-corpus/trait_static_e2e.rs` (added in
+042321e3) has no committed `.mir.expected` baseline — `mir-corpus/check.sh` reports a drift
+diff (file-not-found) on every run. Belongs to the static-dispatch lane; flagging for whoever
+closes it out.
+
+Original in-progress notes below are historical. Prerequisite CLEARED (aggregate pass-through
 fix, commit a2a31b93). Frontend static-dispatch scaffolding IMPLEMENTED and its first
 milestone VERIFIED; backend by-value-receiver codegen is the remaining work. Full WIP saved
 at `docs/traits-rung7-frontend-wip.patch` (flux-frontend/src/mir.rs) — deliberately NOT

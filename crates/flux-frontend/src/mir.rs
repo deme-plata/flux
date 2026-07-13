@@ -734,29 +734,99 @@ fn trait_canon_from_impl(f: &MirFunction) -> Option<String> {
 /// Rung 7 (static trait dispatch): unify impl-definition and call-site trait method names,
 /// and strip `&`/`&mut ` from receiver param types so `&self` methods scalar-replace their
 /// by-value receiver. Programs with no trait syntax are returned unchanged.
+///
+/// Rung 7 part 3 (dyn dispatch, closed-world devirtualization): a `<dyn Trait as Trait>::m`
+/// call canonicalizes to `dyn Trait__m` — a symbol no impl ever defines. In this single-unit
+/// pipeline the whole world is visible, so when exactly ONE canonicalized impl provides
+/// method `m`, the dyn call is provably that impl: rewrite the callee to `Type__m`, rewrite
+/// `&dyn Trait`/`dyn Trait` carriers to the concrete type, and collapse the unsize coercion
+/// (`_a = copy _b as &dyn Trait (PointerCoercion(Unsize, …))`) to a plain aggregate copy.
+/// With MULTIPLE impls of `m` the target is runtime-dependent — that needs real vtables
+/// (rung 7 part 3b); we warn loudly and leave the call intact so the link fails visibly
+/// instead of emitting silently-wrong code.
 pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
+    use std::collections::HashMap;
     let touches = funcs.iter().any(|f| f.name.starts_with("<impl")
         || f.blocks.iter().any(|b| matches!(&b.terminator,
             Some(MirTerminator::Call { func, .. }) if func.starts_with('<') && func.contains(" as "))));
     if !touches { return funcs; }
+
+    // Pass 1 — canonicalize impl-definition and call-site names to `Type__method`.
+    // Track which names came from impls: only those are devirtualization candidates
+    // (a user fn that happens to contain `__` must not be mistaken for one).
+    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new(); // method -> concrete types
     for f in &mut funcs {
         if let Some(canon) = trait_canon_from_impl(f) {
+            if let Some(pos) = canon.find("__") {
+                method_impls.entry(canon[pos + 2..].to_string())
+                    .or_default().push(canon[..pos].to_string());
+            }
             f.name = canon;
-        }
-        // Whole-program by-value elision: strip &/&mut from EVERY param and local
-        // type, so reference-typed carriers ( in a caller, ) become
-        // their pointee and get scalar-replaced by value. Consistent caller+callee; the
-        // deref/ref-op rewrites in parse_rhs make the bodies agree.
-        for pp in &mut f.params {
-            let b = recv_base(&pp.ty);
-            if pp.ty.trim_start().starts_with('&') { pp.ty = b; }
-        }
-        for l in &mut f.locals {
-            if l.ty.trim_start().starts_with('&') { l.ty = recv_base(&l.ty); }
         }
         for b in &mut f.blocks {
             if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
                 if let Some(canon) = trait_canon_from_call(func) { *func = canon; }
+            }
+        }
+    }
+
+    // Pass 2 — devirtualize `dyn Trait__method` callees with a unique providing impl.
+    let mut dyn_map: HashMap<String, String> = HashMap::new(); // "dyn Trait" -> "Type"
+    for f in &mut funcs {
+        for b in &mut f.blocks {
+            if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
+                if !func.starts_with("dyn ") { continue; }
+                let Some(pos) = func.find("__") else { continue };
+                let (dyn_ty, method) = (func[..pos].to_string(), func[pos + 2..].to_string());
+                match method_impls.get(&method).map(|v| v.as_slice()) {
+                    Some([one]) => {
+                        dyn_map.insert(dyn_ty, one.clone());
+                        *func = format!("{}__{}", one, method);
+                    }
+                    Some(many) => eprintln!(
+                        "flux-frontend: dyn dispatch on `{}` has {} impls of `{}` — runtime \
+                         target needs vtables (rung 7 part 3b, unimplemented); leaving the \
+                         call unresolved (will fail at link, not silently mis-dispatch)",
+                        dyn_ty, many.len(), method),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    // Pass 3 — by-value elision + dyn carrier substitution + unsize-cast collapse.
+    for f in &mut funcs {
+        // Whole-program by-value elision: strip &/&mut from EVERY param and local
+        // type, so reference-typed carriers ( in a caller, ) become
+        // their pointee and get scalar-replaced by value. Consistent caller+callee; the
+        // deref/ref-op rewrites in parse_rhs make the bodies agree. Devirtualized
+        // `dyn Trait` carriers become the concrete type BEFORE recv_base would
+        // otherwise mangle `&dyn Trait` into the meaningless base `dyn`.
+        for pp in f.params.iter_mut().chain(f.locals.iter_mut()) {
+            let bare = pp.ty.trim().trim_start_matches("&mut ").trim_start_matches('&').trim();
+            if let Some(conc) = dyn_map.get(bare) {
+                pp.ty = conc.clone();
+            } else if pp.ty.trim_start().starts_with('&') {
+                pp.ty = recv_base(&pp.ty);
+            }
+        }
+        if dyn_map.is_empty() { continue; }
+        for b in &mut f.blocks {
+            for s in &mut b.statements {
+                if let MirStmt::Assign { op, args, .. } = s {
+                    // `copy _3 as &dyn Trait (PointerCoercion(Unsize, …))` — after
+                    // devirtualization both sides are the same concrete aggregate, so the
+                    // coercion is the identity: plain copy. (parse_rhs keeps only the first
+                    // token of the cast target, hence the `dyn` prefix check.)
+                    if op == "as" && args.len() >= 2
+                        && args[1].trim_start_matches('&').starts_with("dyn") {
+                        let operand = args[0].trim()
+                            .trim_start_matches("copy ").trim_start_matches("move ")
+                            .trim().to_string();
+                        *op = "copy".to_string();
+                        *args = vec![operand];
+                    }
+                }
             }
         }
     }
@@ -1365,6 +1435,61 @@ fn call_generic(_1: Sq) -> i64 {
         };
         assert_eq!(callee, "Sq__area",
             "specialized area_of$Sq must call the CONCRETE impl (Sq__area), not the still-generic T__area");
+    }
+
+    #[test]
+    fn normalize_traits_devirtualizes_unique_dyn_impl() {
+        // Ladder rung 7 part 3 (dyn dispatch, closed-world): `<dyn Area as Area>::area`
+        // canonicalizes to `dyn Area__area` — a symbol no impl defines. With exactly one
+        // impl of `area` visible in the unit, the callee must devirtualize to `Sq__area`,
+        // the `&dyn Area` carriers must become the concrete `Sq`, and the unsize coercion
+        // must collapse to a plain aggregate copy.
+        let mir = "fn <impl at t.rs:1:1: 1:1>::area(_1: &Sq) -> i64 {
+    bb0: {
+        _0 = copy ((*_1).0: i64);
+        return;
+    }
+}
+fn dyn_call(_1: &dyn Area) -> i64 {
+    bb0: {
+        _0 = <dyn Area as Area>::area(copy _1) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+fn main() -> i64 {
+    let mut _0: i64;
+    let _1: Sq;
+    let mut _2: &dyn Area;
+    let _3: &Sq;
+    bb0: {
+        _1 = Sq { s: const 4_i64 };
+        _3 = &_1;
+        _2 = copy _3 as &dyn Area (PointerCoercion(Unsize, Implicit));
+        _0 = dyn_call(move _2) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+";
+        let funcs = normalize_traits(parse_mir(mir).unwrap());
+        let dc = funcs.iter().find(|f| f.name == "dyn_call").unwrap();
+        match &dc.blocks[0].terminator {
+            Some(MirTerminator::Call { func, .. }) =>
+                assert_eq!(func, "Sq__area", "dyn callee must devirtualize to the unique impl"),
+            other => panic!("expected a call terminator, got {:?}", other),
+        }
+        assert_eq!(dc.params[0].ty, "Sq",
+            "&dyn Area receiver must become the concrete by-value type, not `dyn`");
+        let mn = funcs.iter().find(|f| f.name == "main").unwrap();
+        assert!(mn.locals.iter().all(|l| !l.ty.contains("dyn")),
+            "no dyn carrier may survive devirtualization: {:?}",
+            mn.locals.iter().map(|l| &l.ty).collect::<Vec<_>>());
+        let unsize_collapsed = mn.blocks[0].statements.iter().any(|s| matches!(s,
+            MirStmt::Assign { op, args, .. } if op == "copy" && args == &vec!["_3".to_string()]));
+        assert!(unsize_collapsed, "unsize coercion must collapse to a plain copy of the operand");
     }
 
     #[test]

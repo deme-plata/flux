@@ -195,6 +195,95 @@ pub fn record_invocation(cmd: &str, package: Option<&str>, release: bool, green:
     record_unit(unit_kind, &unit_id, &record);
 }
 
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        UNIT_KIND_COMPILE => "compile",
+        UNIT_KIND_TEST => "test",
+        UNIT_KIND_COMBO => "combo",
+        UNIT_KIND_SWARM => "swarm",
+        _ => "?",
+    }
+}
+
+/// `fluxc tdg` — the phase-1 read side: what has the tracer recorded?
+/// Prints node counts by kind, edge count, and the most recent runs. This is
+/// deliberately a REPORT, not the incremental scheduler (that query engine is
+/// the v0.37 implementation FIP) — it exists so the accumulating graph is
+/// visible to operators and agents from day one.
+pub fn run_tdg_report(limit: usize) {
+    println!("⚡ fluxc tdg — task-dependency graph (FIP-0003 phase 1, write-only tracer)");
+    println!("  db: {}", tdg_dir().display());
+    if !enabled() {
+        println!("  (FLUX_TDG=0 — tracing disabled)");
+        return;
+    }
+    let Some(db) = open_db() else {
+        println!("  (no TDG yet — it appears after the first fluxc build/check/test)");
+        return;
+    };
+
+    let mut by_kind: std::collections::BTreeMap<u8, u64> = std::collections::BTreeMap::new();
+    let mut green: u64 = 0;
+    let mut red: u64 = 0;
+    for (k, v) in db.iter_from(b"n/") {
+        if !k.starts_with(b"n/") { break; }
+        if let Ok(rec) = bincode::deserialize::<NodeRecord>(&v) {
+            *by_kind.entry(rec.unit_kind).or_insert(0) += 1;
+            match rec.outcome {
+                Outcome::Green => green += 1,
+                Outcome::Red => red += 1,
+                Outcome::Skipped { .. } => {}
+            }
+        }
+    }
+    let mut edges: u64 = 0;
+    for (k, _) in db.iter_from(b"e/") {
+        if !k.starts_with(b"e/f/") { break; } // forward direction only — reverse mirrors it
+        edges += 1;
+    }
+    let total: u64 = by_kind.values().sum();
+    print!("  nodes: {} (", total);
+    let parts: Vec<String> = by_kind.iter()
+        .map(|(k, n)| format!("{} {}", n, kind_name(*k))).collect();
+    println!("{}) · {} green / {} red · {} edges", parts.join(", "), green, red, edges);
+
+    // Recent runs: r/<unix_ms>/<unit_id>, ordered — walk from the back.
+    let now = flux_db::ttl::now_unix();
+    let runs: Vec<(Vec<u8>, Vec<u8>)> = db.iter_from(b"r/")
+        .take_while(|(k, _)| k.starts_with(b"r/"))
+        .collect();
+    println!("  recent runs (last {} of {}):", limit.min(runs.len()), runs.len());
+    for (k, v) in runs.iter().rev().take(limit) {
+        let key = String::from_utf8_lossy(k);
+        let mut it = key.splitn(3, '/');
+        let (_, ms, unit) = (it.next(), it.next().unwrap_or("?"), it.next().unwrap_or("?"));
+        let when = ms.parse::<u64>().map(|m| {
+            let ago = now.saturating_sub(m / 1000);
+            if ago < 120 { format!("{}s ago", ago) }
+            else if ago < 7200 { format!("{}m ago", ago / 60) }
+            else { format!("{}h ago", ago / 3600) }
+        }).unwrap_or_else(|_| "?".to_string());
+        match flux_db::ttl::unwrap(v, now)
+            .and_then(|live| bincode::deserialize::<RunStamp>(&live).ok()) {
+            Some(stamp) => {
+                let mark = match stamp.outcome {
+                    Outcome::Green => "✓",
+                    Outcome::Red => "✗",
+                    Outcome::Skipped { .. } => "⏭",
+                };
+                // Look the display name up from the node record (any kind).
+                let display = (0u8..=3).find_map(|kind| {
+                    db.get(format!("n/{}/{}", kind, unit).as_bytes()).ok().flatten()
+                        .and_then(|nv| bincode::deserialize::<NodeRecord>(&nv).ok())
+                        .map(|r| r.display)
+                }).unwrap_or_else(|| format!("{}…", &unit[..unit.len().min(16)]));
+                println!("    {} {:<40} {:>8}ms  {:>9}  {}", mark, display, stamp.wall_ms, when, stamp.agent);
+            }
+            None => println!("    (expired/undecodable run {})", when),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1248,6 +1248,7 @@ pub fn print_usage() {
     println!("  fluxc dev             Start dev servers (Vite HMR + fluxc watch)");
     println!("  fluxc watch           Watch all files, auto-rebuild");
     println!("  fluxc clean           Clear all caches");
+    println!("  fluxc tdg [N]         Task-dependency graph report (FIP-0003 tracer)");
     println!("  fluxc stats           Show build statistics and cache info");
     println!("  fluxc status [--json] Show workspace status (crates, agility)");
     println!("  fluxc release-audit   Show release-lane split and hold status");
@@ -1379,7 +1380,9 @@ pub fn run_self_update(force: bool) {
         Ok(s) if s.success() => {
             let _ = std::process::Command::new("chmod").args(["+x", &target]).status();
             println!("  ✓ Updated {}", target);
-            if let Ok(v) = std::process::Command::new(&target).arg("--version").output() {
+            // `version`, not `--version`: the dashed form is the rustc -vV wrapper
+            // passthrough and prints rustc's version, not fluxc's.
+            if let Ok(v) = std::process::Command::new(&target).arg("version").output() {
                 println!("  New version: {}", String::from_utf8_lossy(&v.stdout).trim());
             }
             println!("  Restart clients using this fluxc for MCP.");

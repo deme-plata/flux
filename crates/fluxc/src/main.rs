@@ -721,6 +721,11 @@ fn main() {
             let force = subcommand_args.iter().any(|a| a == "--force" || a == "-f");
             fluxc_core::run_self_update(force);
         }
+        Some("tdg") => {
+            let limit = subcommand_args.get(1)
+                .and_then(|a| a.parse::<usize>().ok()).unwrap_or(15);
+            fluxc_core::tdg::run_tdg_report(limit);
+        }
         _ => fluxc_core::print_usage(),
     }
 }

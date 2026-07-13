@@ -722,9 +722,25 @@ fn main() {
             fluxc_core::run_self_update(force);
         }
         Some("tdg") => {
-            let limit = subcommand_args.get(1)
-                .and_then(|a| a.parse::<usize>().ok()).unwrap_or(15);
-            fluxc_core::tdg::run_tdg_report(limit);
+            match subcommand_args.get(1).map(|s| s.as_str()) {
+                Some("baseline") => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    match fluxc_core::tdg_sched::find_workspace_root(&cwd) {
+                        Some(root) => fluxc_core::tdg_sched::cmd_baseline(&root),
+                        None => eprintln!("  ✗ no enclosing [workspace] found"),
+                    }
+                }
+                Some("plan") => fluxc_core::tdg_sched::cmd_plan(),
+                Some("run") => {
+                    let check = subcommand_args.iter().any(|a| a == "--check");
+                    let dry = subcommand_args.iter().any(|a| a == "--dry");
+                    fluxc_core::tdg_sched::cmd_run(check, dry);
+                }
+                other => {
+                    let limit = other.and_then(|a| a.parse::<usize>().ok()).unwrap_or(15);
+                    fluxc_core::tdg::run_tdg_report(limit);
+                }
+            }
         }
         _ => fluxc_core::print_usage(),
     }

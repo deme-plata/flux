@@ -5,6 +5,7 @@
 
 pub mod serve;
 pub mod tdg;
+pub mod tdg_sched;
 pub mod serve_stats;
 pub mod serve_events;
 pub mod serve_router;
@@ -1265,6 +1266,9 @@ pub fn print_usage() {
     println!("  fluxc watch           Watch all files, auto-rebuild");
     println!("  fluxc clean           Clear all caches");
     println!("  fluxc tdg [N]         Task-dependency graph report (FIP-0003 tracer)");
+    println!("  fluxc tdg baseline    Record crate source keys (the reference point)");
+    println!("  fluxc tdg plan        Incremental plan: dirty crates + dependency cone");
+    println!("  fluxc tdg run         Test ONLY the cone (--check / --dry)");
     println!("  fluxc stats           Show build statistics and cache info");
     println!("  fluxc status [--json] Show workspace status (crates, agility)");
     println!("  fluxc release-audit   Show release-lane split and hold status");

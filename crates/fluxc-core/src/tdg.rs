@@ -463,15 +463,18 @@ pub fn run_tdg_report(limit: usize) {
     }
 }
 
+// FLUX_TDG_DIR is process-global; cargo runs tests in parallel threads. Without
+// this lock one test's env teardown mid-another's run makes the tracer fall back
+// to the REAL shared TDG (observed: a live run_cargo breadcrumb bleeding into an
+// assertion). Serialize ALL env-touching tests — tdg_sched's too — one dir each.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // FLUX_TDG_DIR is process-global; cargo runs tests in parallel threads. Without
-    // this lock one test's env teardown mid-another's run makes the tracer fall back
-    // to the REAL shared TDG (observed: a live run_cargo breadcrumb bleeding into an
-    // assertion). Serialize all env-touching tests, one unique dir each.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::TEST_ENV_LOCK as ENV_LOCK;
 
     fn with_tmp_tdg<F: FnOnce()>(name: &str, f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

@@ -111,12 +111,7 @@ fn agent_name() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Write one node record + one run stamp. Best-effort by contract.
-pub fn record_unit(unit_kind: u8, unit_id: &str, record: &NodeRecord) {
-    if !enabled() {
-        return;
-    }
-    let Some(db) = open_db() else { return };
+fn write_unit(db: &flux_db::Database, unit_kind: u8, unit_id: &str, record: &NodeRecord) {
     let node_key = format!("n/{}/{}", unit_kind, unit_id);
     let Ok(node_val) = bincode::serialize(record) else {
         trace("node serialize failed");
@@ -143,6 +138,175 @@ pub fn record_unit(unit_kind: u8, unit_id: &str, record: &NodeRecord) {
     trace(&format!("recorded {} ({} ms, {:?})", node_key, record.wall_ms, record.outcome));
 }
 
+/// Write one node record + one run stamp. Best-effort by contract.
+pub fn record_unit(unit_kind: u8, unit_id: &str, record: &NodeRecord) {
+    if !enabled() {
+        return;
+    }
+    let Some(db) = open_db() else { return };
+    write_unit(&db, unit_kind, unit_id, record);
+}
+
+// ── FIP-0003 write-path #1: the wrapper hook (spool + parent ingest) ────────
+//
+// The wrapper runs as MANY short-lived parallel processes (one per rustc
+// spawn). flux-db is a single-writer store — concurrent opens from 16 wrapper
+// processes would contend or corrupt. So the wrapper NEVER touches flux-db:
+// it appends one tiny JSON file per compiled unit to `<tdg>/spool/` (atomic
+// tmp+rename, ~µs — the 12.4s warm-build invariant is untouched), and the
+// PARENT fluxc invocation drains the spool into flux-db in one batch after
+// cargo exits, inside the same open it already uses for its own breadcrumb.
+// Crash-safe by construction: an unread spool survives and the next
+// invocation ingests it.
+
+fn spool_path_dir() -> std::path::PathBuf {
+    tdg_dir().join("spool")
+}
+
+/// Wrapper-side writer. `outcome`: "green" (real rustc exec), "skipped"
+/// (cache restore), "red" (rustc failed). `dep_idents` are the FIP-0002
+/// deterministic dep identities: the `lib<crate>-<metahash>.<ext>` filenames
+/// from `--extern` args.
+pub fn spool_wrapper_unit(
+    cache_key: &str,
+    crate_name: &str,
+    dep_idents: &[String],
+    outcome: &str,
+    wall_ms: u64,
+) {
+    if !enabled() || cache_key.is_empty() {
+        return;
+    }
+    let dir = spool_path_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let rec = serde_json::json!({
+        "cache_key": cache_key,
+        "crate_name": crate_name,
+        "dep_idents": dep_idents,
+        "outcome": outcome,
+        "wall_ms": wall_ms,
+        "ts": now_unix(),
+    });
+    let base = format!("{}-{}", &cache_key[..16.min(cache_key.len())], std::process::id());
+    let tmp = dir.join(format!("{}.tmp", base));
+    let fin = dir.join(format!("{}.json", base));
+    if std::fs::write(&tmp, rec.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &fin);
+    }
+}
+
+/// Extract FIP-0002 dep identities from raw rustc args: the filename of every
+/// `--extern name=path` target (`lib<crate>-<metahash>.rlib` — deterministic,
+/// content-independent).
+pub fn dep_idents_from_rustc_args(rustc_args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rustc_args.len() {
+        if rustc_args[i] == "--extern" {
+            if let Some(spec) = rustc_args.get(i + 1) {
+                if let Some((_, path)) = spec.split_once('=') {
+                    if let Some(name) = std::path::Path::new(path).file_name() {
+                        out.push(name.to_string_lossy().to_string());
+                    }
+                }
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parent-side: drain the wrapper spool into flux-db in one batch. Returns the
+/// ingested unit ids so the calling invocation can edge itself to them.
+fn ingest_spool(db: &flux_db::Database) -> Vec<String> {
+    let dir = spool_path_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut unit_ids: Vec<String> = Vec::new();
+    let mut nodes: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut edges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut runs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut drained: Vec<std::path::PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let Ok(txt) = std::fs::read_to_string(&p) else { continue };
+        let Ok(j) = serde_json::from_str::<serde_json::Value>(&txt) else {
+            let _ = std::fs::remove_file(&p); // undecodable spool = drop, not wedge
+            continue;
+        };
+        let key = j["cache_key"].as_str().unwrap_or("").to_string();
+        if key.is_empty() {
+            let _ = std::fs::remove_file(&p);
+            continue;
+        }
+        let deps: Vec<String> = j["dep_idents"].as_array().map(|a| {
+            a.iter().filter_map(|d| d.as_str().map(String::from)).collect()
+        }).unwrap_or_default();
+        let outcome = match j["outcome"].as_str() {
+            Some("green") => Outcome::Green,
+            Some("skipped") => Outcome::Skipped { reused_from: key.clone() },
+            _ => Outcome::Red,
+        };
+        let wall_ms = j["wall_ms"].as_u64().unwrap_or(0);
+        let record = NodeRecord {
+            unit_kind: UNIT_KIND_COMPILE,
+            display: format!("rustc {}", j["crate_name"].as_str().unwrap_or("?")),
+            identity: IdentityKey {
+                source_key: key.clone(),
+                dep_idents: deps.clone(),
+                closure_hash: String::new(),
+                rustc_version: flux_driver::RUSTC_VERSION.to_string(),
+                ir_version: flux_frontend::IR_VERSION,
+                identity_degraded: false, // the REAL wrapper cache_key
+            },
+            outcome: outcome.clone(),
+            wall_ms,
+            rustc_spawns: matches!(outcome, Outcome::Green | Outcome::Red) as u32,
+            created_unix: j["ts"].as_u64().unwrap_or_else(now_unix),
+            agent: agent_name(),
+        };
+        if let Ok(v) = bincode::serialize(&record) {
+            nodes.push((format!("n/{}/{}", UNIT_KIND_COMPILE, key).into_bytes(), v));
+        }
+        for d in &deps {
+            edges.push((format!("e/f/{}/{}", key, d).into_bytes(), vec![1u8]));
+            edges.push((format!("e/r/{}/{}", d, key).into_bytes(), vec![1u8]));
+        }
+        if let Ok(v) = bincode::serialize(&RunStamp {
+            outcome, wall_ms, agent: record.agent.clone(),
+        }) {
+            runs.push((format!("r/{}/{}", now_unix() * 1000, key), v));
+        }
+        unit_ids.push(key);
+        drained.push(p);
+    }
+    if !nodes.is_empty() {
+        if let Err(e) = db.put_many(&nodes) {
+            trace(&format!("spool node batch failed: {}", e));
+            return Vec::new(); // keep spool files — retry next invocation
+        }
+        if let Err(e) = db.put_many(&edges) {
+            trace(&format!("spool edge batch failed: {}", e));
+        }
+        for (k, v) in &runs {
+            let _ = db.put_ttl_seconds(k.as_bytes(), v, RUN_TTL_SECONDS);
+        }
+    }
+    for p in drained {
+        let _ = std::fs::remove_file(&p);
+    }
+    if !unit_ids.is_empty() {
+        trace(&format!("ingested {} spooled compile units", unit_ids.len()));
+    }
+    unit_ids
+}
+
 /// FIP-0003 edges: both directions in one batch (`e/f/` forward, `e/r/` reverse
 /// index) so "who must re-run if <id> changed?" is a single ordered prefix walk.
 pub fn record_edges(from_id: &str, to_ids: &[String]) {
@@ -165,13 +329,18 @@ pub fn record_edges(from_id: &str, to_ids: &[String]) {
 
 /// The phase-1 convenience writer hooked into `run_cargo`: one node per fluxc
 /// build-family invocation. `cmd` is the cargo subcommand ("build", "test", …).
+/// Also drains the wrapper spool (write-path #1) in the same db open, and
+/// edges this invocation to every compile unit it ingested — the combo→unit
+/// containment relation the incremental scheduler will walk.
 pub fn record_invocation(cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64) {
     if !enabled() {
         return;
     }
+    let Some(db) = open_db() else { return };
+    let unit_ids = ingest_spool(&db);
     let pkg = package.unwrap_or("<workspace>");
     let profile = if release { "release" } else { "debug" };
-    let unit_kind = if cmd == "test" { UNIT_KIND_TEST } else { UNIT_KIND_COMPILE };
+    let unit_kind = if cmd == "test" { UNIT_KIND_TEST } else { UNIT_KIND_COMBO };
     let unit_id = blake3::hash(format!("{}|{}|{}", cmd, pkg, profile).as_bytes())
         .to_hex()
         .to_string();
@@ -188,11 +357,21 @@ pub fn record_invocation(cmd: &str, package: Option<&str>, release: bool, green:
         },
         outcome: if green { Outcome::Green } else { Outcome::Red },
         wall_ms,
-        rustc_spawns: 0,
+        rustc_spawns: unit_ids.len() as u32,
         created_unix: now_unix(),
         agent: agent_name(),
     };
-    record_unit(unit_kind, &unit_id, &record);
+    write_unit(&db, unit_kind, &unit_id, &record);
+    if !unit_ids.is_empty() {
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(unit_ids.len() * 2);
+        for u in &unit_ids {
+            entries.push((format!("e/f/{}/{}", unit_id, u).into_bytes(), vec![1u8]));
+            entries.push((format!("e/r/{}/{}", u, unit_id).into_bytes(), vec![1u8]));
+        }
+        if let Err(e) = db.put_many(&entries) {
+            trace(&format!("invocation edge batch failed: {}", e));
+        }
+    }
 }
 
 fn kind_name(k: u8) -> &'static str {
@@ -352,6 +531,54 @@ mod tests {
                 assert!(db.get(key.as_bytes()).expect("get ok").is_some(), "missing edge {}", key);
             }
         });
+    }
+
+    #[test]
+    fn wrapper_spool_ingests_into_graph() {
+        with_tmp_tdg("spool", || {
+            // Two wrapper units: a real compile with deps, and a cache restore.
+            spool_wrapper_unit("aaaa1111bbbb2222cccc", "flux_db",
+                &["libserde-abc123.rlib".to_string()], "green", 900);
+            spool_wrapper_unit("dddd3333eeee4444ffff", "flux_cache", &[], "skipped", 2);
+            assert_eq!(std::fs::read_dir(spool_path_dir()).unwrap().count(), 2);
+
+            // The parent invocation drains the spool and edges itself to the units.
+            record_invocation("build", Some("flux-db"), false, true, 5000);
+
+            let db = flux_db::Database::open(tdg_dir()).expect("tdg opens");
+            // Spool is drained.
+            assert_eq!(std::fs::read_dir(spool_path_dir()).map(|d| d.count()).unwrap_or(0), 0,
+                "spool must be drained after ingest");
+            // Compile units landed with REAL (non-degraded) identities.
+            let n = db.get(b"n/0/aaaa1111bbbb2222cccc").expect("get ok")
+                .expect("green unit node exists");
+            let rec: NodeRecord = bincode::deserialize(&n).expect("node decodes");
+            assert!(!rec.identity.identity_degraded, "wrapper units carry the real cache_key");
+            assert_eq!(rec.identity.dep_idents, vec!["libserde-abc123.rlib".to_string()]);
+            assert!(matches!(rec.outcome, Outcome::Green));
+            let n2 = db.get(b"n/0/dddd3333eeee4444ffff").expect("get ok")
+                .expect("skipped unit node exists");
+            let rec2: NodeRecord = bincode::deserialize(&n2).expect("node decodes");
+            assert!(matches!(rec2.outcome, Outcome::Skipped { .. }));
+            // Dep edges, both directions.
+            assert!(db.get(b"e/f/aaaa1111bbbb2222cccc/libserde-abc123.rlib").unwrap().is_some());
+            assert!(db.get(b"e/r/libserde-abc123.rlib/aaaa1111bbbb2222cccc").unwrap().is_some());
+            // Invocation → unit containment edges (reverse index present).
+            let mut inv_edges = 0;
+            for (k, _) in db.iter_from(b"e/r/aaaa1111bbbb2222cccc/") {
+                if !k.starts_with(b"e/r/aaaa1111bbbb2222cccc/") { break; }
+                inv_edges += 1;
+            }
+            assert_eq!(inv_edges, 1, "the invocation must edge to its ingested unit");
+        });
+    }
+
+    #[test]
+    fn dep_idents_extracts_extern_filenames() {
+        let args: Vec<String> = ["--crate-name", "x", "--extern",
+            "serde=/deep/path/libserde-abc.rlib", "--extern", "noeq", "-L", "dep=/x"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(dep_idents_from_rustc_args(&args), vec!["libserde-abc.rlib".to_string()]);
     }
 
     #[test]

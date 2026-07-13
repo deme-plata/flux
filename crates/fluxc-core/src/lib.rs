@@ -790,6 +790,14 @@ pub fn wrapper_mode(args: &[String]) {
         .find(|a| a.ends_with(".rs") && !a.starts_with("--"))
         .map(|s| s.as_str());
 
+    // FIP-0003 write-path #1: unit facts for the TDG spool. NO flux-db access
+    // in the wrapper (parallel short-lived processes) — tdg::spool_wrapper_unit
+    // writes one tiny file; the parent invocation batch-ingests after cargo.
+    let tdg_t0 = std::time::Instant::now();
+    let tdg_crate = rustc_args.iter().position(|a| a == "--crate-name")
+        .and_then(|i| rustc_args.get(i + 1)).cloned().unwrap_or_else(|| "?".into());
+    let tdg_deps = tdg::dep_idents_from_rustc_args(&rustc_args);
+
     // Compute the cache key over source content + normalized rustc args.
     // Normalized args drop absolute paths in favor of content hashes — same
     // content + same flags = same key, regardless of which workspace the
@@ -823,6 +831,8 @@ pub fn wrapper_mode(args: &[String]) {
                 if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
                     if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
                     record_cache_event(true);
+                    tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "skipped",
+                        tdg_t0.elapsed().as_millis() as u64);
                     return;
                 }
                 if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, flux_cache::cache_dir().join("blobs").join(&entry.source_hash).exists()); }
@@ -854,8 +864,14 @@ pub fn wrapper_mode(args: &[String]) {
                     flux_cache::store(&cache_key, &entry);
                 }
             }
+            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "green",
+                tdg_t0.elapsed().as_millis() as u64);
         }
-        Ok(s) => process::exit(s.code().unwrap_or(1)),
+        Ok(s) => {
+            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "red",
+                tdg_t0.elapsed().as_millis() as u64);
+            process::exit(s.code().unwrap_or(1));
+        }
         Err(e) => {
             eprintln!("fluxc wrapper: failed to spawn rustc '{}': {}", rustc_path, e);
             eprintln!("hint: FLUXC_WRAPPING is for cargo RUSTC_WRAPPER=self, not for general use");

@@ -4,6 +4,7 @@
 // fluxc (CLI) depends on it for build orchestration.
 
 pub mod serve;
+pub mod tdg;
 pub mod serve_stats;
 pub mod serve_events;
 pub mod serve_router;
@@ -413,9 +414,13 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
     // apply_wrapper_env. The --provenance flag remains accepted for its other
     // (signing) semantics; it no longer controls the wrapper.
     apply_wrapper_env(&mut cmd);
-    
 
+    // FIP-0003 phase 1: every build-family invocation leaves a TDG breadcrumb
+    // (node + run stamp). Advisory — tdg swallows its own failures.
+    let tdg_start = std::time::Instant::now();
     let s = cmd.status().expect("cargo");
+    tdg::record_invocation(cargo_cmd, config.package.as_deref(), config.release,
+        s.success(), tdg_start.elapsed().as_millis() as u64);
     if !s.success() { process::exit(s.code().unwrap_or(1)); }
 }
 

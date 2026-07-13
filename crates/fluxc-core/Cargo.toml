@@ -8,6 +8,8 @@ license.workspace = true
 flux-quantum-architect = { path = "../flux-quantum-architect" }
 flux-net = { path = "../flux-net" }
 flux-cache = { path = "../flux-cache" }
+# FIP-0003: the task-dependency-graph tracer persists into flux-db
+flux-db = { path = "../flux-db" }
 flux-driver = { path = "../flux-driver" }
 flux-graph = { path = "../flux-graph" }
 flux-swarm-tools = { path = "../flux-swarm-tools" }

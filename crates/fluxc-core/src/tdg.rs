@@ -166,10 +166,15 @@ fn spool_path_dir() -> std::path::PathBuf {
 /// Wrapper-side writer. `outcome`: "green" (real rustc exec), "skipped"
 /// (cache restore), "red" (rustc failed). `dep_idents` are the FIP-0002
 /// deterministic dep identities: the `lib<crate>-<metahash>.<ext>` filenames
-/// from `--extern` args.
+/// from `--extern` args. `pkg` is cargo's CARGO_PKG_NAME for the unit (maps
+/// integration-test units — whose --crate-name is the test FILE — back to
+/// their package); `is_test` marks `--test` harness units, the gate the
+/// unit-granularity scheduler keys on.
 pub fn spool_wrapper_unit(
     cache_key: &str,
     crate_name: &str,
+    pkg: &str,
+    is_test: bool,
     dep_idents: &[String],
     outcome: &str,
     wall_ms: u64,
@@ -184,6 +189,8 @@ pub fn spool_wrapper_unit(
     let rec = serde_json::json!({
         "cache_key": cache_key,
         "crate_name": crate_name,
+        "pkg": pkg,
+        "is_test": is_test,
         "dep_idents": dep_idents,
         "outcome": outcome,
         "wall_ms": wall_ms,
@@ -194,6 +201,101 @@ pub fn spool_wrapper_unit(
     let fin = dir.join(format!("{}.json", base));
     if std::fs::write(&tmp, rec.to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, &fin);
+    }
+}
+
+/// One spooled wrapper unit, as read back by the scheduler's probe pass.
+#[derive(Debug, Clone)]
+pub struct SpoolUnit {
+    pub cache_key: String,
+    /// rustc --crate-name: the STABLE identity of a unit across content
+    /// changes (a package's lib test vs each integration-test file).
+    pub crate_name: String,
+    pub pkg: String,
+    pub is_test: bool,
+}
+
+/// NON-draining spool read for the unit-granularity scheduler: after a probe
+/// build (`cargo test --no-run` through the wrapper), this is the set of
+/// units cargo touched, with their content-addressed keys. Files stay in
+/// place — the next run_cargo ingest drains them into the graph as usual.
+pub fn read_spool_units() -> Vec<SpoolUnit> {
+    let dir = spool_path_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let Ok(txt) = std::fs::read_to_string(&p) else { continue };
+        let Ok(j) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+        let cache_key = j["cache_key"].as_str().unwrap_or("").to_string();
+        if cache_key.is_empty() {
+            continue;
+        }
+        out.push(SpoolUnit {
+            cache_key,
+            crate_name: j["crate_name"].as_str().unwrap_or("").to_string(),
+            pkg: j["pkg"].as_str().unwrap_or("").to_string(),
+            is_test: j["is_test"].as_bool().unwrap_or(false),
+        });
+    }
+    out
+}
+
+// ── per-package "last BUILT test-unit keys" (`u/<pkg>`) ────────────────────
+//
+// The wrapper only spawns for units cargo actually rebuilds, so any single
+// invocation observes a PARTIAL set of a package's test units. The `u/<pkg>`
+// map (unit crate_name → cache_key) is MERGED at every ingest: rebuilt units
+// update their entry, cargo-fresh units keep their last recorded key — which
+// is sound, because cargo-fresh means that binary hasn't changed since the
+// build that recorded it. The unit-granularity gate compares a hash of this
+// full map ("last built") against the hash promoted at the last green test
+// run ("last green"): equality proves the package's test binaries are the
+// ones that already passed.
+
+pub fn unit_map_key(pkg: &str) -> String {
+    format!("u/{}", pkg)
+}
+
+pub fn read_unit_map(db: &flux_db::Database, pkg: &str) -> std::collections::BTreeMap<String, String> {
+    db.get(unit_map_key(pkg).as_bytes())
+        .ok()
+        .flatten()
+        .and_then(|v| bincode::deserialize(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Order-independent digest of a package's full test-unit key map.
+pub fn hash_unit_map(map: &std::collections::BTreeMap<String, String>) -> String {
+    let mut h = blake3::Hasher::new();
+    for (name, key) in map {
+        h.update(name.as_bytes());
+        h.update(b"=");
+        h.update(key.as_bytes());
+        h.update(b"\n");
+    }
+    h.finalize().to_hex().to_string()
+}
+
+fn merge_unit_maps(db: &flux_db::Database, observed: &[(String, String, String)]) {
+    // observed: (pkg, unit crate_name, cache_key) for --test units
+    let mut by_pkg: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+    for (pkg, name, key) in observed {
+        if !pkg.is_empty() && !name.is_empty() {
+            by_pkg.entry(pkg.clone()).or_default().push((name.clone(), key.clone()));
+        }
+    }
+    for (pkg, units) in by_pkg {
+        let mut map = read_unit_map(db, &pkg);
+        for (name, key) in units {
+            map.insert(name, key);
+        }
+        if let Ok(v) = bincode::serialize(&map) {
+            let _ = db.put(unit_map_key(&pkg).as_bytes(), &v);
+        }
     }
 }
 
@@ -222,7 +324,7 @@ pub fn dep_idents_from_rustc_args(rustc_args: &[String]) -> Vec<String> {
 
 /// Parent-side: drain the wrapper spool into flux-db in one batch. Returns the
 /// ingested unit ids so the calling invocation can edge itself to them.
-fn ingest_spool(db: &flux_db::Database) -> Vec<String> {
+pub(crate) fn ingest_spool(db: &flux_db::Database) -> Vec<String> {
     let dir = spool_path_dir();
     let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut unit_ids: Vec<String> = Vec::new();
@@ -230,6 +332,7 @@ fn ingest_spool(db: &flux_db::Database) -> Vec<String> {
     let mut edges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut runs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut drained: Vec<std::path::PathBuf> = Vec::new();
+    let mut test_units: Vec<(String, String, String)> = Vec::new(); // (pkg, unit, key)
     for entry in rd.flatten() {
         let p = entry.path();
         if p.extension().map(|x| x != "json").unwrap_or(true) {
@@ -283,8 +386,18 @@ fn ingest_spool(db: &flux_db::Database) -> Vec<String> {
         }) {
             runs.push((format!("r/{}/{}", now_unix() * 1000, key), v));
         }
+        if j["is_test"].as_bool().unwrap_or(false) {
+            test_units.push((
+                j["pkg"].as_str().unwrap_or("").to_string(),
+                j["crate_name"].as_str().unwrap_or("").to_string(),
+                key.clone(),
+            ));
+        }
         unit_ids.push(key);
         drained.push(p);
+    }
+    if !test_units.is_empty() {
+        merge_unit_maps(db, &test_units);
     }
     if !nodes.is_empty() {
         if let Err(e) = db.put_many(&nodes) {
@@ -540,10 +653,19 @@ mod tests {
     fn wrapper_spool_ingests_into_graph() {
         with_tmp_tdg("spool", || {
             // Two wrapper units: a real compile with deps, and a cache restore.
-            spool_wrapper_unit("aaaa1111bbbb2222cccc", "flux_db",
+            spool_wrapper_unit("aaaa1111bbbb2222cccc", "flux_db", "flux-db", false,
                 &["libserde-abc123.rlib".to_string()], "green", 900);
-            spool_wrapper_unit("dddd3333eeee4444ffff", "flux_cache", &[], "skipped", 2);
+            spool_wrapper_unit("dddd3333eeee4444ffff", "flux_cache", "flux-cache", true,
+                &[], "skipped", 2);
             assert_eq!(std::fs::read_dir(spool_path_dir()).unwrap().count(), 2);
+
+            // The probe reader sees both units, non-draining, with pkg + test markers.
+            let units = read_spool_units();
+            assert_eq!(units.len(), 2);
+            let t = units.iter().find(|u| u.pkg == "flux-cache").expect("test unit present");
+            assert!(t.is_test, "--test marker must round-trip through the spool");
+            assert_eq!(std::fs::read_dir(spool_path_dir()).unwrap().count(), 2,
+                "read_spool_units must not drain");
 
             // The parent invocation drains the spool and edges itself to the units.
             record_invocation("build", Some("flux-db"), false, true, 5000);

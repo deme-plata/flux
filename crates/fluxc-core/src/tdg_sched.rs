@@ -268,6 +268,182 @@ pub fn cmd_run(check_only: bool, dry: bool) {
     }
 }
 
+// ── unit-granularity test gating (`fluxc tdg run --units`) ──────────────────
+//
+// The crate cone says what COULD be affected. Unit gating says what actually
+// WAS: probe the cone with `cargo test --no-run` through the wrapper, which
+// spools every --test harness unit with its content-addressed cache_key
+// (source + normalized args, where extern deps are CONTENT hashes). If a
+// crate's test-binary keys are identical to the keys from its last GREEN run,
+// the binaries are byte-equivalent inputs → the previous result is provably
+// still valid → the tests do not even need to RUN. Interface-neutral edits
+// (comments, private internals that reproduce identical rlibs) collapse the
+// run set this way. Fail-open everywhere: a crate with no observed test
+// units, or no stored gate, runs.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestGate {
+    /// BLAKE3 over the crate's sorted --test unit cache_keys.
+    pub keys_hash: String,
+    pub green_unix: u64,
+}
+
+fn gate_key(pkg: &str) -> String {
+    format!("t/{}", pkg)
+}
+
+/// Current "last built" gate hash per cone package, from the merged `u/<pkg>`
+/// unit maps (see tdg.rs). The wrapper only observes REBUILT units, so a
+/// single probe is partial — the merged map carries cargo-fresh units'
+/// last-recorded keys forward, which is sound (fresh = unchanged since that
+/// build). Packages with an empty map (never observed any --test unit) get no
+/// entry → fail-open.
+pub fn observed_gates(db: &flux_db::Database, cone: &[String]) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for c in cone {
+        let map = crate::tdg::read_unit_map(db, c);
+        if !map.is_empty() {
+            out.insert(c.clone(), crate::tdg::hash_unit_map(&map));
+        }
+    }
+    out
+}
+
+/// Split the cone by comparing last-BUILT gates against last-GREEN gates.
+/// Returns (must_run, skipped-by-unit-identity).
+pub fn split_cone_by_gates(
+    cone: &[String],
+    observed: &std::collections::BTreeMap<String, String>,
+    stored: &std::collections::BTreeMap<String, TestGate>,
+) -> (Vec<String>, Vec<String>) {
+    let mut run = Vec::new();
+    let mut skip = Vec::new();
+    for c in cone {
+        match (observed.get(c), stored.get(c)) {
+            (Some(now), Some(prev)) if *now == prev.keys_hash => skip.push(c.clone()),
+            _ => run.push(c.clone()), // no units observed / no history / changed → fail-open
+        }
+    }
+    (run, skip)
+}
+
+fn load_stored_gates(db: &flux_db::Database, cone: &[String]) -> std::collections::BTreeMap<String, TestGate> {
+    let mut out = std::collections::BTreeMap::new();
+    for c in cone {
+        if let Ok(Some(v)) = db.get(gate_key(c).as_bytes()) {
+            if let Ok(g) = bincode::deserialize::<TestGate>(&v) {
+                out.insert(c.clone(), g);
+            }
+        }
+    }
+    out
+}
+
+fn store_gates(db: &flux_db::Database, gates: &std::collections::BTreeMap<String, String>, cone: &[String]) {
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for c in cone {
+        if let Some(h) = gates.get(c) {
+            let g = TestGate { keys_hash: h.clone(), green_unix: now_unix() };
+            if let Ok(v) = bincode::serialize(&g) {
+                entries.push((gate_key(c).into_bytes(), v));
+            }
+        }
+    }
+    let _ = db.put_many(&entries);
+}
+
+/// The probe: build (don't run) the cone's test binaries through the wrapper
+/// so the spool carries every REBUILT test unit's current key. Uses cargo
+/// directly — run_cargo would exit the process on failure, but a red probe is
+/// a compile error the scheduler must surface and stop on, not die inside.
+fn probe_test_units(cone: &[String]) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("test").arg("--no-run");
+    for c in cone {
+        cmd.args(["--package", c]);
+    }
+    cmd.stdin(std::process::Stdio::null());
+    crate::apply_wrapper_env(&mut cmd);
+    let status = cmd.status().map_err(|e| format!("probe spawn failed: {}", e))?;
+    if !status.success() {
+        return Err("probe build failed (compile error in the cone) — fix red before scheduling".into());
+    }
+    Ok(())
+}
+
+/// `fluxc tdg run --units`: crate cone → probe → unit-identity gate → run
+/// only the crates whose test binaries actually changed.
+pub fn cmd_run_units(dry: bool) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(root) = find_workspace_root(&cwd) else {
+        eprintln!("  ✗ no enclosing [workspace] found from {}", cwd.display());
+        return;
+    };
+    println!("⚡ fluxc tdg — unit-granularity schedule for {}", root.display());
+    let plan = match compute_plan(&root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  ✗ {}", e);
+            return;
+        }
+    };
+    print_plan(&plan);
+    if plan.cone.is_empty() {
+        println!("  ✓ nothing dirty — 0 units scheduled");
+        return;
+    }
+    println!("  probe: cargo test --no-run for {} crates…", plan.cone.len());
+    if let Err(e) = probe_test_units(&plan.cone) {
+        eprintln!("  ✗ {}", e);
+        return;
+    }
+    let Ok(db) = flux_db::Database::open(crate::tdg::tdg_dir()) else {
+        eprintln!("  ✗ TDG open failed after probe");
+        return;
+    };
+    // Fold the probe's spool into the graph + the u/<pkg> unit maps NOW so
+    // "last built" reflects this probe (run_cargo would do it later anyway,
+    // but the gate decision needs it first).
+    let _ = crate::tdg::ingest_spool(&db);
+    let observed = observed_gates(&db, &plan.cone);
+    let stored = load_stored_gates(&db, &plan.cone);
+    let (run, skip) = split_cone_by_gates(&plan.cone, &observed, &stored);
+    println!("  unit gate: {} must run, {} skipped (test binaries identical to last green)",
+        run.len(), skip.len());
+    for s in skip.iter().take(10) {
+        println!("    ⏭ {}", s);
+    }
+    if dry {
+        println!("  (dry run — nothing executed)");
+        return;
+    }
+    if run.is_empty() {
+        println!("  ✓ every cone test binary reproduced identically — 0 test runs needed");
+        store_gates(&db, &observed, &plan.cone);
+        let _ = store_keys(&root, Some(&plan.cone), true, 0);
+        return;
+    }
+    let mut extra: Vec<String> = Vec::new();
+    for c in &run {
+        extra.push("--package".to_string());
+        extra.push(c.clone());
+    }
+    let config = crate::BuildConfig::default();
+    let t0 = std::time::Instant::now();
+    drop(db); // run_cargo's ingest opens the TDG — don't hold it across
+    crate::run_cargo("test", &config, &extra);
+    let wall = t0.elapsed().as_millis() as u64;
+    // Green (run_cargo exits on red): promote gates + source keys for the cone.
+    if let Ok(db) = flux_db::Database::open(crate::tdg::tdg_dir()) {
+        store_gates(&db, &observed, &plan.cone);
+    }
+    match store_keys(&root, Some(&plan.cone), true, wall) {
+        Ok(n) => println!("  ✓ green — promoted {} cone crates ({} ran, {} unit-skipped, {} ms)",
+            n, run.len(), skip.len(), wall),
+        Err(e) => eprintln!("  green, but key promotion failed: {}", e),
+    }
+}
+
 pub fn cmd_plan() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(root) = find_workspace_root(&cwd) else {
@@ -343,6 +519,55 @@ mod tests {
         let mut proven = p3.clean_proven.clone();
         proven.sort();
         assert_eq!(proven, vec!["app".to_string(), "dep".to_string()]);
+
+        std::env::remove_var("FLUX_TDG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unit_gate_splits_run_from_provably_unchanged() {
+        let _guard = crate::tdg::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let base = std::env::temp_dir().join(format!("flux-gate-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("FLUX_TDG_DIR", &base);
+
+        // Simulate two probe ingests via the wrapper spool: a has two test
+        // units, b has one, plus a non-test unit that must be ignored.
+        crate::tdg::spool_wrapper_unit("k-a1", "a_lib", "a", true, &[], "green", 1);
+        crate::tdg::spool_wrapper_unit("k-a2", "a_integ", "a", true, &[], "green", 1);
+        crate::tdg::spool_wrapper_unit("k-b1", "b_lib", "b", true, &[], "green", 1);
+        crate::tdg::spool_wrapper_unit("lib-b", "b", "b", false, &[], "green", 1);
+        let db = flux_db::Database::open(crate::tdg::tdg_dir()).expect("tdg opens");
+        crate::tdg::ingest_spool(&db);
+
+        let cone: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let observed = observed_gates(&db, &cone);
+        assert!(observed.contains_key("a") && observed.contains_key("b"));
+        assert!(!observed.contains_key("c"), "no observed test units → no gate entry");
+
+        // Last-green: a matches its last-built hash, b's green predates a change.
+        let mut stored = std::collections::BTreeMap::new();
+        stored.insert("a".to_string(), TestGate { keys_hash: observed["a"].clone(), green_unix: 1 });
+        stored.insert("b".to_string(), TestGate { keys_hash: "older".into(), green_unix: 1 });
+        let (run, skip) = split_cone_by_gates(&cone, &observed, &stored);
+        assert_eq!(skip, vec!["a".to_string()],
+            "only last-built == last-green may skip");
+        assert_eq!(run, vec!["b".to_string(), "c".to_string()],
+            "changed keys and never-observed must fail-open to run");
+
+        // PARTIAL rebuild soundness: only a's integration unit rebuilds with a
+        // new key; the merged map must keep a_lib's carried-forward key and
+        // the gate hash must change (a no longer skips).
+        crate::tdg::spool_wrapper_unit("k-a2-NEW", "a_integ", "a", true, &[], "green", 1);
+        crate::tdg::ingest_spool(&db);
+        let map = crate::tdg::read_unit_map(&db, "a");
+        assert_eq!(map.get("a_lib").map(String::as_str), Some("k-a1"),
+            "cargo-fresh unit keeps its last recorded key through the merge");
+        assert_eq!(map.get("a_integ").map(String::as_str), Some("k-a2-NEW"));
+        let observed2 = observed_gates(&db, &cone);
+        assert_ne!(observed2["a"], observed["a"], "a partial rebuild must change the gate");
+        let (run2, skip2) = split_cone_by_gates(&cone, &observed2, &stored);
+        assert!(skip2.is_empty() && run2.contains(&"a".to_string()));
 
         std::env::remove_var("FLUX_TDG_DIR");
         let _ = std::fs::remove_dir_all(&base);

@@ -734,7 +734,11 @@ fn main() {
                 Some("run") => {
                     let check = subcommand_args.iter().any(|a| a == "--check");
                     let dry = subcommand_args.iter().any(|a| a == "--dry");
-                    fluxc_core::tdg_sched::cmd_run(check, dry);
+                    if subcommand_args.iter().any(|a| a == "--units") {
+                        fluxc_core::tdg_sched::cmd_run_units(dry);
+                    } else {
+                        fluxc_core::tdg_sched::cmd_run(check, dry);
+                    }
                 }
                 other => {
                     let limit = other.and_then(|a| a.parse::<usize>().ok()).unwrap_or(15);

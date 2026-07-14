@@ -798,6 +798,12 @@ pub fn wrapper_mode(args: &[String]) {
     let tdg_crate = rustc_args.iter().position(|a| a == "--crate-name")
         .and_then(|i| rustc_args.get(i + 1)).cloned().unwrap_or_else(|| "?".into());
     let tdg_deps = tdg::dep_idents_from_rustc_args(&rustc_args);
+    // Package attribution + test-harness marker for unit-granularity
+    // scheduling. CARGO_PKG_NAME is set by cargo on every rustc spawn and is
+    // the only reliable pkg mapping for integration-test units (their
+    // --crate-name is the test FILE name, not the package).
+    let tdg_pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| tdg_crate.clone());
+    let tdg_is_test = rustc_args.iter().any(|a| a == "--test");
 
     // Compute the cache key over source content + normalized rustc args.
     // Normalized args drop absolute paths in favor of content hashes — same
@@ -832,8 +838,8 @@ pub fn wrapper_mode(args: &[String]) {
                 if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
                     if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
                     record_cache_event(true);
-                    tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "skipped",
-                        tdg_t0.elapsed().as_millis() as u64);
+                    tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_pkg, tdg_is_test,
+                        &tdg_deps, "skipped", tdg_t0.elapsed().as_millis() as u64);
                     return;
                 }
                 if trace { eprintln!("FLUXCACHE APPLYFAIL {} key={} blobs={:?}", cn, kp, flux_cache::cache_dir().join("blobs").join(&entry.source_hash).exists()); }
@@ -865,12 +871,12 @@ pub fn wrapper_mode(args: &[String]) {
                     flux_cache::store(&cache_key, &entry);
                 }
             }
-            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "green",
-                tdg_t0.elapsed().as_millis() as u64);
+            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_pkg, tdg_is_test,
+                &tdg_deps, "green", tdg_t0.elapsed().as_millis() as u64);
         }
         Ok(s) => {
-            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_deps, "red",
-                tdg_t0.elapsed().as_millis() as u64);
+            tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_pkg, tdg_is_test,
+                &tdg_deps, "red", tdg_t0.elapsed().as_millis() as u64);
             process::exit(s.code().unwrap_or(1));
         }
         Err(e) => {
@@ -1268,7 +1274,9 @@ pub fn print_usage() {
     println!("  fluxc tdg [N]         Task-dependency graph report (FIP-0003 tracer)");
     println!("  fluxc tdg baseline    Record crate source keys (the reference point)");
     println!("  fluxc tdg plan        Incremental plan: dirty crates + dependency cone");
-    println!("  fluxc tdg run         Test ONLY the cone (--check / --dry)");
+    println!("  fluxc tdg run         Test ONLY the cone (--check / --dry / --units)");
+    println!("                        --units: skip crates whose test binaries are");
+    println!("                        byte-identical to their last green run");
     println!("  fluxc stats           Show build statistics and cache info");
     println!("  fluxc status [--json] Show workspace status (crates, agility)");
     println!("  fluxc release-audit   Show release-lane split and hold status");

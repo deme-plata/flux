@@ -444,6 +444,64 @@ pub fn cmd_run_units(dry: bool) {
     }
 }
 
+// ── the flux_combo seam (`incremental: true`) ───────────────────────────────
+
+pub enum GateDecision {
+    /// The package's test binaries hash identically to its last green run —
+    /// the prior result is provably still valid.
+    Skip { green_unix: u64 },
+    Run,
+}
+
+/// Single-package unit gate for combo callers: probe (cargo test --no-run
+/// through the wrapper), ingest the spool, compare last-built vs last-green.
+/// FAIL-OPEN on every error path — a broken TDG or red probe returns Run and
+/// the combo proceeds exactly as it does today (a compile error then surfaces
+/// in the combo's own test step, where it's reported properly).
+pub fn combo_gate(pkg: &str) -> GateDecision {
+    let trace = std::env::var("FLUX_TDG_TRACE").map(|v| v == "1").unwrap_or(false);
+    let pkgs = vec![pkg.to_string()];
+    if let Err(e) = probe_test_units(&pkgs) {
+        if trace { eprintln!("[tdg] combo_gate({}): probe failed → Run ({})", pkg, e); }
+        return GateDecision::Run;
+    }
+    let db = match flux_db::Database::open(crate::tdg::tdg_dir()) {
+        Ok(db) => db,
+        Err(e) => {
+            if trace { eprintln!("[tdg] combo_gate({}): db open failed → Run ({})", pkg, e); }
+            return GateDecision::Run;
+        }
+    };
+    let _ = crate::tdg::ingest_spool(&db);
+    let observed = observed_gates(&db, &pkgs);
+    let stored = load_stored_gates(&db, &pkgs);
+    if trace {
+        eprintln!("[tdg] combo_gate({}): built={:?} green={:?}",
+            pkg, observed.get(pkg).map(|h| &h[..16]),
+            stored.get(pkg).map(|g| &g.keys_hash[..16.min(g.keys_hash.len())]));
+    }
+    match (observed.get(pkg), stored.get(pkg)) {
+        (Some(now), Some(prev)) if *now == prev.keys_hash =>
+            GateDecision::Skip { green_unix: prev.green_unix },
+        _ => GateDecision::Run,
+    }
+}
+
+/// After a combo's test step came back green for `pkg`, promote its unit gate
+/// (last-green := last-built) and its crate source key. Best-effort.
+pub fn combo_promote(pkg: &str, wall_ms: u64) {
+    let pkgs = vec![pkg.to_string()];
+    if let Ok(db) = flux_db::Database::open(crate::tdg::tdg_dir()) {
+        let _ = crate::tdg::ingest_spool(&db); // fold the run's own spool first
+        let observed = observed_gates(&db, &pkgs);
+        store_gates(&db, &observed, &pkgs);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(root) = find_workspace_root(&cwd) {
+        let _ = store_keys(&root, Some(&pkgs), true, wall_ms);
+    }
+}
+
 pub fn cmd_plan() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(root) = find_workspace_root(&cwd) else {

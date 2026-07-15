@@ -19,12 +19,13 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_combo",
-            description: "Compile + test + predict in one call. Saves 67% token round-trips vs doing each separately.",
+            description: "PRIMARY dev tool for new Flux users: compile + test + predict in ONE call. This is the 'flux way' — never call cargo directly. Use flux_combo package=your-crate after every edit. Saves ~67% tokens vs separate steps. The heart of flux-dev skill combos.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "package": {"type": "string", "description": "Package to combo on"},
-                    "release": {"type": "boolean", "description": "Build in release mode"}
+                    "package": {"type": "string", "description": "Package/crate to combo on (e.g. fluxc-mcp, fluxc-core)"},
+                    "release": {"type": "boolean", "description": "Build in release mode (slower, for final checks)"},
+                    "incremental": {"type": "boolean", "description": "FIP-0003 unit gate: skip the test run entirely when the package's test binaries are byte-identical to its last green run (probe + content-addressed keys, fail-open). Promotes the gate after a green run."}
                 }
             }),
         },
@@ -144,9 +145,43 @@ use fluxc_core::predict;
 fn flux_combo(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc");
     let release = args.get("release").and_then(|v| v.as_bool()).unwrap_or(false);
+    let incremental = args.get("incremental").and_then(|v| v.as_bool()).unwrap_or(false);
     let start = std::time::Instant::now();
     let pkg = package.to_string();
     let pkg2 = pkg.clone();
+
+    // FIP-0003 unit gate: when the package's test binaries hash identically to
+    // the set that already passed, the prior green is provably still valid —
+    // report the reuse instead of re-running. Fail-open by construction: any
+    // gate uncertainty (no history, changed keys, red probe, broken TDG) falls
+    // through to the normal combo below.
+    if incremental {
+        if let fluxc_core::tdg_sched::GateDecision::Skip { green_unix } =
+            fluxc_core::tdg_sched::combo_gate(&pkg)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let age_min = now.saturating_sub(green_unix) / 60;
+            let probe_ms = start.elapsed().as_millis();
+            webhook::auto_dispatch("combo_complete", serde_json::json!({
+                "package": pkg, "compile_ms": probe_ms,
+                "tests_passed": 0, "tests_failed": 0,
+                "incremental_skip": true, "reused_green_unix": green_unix
+            }));
+            return format!(
+                "⚡⚡⚡  F L U X   C O M B O  ⚡⚡⚡\n{}",
+                dashboard(
+                    &format!("{} · {}ms · green (reused)", pkg, probe_ms),
+                    &[
+                        " GATE      ⏭ INCREMENTAL SKIP (FIP-0003 unit gate)".to_string(),
+                        " PROOF     test binaries byte-identical to last green".to_string(),
+                        format!(" REUSED    green run from {}m ago · 0 test executions", age_min),
+                        " PROBE     cargo test --no-run compiled only deltas".to_string(),
+                    ]
+                )
+            );
+        }
+    }
 
     let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
 
@@ -180,6 +215,13 @@ fn flux_combo(args: &Value) -> String {
     let pred = predict_handle.join().unwrap();
 
     let total_ms = start.elapsed().as_millis();
+
+    // Incremental promote: last-green := last-built, but ONLY on a green run
+    // that demonstrably executed tests (0/0 is the known "test binary never
+    // ran" ambiguity — never promote on it).
+    if incremental && test_failed == 0 && test_passed > 0 {
+        fluxc_core::tdg_sched::combo_promote(&pkg, total_ms as u64);
+    }
 
     webhook::auto_dispatch("combo_complete", serde_json::json!({
         "package": pkg, "compile_ms": total_ms,

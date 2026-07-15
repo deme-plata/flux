@@ -810,7 +810,26 @@ pub fn wrapper_mode(args: &[String]) {
     // content + same flags = same key, regardless of which workspace the
     // build runs from.
     let normalized_args = normalize_args_for_cache_key(&rustc_args);
-    let cache_key = flux_cache::compute_hash(src_file, &normalized_args);
+    let root_key = flux_cache::compute_hash(src_file, &normalized_args);
+
+    // CACHE-CORRECTNESS (found 2026-07-15, the combo_gate E0425 incident):
+    // compute_hash covers ONLY the root source file — but a unit compiles its
+    // whole module tree (`mod foo;` siblings). Editing ONLY a non-root module
+    // file left the key unchanged, and a restore then resurrected a STALE
+    // rlib missing the new symbols — the one thing the cache must never do.
+    // Fix: fold a digest of every sibling `.rs` under the root's directory
+    // into the key. Coarser than rustc's real module graph (a sibling file
+    // outside the tree also flips the key) — that's over-INVALIDATION, which
+    // costs a rebuild, never correctness. ⚠ This changes every key: one cold
+    // rebuild fleet-wide after deploying this binary.
+    let cache_key = if root_key.is_empty() {
+        root_key
+    } else {
+        let mut h = blake3::Hasher::new();
+        h.update(root_key.as_bytes());
+        h.update(module_tree_digest(src_file).as_bytes());
+        h.finalize().to_hex().to_string()
+    };
 
     // Try a cache hit. apply_cached_outputs returns `true` only when every
     // cached output blob was restored to the rustc-expected out_dir; on
@@ -885,6 +904,48 @@ pub fn wrapper_mode(args: &[String]) {
             process::exit(101);
         }
     }
+}
+
+/// Digest of every sibling `.rs` file under the unit root's directory tree
+/// (sorted rel-path + content hash; the root file itself is already in the
+/// key). Empty string when the unit has no siblings — keys for single-file
+/// units are unchanged. See the cache-correctness comment at the call site.
+fn module_tree_digest(src_file: Option<&str>) -> String {
+    let Some(root) = src_file else { return String::new() };
+    let root_path = std::path::Path::new(root);
+    let Some(dir) = root_path.parent() else { return String::new() };
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if p.is_dir() {
+                if name == "target" || name.starts_with('.') { continue; }
+                walk(&p, out);
+            } else if name.ends_with(".rs") {
+                out.push(p);
+            }
+        }
+    }
+    walk(dir, &mut files);
+    files.sort();
+    let mut h = blake3::Hasher::new();
+    let mut any = false;
+    for f in &files {
+        if f == root_path { continue; }
+        let Ok(content) = std::fs::read(f) else { continue };
+        any = true;
+        // RELATIVE path in the digest — absolute paths would re-break the
+        // cross-workspace key stability the arg normalization establishes.
+        let rel = f.strip_prefix(dir).unwrap_or(f);
+        h.update(rel.to_string_lossy().as_bytes());
+        h.update(b"\0");
+        h.update(blake3::hash(&content).as_bytes());
+    }
+    if !any { return String::new(); }
+    h.finalize().to_hex().to_string()
 }
 
 /// Normalize rustc args so the cache key is workspace-independent.

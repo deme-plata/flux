@@ -22,6 +22,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
+// v0.37: background/async compaction (918a3b2e) renames a merge's outputs into
+// place, invalidates the shared SST-path cache, THEN deletes the old inputs one
+// at a time -- a reader whose pread() (index build or block read) lands on one
+// of those inputs in the narrow window before its remove_file can race a
+// concurrent compaction and get NotFound. This is EXPECTED and benign (the
+// key is superseded by the just-renamed merge output) -- distinct from real
+// corruption. Set by pread(), checked+cleared by Database::get() so a hit
+// can trigger exactly one retry against a freshly-invalidated SST list instead
+// of silently trusting a possibly-stale "not found". Thread-local: get() and
+// every pread() it triggers run on the SAME calling thread; the async compactor
+// runs on its own thread and never touches this cell.
+thread_local! {
+    static SST_VANISHED_RACE: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
 pub mod block;
 pub mod cache;
 pub mod cf;
@@ -151,6 +166,18 @@ pub struct Database {
     /// running. flush() spawns compaction on a side thread so a large merge no longer
     /// freezes ingestion; this flag admits only ONE at a time. Shared across clones.
     compacting: Arc<std::sync::atomic::AtomicBool>,
+    /// v0.37: TRUE mutual exclusion for compact_inner() across every entry
+    /// point (explicit compact(), compact_async(), the flush-spawned background
+    /// pass, ingest bulk paths). `compacting` above is kept as a cheap HINT so
+    /// flush() can skip spawning a redundant thread when one's already running,
+    /// but it is NOT sufficient on its own: two compact_inner() calls racing each
+    /// other's `fs::remove_file` can make one side's `SstReader::open()` hit a
+    /// hard NotFound error (unlike the graceful per-file degrade `load_index()`
+    /// does for a READER racing a compaction). A blocking lock -- not a no-op
+    /// skip -- is required so every caller still observes compact()'s existing
+    /// synchronous-completion contract (callers assume real work happened by the
+    /// time compact() returns; see test_v15_compaction_promotes_to_l1).
+    compact_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 struct DbInner {
@@ -396,6 +423,7 @@ impl Database {
             sst_readers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sst_paths: Arc::new(RwLock::new(None)),
             compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            compact_lock: Arc::new(parking_lot::Mutex::new(())),
         })
     }
 
@@ -414,6 +442,7 @@ impl Database {
             sst_readers: self.sst_readers,
             sst_paths: self.sst_paths,
             compacting: self.compacting,
+            compact_lock: self.compact_lock,
         }
     }
 
@@ -811,24 +840,45 @@ impl Database {
                 return Ok(if v.is_empty() { None } else { Some(v.clone()) });
             }
         }
-        // Read-through SSTs. Newest first: `.rev()` of the read-merge order =
-        // L0 by descending sequence, THEN deeper levels — a fresh L0 copy must
-        // shadow the stale copy a compaction pushed to L1+.
-        // v0.12: lookups consult the LRU block cache to avoid re-decompressing
-        // the same blocks on hot keys.
-        // v3 (LANE-C): cached SST list — no `read_dir` syscall on this (hot) miss path.
-        let ssts = self.cached_sst_paths()?;
-        for sst in ssts.iter().rev() {
-            // v0.35: cached reader (header+bloom resident, body lazy). A bloom miss
-            // now costs zero disk reads; before this line the WHOLE file was read
-            // per get per SST.
-            let table = self.sst_cached(sst)?;
-            if !table.bloom.may_contain(key) {
-                continue;
+        // v0.37: bounded retry against the compact_async() vanished-file race (see
+        // SST_VANISHED_RACE) -- one extra attempt with a forced-fresh SST list is
+        // enough because a fresh list always reflects an internally-consistent
+        // post-rename filesystem state (compact() renames outputs in BEFORE it
+        // invalidates the cache or removes any input, see compact()).
+        for attempt in 0..2 {
+            SST_VANISHED_RACE.with(|c| c.set(false));
+            // Read-through SSTs. Newest first: `.rev()` of the read-merge order =
+            // L0 by descending sequence, THEN deeper levels — a fresh L0 copy must
+            // shadow the stale copy a compaction pushed to L1+.
+            // v0.12: lookups consult the LRU block cache to avoid re-decompressing
+            // the same blocks on hot keys.
+            // v3 (LANE-C): cached SST list — no `read_dir` syscall on this (hot) miss path.
+            let ssts = self.cached_sst_paths()?;
+            for sst in ssts.iter().rev() {
+                // v0.35: cached reader (header+bloom resident, body lazy). A bloom miss
+                // now costs zero disk reads; before this line the WHOLE file was read
+                // per get per SST.
+                let table = match self.sst_cached(sst) {
+                    Ok(t) => t,
+                    Err(e) if e.starts_with("VANISHED") => continue,
+                    Err(e) => return Err(e),
+                };
+                if !table.bloom.may_contain(key) {
+                    continue;
+                }
+                if let Some(v) = table.lookup_cached(key, Some(&self.block_cache)) {
+                    return Ok(if v.is_empty() { None } else { Some(v) });
+                }
             }
-            if let Some(v) = table.lookup_cached(key, Some(&self.block_cache)) {
-                return Ok(if v.is_empty() { None } else { Some(v) });
+            let raced = SST_VANISHED_RACE.with(|c| c.get());
+            if !raced || attempt == 1 {
+                break;
             }
+            // A file vanished mid-lookup (async compaction raced us) -- the list we
+            // just walked may predate the rename that superseded it. Force a fresh
+            // re-list (compact() always renames outputs in before removing inputs,
+            // so the next list is guaranteed consistent) and try exactly once more.
+            self.invalidate_sst_paths();
         }
         Ok(None)
     }
@@ -1012,6 +1062,7 @@ impl Clone for Database {
             sst_readers: Arc::clone(&self.sst_readers),
             sst_paths: Arc::clone(&self.sst_paths),
             compacting: Arc::clone(&self.compacting),
+            compact_lock: Arc::clone(&self.compact_lock),
         }
     }
 }
@@ -1374,7 +1425,14 @@ impl Database {
                             }
                         }
                         let _g = Guard(db.clone());
-                        let _ = db.compact();
+                        // v0.37: call compact_inner() (not the public compact(), which
+                        // would just re-take the same compact_lock this thread is about
+                        // to take -- fine either way, but going direct avoids one extra
+                        // layer). The lock is the REAL mutual-exclusion primitive now;
+                        // `compacting` above is only flush's own fast-path hint to skip
+                        // spawning a redundant thread.
+                        let _lock = db.compact_lock.lock();
+                        let _ = db.compact_inner();
                     });
                 if spawned.is_err() {
                     // thread::Builder::spawn returned Err (the OS refused a thread under
@@ -1715,7 +1773,14 @@ pub struct SstReader {
 impl SstReader {
     pub fn open(path: &std::path::Path) -> Result<Self, String> {
         use std::io::Read;
-        let mut f = fs::File::open(path).map_err(|e| format!("read sst {}: {}", path.display(), e))?;
+        let mut f = fs::File::open(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                SST_VANISHED_RACE.with(|c| c.set(true));
+                format!("VANISHED read sst {}: {}", path.display(), e)
+            } else {
+                format!("read sst {}: {}", path.display(), e)
+            }
+        })?;
         let flen = f.metadata().map_err(|e| format!("stat sst {}: {}", path.display(), e))?.len();
         // Legacy (no FXDB magic / file shorter than the magic): whole file is the payload.
         let mut magic = [0u8; 4];
@@ -1951,6 +2016,15 @@ impl SstReader {
         self.index.get_or_init(|| {
             match build_sst_index(&self.path, self.payload_off, self.payload_len) {
                 Ok(ix) => ix,
+                Err(e) if e.starts_with("VANISHED") => {
+                    // Benign: this file was superseded by a concurrent compaction's
+                    // merge output between being listed and being read. Not corruption
+                    // -- no eprintln alarm. Database::get() retries once against a
+                    // fresh SST list via SST_VANISHED_RACE; scan/iter callers that hit
+                    // this mid-traversal simply see this one file as empty (the merge
+                    // output that superseded it is already on disk).
+                    SstIndex::empty()
+                }
                 Err(e) => {
                     eprintln!("[flux-db] SST index parse failed {}: {}", self.path.display(), e);
                     SstIndex::empty()
@@ -2088,7 +2162,14 @@ impl SstIndex {
 /// warm lookups are served by the BlockCache without reaching here.
 fn pread(path: &std::path::Path, off: u64, len: usize) -> Result<Vec<u8>, String> {
     use std::io::{Seek, SeekFrom};
-    let mut f = fs::File::open(path).map_err(|e| format!("pread open {}: {}", path.display(), e))?;
+    let mut f = fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            SST_VANISHED_RACE.with(|c| c.set(true));
+            format!("VANISHED pread open {}: {}", path.display(), e)
+        } else {
+            format!("pread open {}: {}", path.display(), e)
+        }
+    })?;
     f.seek(SeekFrom::Start(off)).map_err(|e| format!("pread seek {}: {}", path.display(), e))?;
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf)
@@ -2514,7 +2595,27 @@ impl Database {
     /// ours rewrites the whole level in one shot. Correctness is the
     /// same — newer entries always shadow older ones because the input
     /// list is sorted by sequence — just less I/O-efficient at scale.
+    /// v0.37: `compact()` itself is now single-flight across EVERY entry point
+    /// (explicit `compact()`, `compact_async()`, the ingest bulk paths, AND
+    /// flush's own auto-spawned background compaction) -- not just flush's
+    /// spawn path, which only guarded against ITSELF. Two compactions running
+    /// concurrently raced each other's `fs::remove_file` / input reads: one
+    /// pass's `SstReader::open()` on an input file could return a hard error
+    /// (not the graceful degrade `load_index()` does) if the OTHER pass had
+    /// already deleted that exact file moments earlier -- reproduced by
+    /// `test_get_retries_past_vanished_sst_race`'s own compact() loop tripping
+    /// over flush's auto-spawned background compaction. A second caller now
+    /// gets an immediate `Ok(())` no-op (matching flush's existing "a
+    /// compaction is already in flight" comment) instead of racing.
     pub fn compact(&self) -> Result<(), String> {
+        // Blocks until any in-flight compaction (background-spawned or another
+        // explicit caller) finishes, then runs a REAL pass of its own -- callers
+        // rely on compact() having done actual work by the time it returns.
+        let _guard = self.compact_lock.lock();
+        self.compact_inner()
+    }
+
+    fn compact_inner(&self) -> Result<(), String> {
         // First pass: fold the memtable into L0 by treating it as a
         // virtual level-0 file with the highest sequence number.
         for current_level in 0..MAX_LEVEL {
@@ -4487,6 +4588,45 @@ mod tests {
         });
         assert!(gone, "deepest-level merge must drop the tombstone pair entirely");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// v0.37: VANISHED-SST RACE regression (the bug behind the "SST index parse
+    /// failed" alarm seen live on a Windows sigil-top node). Simulates a get()
+    /// call whose cached SST-path snapshot names a file that a LATER, real
+    /// compact() has since deleted (the exact interleaving async compaction
+    /// makes possible: a reader's list can predate the compaction that
+    /// supersedes it). Without the SST_VANISHED_RACE retry in get(), this would
+    /// silently return None for a key that is very much still on disk (in the
+    /// compaction's real output) -- the false negative the fix closes.
+    #[test]
+    fn test_get_retries_past_vanished_sst_race() {
+        let tmp = std::env::temp_dir().join("flux-db-test-vanished-race");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+        db.put(b"racy", b"v1").unwrap();
+        db.compact().unwrap(); // "racy" now lives alone in one L1 SST (file A)
+
+        let stale_list = db.cached_sst_paths().unwrap();
+        assert_eq!(stale_list.len(), 1, "setup: exactly one L1 SST expected");
+        let old_file = stale_list[0].clone();
+        assert!(old_file.exists(), "setup: file A must exist before the race");
+
+        // A second compaction (triggered by enough L1 growth) folds file A's
+        // data into a NEW L1 output alongside fresh data, then deletes file A
+        // -- this is the real, non-simulated compact() codepath.
+        for i in 0..(L0_COMPACT_THRESHOLD * LEVEL_SIZE_RATIO + 1) {
+            db.put(format!("fill{:04}", i).as_bytes(), b"x").unwrap();
+            db.compact().unwrap();
+        }
+        assert!(!old_file.exists(), "setup: file A must be gone after the deeper merge");
+
+        // Re-poison the cache with the STALE (pre-merge) list, as if THIS
+        // get() call's snapshot were taken before the compaction above ran --
+        // exactly the interleaving a concurrent async compact() can produce.
+        *db.sst_paths.write() = Some(stale_list);
+
+        assert_eq!(db.get(b"racy").unwrap(), Some(b"v1".to_vec()),
+            "get() must not lose a key to a stale SST-list snapshot racing compaction's file removal");
     }
 
     #[test]

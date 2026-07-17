@@ -1,5 +1,73 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.37.0 — The incremental release: run only what changed, prove what didn't (2026-07-17)
+
+The FIP-0003 release. Builds and test runs stop rediscovering the world:
+every fluxc invocation records what it did into a persistent task-dependency
+graph, and the scheduler uses that graph to run only the dependency cone of
+an edit — skipping, with proof, everything whose binaries are byte-identical
+to a run that already passed. Plus rung 7 of the compiler ladder, a cache-
+correctness fix every agent needs, and the 20 TB durability verdict.
+
+### TDG — the task-dependency graph (FIP-0003, write + read sides)
+- **Tracer** (`fluxc-core::tdg`, flux-db at `<cache>/tdg`): every build-family
+  invocation records a node + TTL'd run stamp; the WRAPPER records every
+  compiled unit with its real content-addressed cache_key, FIP-0002 dep
+  identities, and dep edges (both directions). Wrapper writes go through a
+  spool (tiny file per unit, parent batch-ingests) — zero flux-db contention
+  from parallel rustc spawns, crash-safe, µs cost.
+- **Crate scheduler** (`fluxc tdg baseline|plan|run`): BLAKE3 source keys per
+  crate, key-equality diff, reverse-dep cone via flux-graph. Measured on the
+  146-crate workspace: edit a leaf → cone 1; edit flux-cache → cone 45,
+  101 skipped. Keys promote to proven-green ONLY after a green run.
+- **Unit gate** (`fluxc tdg run --units`): probe `cargo test --no-run`, then
+  skip crates whose test-binary key set hashes identically to last green.
+  Merged per-package unit maps carry cargo-fresh units forward (partial-
+  observation soundness). Proven: tests-only edit in a dep → dependents skip.
+- **`flux_combo incremental:true`**: the unit gate in the daily driver —
+  ⏭ INCREMENTAL SKIP card in ~40ms when the package's test binaries already
+  passed, fail-open on any uncertainty, promotes only on green with >0 tests.
+- **`fluxc tdg [N]`** report: nodes/edges/recent runs visible from day one.
+
+### Compiler ladder — rung 7 complete (traits)
+- Static, generic (monomorphization), and dyn dispatch all compile natively
+  through MIR→Cranelift. Dyn = closed-world devirtualization: unique-impl
+  calls resolve statically; multi-impl warns loudly and fails at link rather
+  than mis-dispatch (real vtables = rung 7 part 3b).
+- Enforced outcome gates in `mir-corpus/gates/` (static==36, generic==25,
+  dyn==16) — exit code IS the computed value; the whole pipeline runs per gate.
+
+### Cache correctness — the stale-rlib fix (ed253794) ⚠ ONE COLD REBUILD
+- The unit cache key hashed only the ROOT source file: editing only a sibling
+  module file left the key unchanged and restore could resurrect a stale rlib
+  missing new symbols (observed live as ghost E0425s). The key now folds in a
+  digest of the whole module tree (relative paths — cross-workspace stability
+  preserved). Over-invalidates, never wrong-restores. Every multi-file unit's
+  key changes once: first build after upgrading is cold.
+
+### flux-db — hardening + the verdict
+- Background (async) compaction: ingestion no longer freezes during merges;
+  two async-compaction races fixed (SST vanishing mid-read).
+- batch_put delegates to put_many (coalesced WAL for bulk callers).
+- **20 TB ladder verdict (2026-07-17): PASS.** 1 TB → 20,000/20,000; 5 TB →
+  20,000/20,000; 20 TB → 2.414 billion records, 40,001/40,001 sampled keys
+  present (100.00%), flat ~6 GB RSS over 12 days of continuous ingest.
+  Evidence archived at chronos-v035/EVIDENCE/.
+
+### Rescued + shipped surface (deployed since ~06-28, committed 07-17)
+- 14 `flux_sigil_wallet_*` MCP tools (ed25519 signing), the v0.32 native
+  onboarding tools (flux_mcp_status/flux_mcp_register), local-node swarm
+  probe, flux-context Task 4 model dispatch (router → flux-moe endpoints).
+
+### Installer / distribution (2026-07-12)
+- fluxapp.xyz is the canonical domain; setup-flux.sh verifies the MCP
+  handshake end-to-end before claiming success; flux-src.tar.gz bundles the
+  sigil sibling tree (path deps); prebuilt refreshed per release — THIS one.
+
+### Deployment notes
+- Cache keys flip once (see above). Pre-v0.36 binaries still cannot read v3
+  SSTs. `fluxc self-update` pulls this release's musl build.
+
 ## v0.36.0 — Durable storage + fleet-warm builds (2026-07-03)
 
 The release the chronos TB-scale campaign forced. flux-db went from "105 unit

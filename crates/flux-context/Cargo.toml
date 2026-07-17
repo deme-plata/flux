@@ -20,6 +20,9 @@ flux-graph = { path = "../flux-graph" }
 # Task 2 context-diff: BLAKE3 content fingerprints (hash_bytes) + content-addressed
 # snapshot persistence (.flux-rev Store). Don't hand-roll a hasher.
 flux-rev = { path = "../flux-rev" }
+# Task 4 model dispatch: the router picks a tier + chunk slice; flux-moe's generate()
+# endpoint-switch (ollama local-qwen / DeepSeek OpenAI API) actually runs the model.
+flux-moe = { path = "../flux-moe" }
 
 # Chunk-manifest writer: `flux-context-chunks [workspace_root]` → .whale/context/chunks.json
 [[bin]]

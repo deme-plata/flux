@@ -51,6 +51,10 @@ pub mod watch;
 /// (and flux-moe's local/DeepSeek two-mind for the cheap path).
 pub mod router;
 
+/// Task 4 wiring: turn a router decision into an actual model call via flux-moe
+/// (local-qwen for the Cheap tier, DeepSeek API for Full/Reasoning).
+pub mod dispatch;
+
 /// Default model context window (tokens). Override per-model if needed.
 pub const DEFAULT_WINDOW_TOKENS: u32 = 1_000_000;
 

@@ -267,6 +267,7 @@ pub mod zerox;
 pub mod crosscompile;
 pub mod sigil_combos;
 pub mod sigil_ops;
+pub mod sigil_wallet;
 pub mod flux_error;
 pub mod molt;
 pub mod wallet_xray;

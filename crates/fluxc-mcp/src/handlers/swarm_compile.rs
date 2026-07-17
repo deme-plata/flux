@@ -360,6 +360,19 @@ fn flux_swarm_cortex(args: &Value) -> String {
     out
 }
 
+fn local_exec(cmd: &str) -> String {
+    Command::new("bash").arg("-c").arg(cmd).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn host_is_local(host: &str) -> bool {
+    let ip = host.rsplit('@').next().unwrap_or(host);
+    Command::new("bash").arg("-c").arg("hostname -I 2>/dev/null").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|a| a == ip))
+        .unwrap_or(false)
+}
+
 fn flux_swarm_status(args: &Value) -> String {
     let nodes: Vec<String> = args
         .get("nodes")
@@ -386,6 +399,19 @@ fn flux_swarm_status(args: &Value) -> String {
             }
         };
         let (name, host, _) = (node.0, node.1, node.2);
+
+        // Local node can't SSH to its own public IP — probe it locally instead.
+        if name == "epsilon" || host_is_local(host) {
+            online += 1;
+            let flux_ver = local_exec("cd /home/storage/deepseek-codewhale/flux && ./target/debug/fluxc --version 2>&1 || echo 'no-fluxc'");
+            let flux_ver = flux_ver.trim();
+            if flux_ver != "no-fluxc" && !flux_ver.is_empty() { has_flux += 1; }
+            let sigil_ver = local_exec("cd /home/storage/deepseek-codewhale/sigil && ./target/release/sigil-top --version 2>&1 || echo 'no-sigil-top'");
+            let sigil_ver = sigil_ver.trim();
+            if sigil_ver != "no-sigil-top" && !sigil_ver.is_empty() { has_sigil += 1; }
+            out.push_str(&format!("  \u{1f7e2} {name} (local): flux={flux_ver} sigil-top={sigil_ver}\n"));
+            continue;
+        }
 
         if !probe_host(host) {
             out.push_str(&format!("  🔴 {name} ({host}): OFFLINE\n"));

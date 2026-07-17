@@ -6,11 +6,11 @@ pub fn register(registry: &mut ToolRegistry) {
 
     // ── Session bootstrap tools ──
     registry.register(
-        ToolDef { name: "flux_quickstart", description: "Bootstrap a new AI session: read all key docs + skills inline, show current state, paths, rules, pre-existing issues. Saves 4-7 read_file MCP calls.", input_schema: json!({"type": "object", "properties": {}}) },
+        ToolDef { name: "flux_quickstart", description: "First-time + every session starter. Dynamically loads key docs, discovers flux-dev skill from .grok/.claude/.cursor homes, prints real binary + PATH status, client hints, and the key combos (flux_combo etc). The #1 tool after connecting a new flux MCP.", input_schema: json!({"type": "object", "properties": {}}) },
         flux_quickstart,
     );
     registry.register(
-        ToolDef { name: "flux_bootstrap", description: "Quickstart + diagnose + tune in one call. Complete session initialization with auto-detected tune preset.", input_schema: json!({"type": "object", "properties": {"context": {"type": "string", "description": "Task context for auto-tune detection"}}}) },
+        ToolDef { name: "flux_bootstrap", description: "Quickstart + diagnose + auto-tune. Good after flux_quickstart or flux_mcp_status. Portable (no more hardcoded paths).", input_schema: json!({"type": "object", "properties": {"context": {"type": "string", "description": "Task context for auto-tune detection"}}}) },
         flux_bootstrap,
     );
     registry.register(
@@ -32,6 +32,16 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef { name: "flux_v4_optimize", description: "DeepSeek V4 API optimization report: prefix caching, parallel execution, thinking tokens, codewhale API paths, token savings estimates.", input_schema: json!({"type": "object", "properties": {"format": {"type": "string", "description": "text or json"}, "scope": {"type": "string", "description": "all (default), tools, docs, workflow"}}}) },
         flux_v4_optimize,
+    );
+
+    // ── First-time / MCP self-setup tools (the fixes for pilot feedback) ──
+    registry.register(
+        ToolDef { name: "flux_mcp_status", description: "First-time user / pilot health check for Flux MCP + dev skills. Reports the exact binary serving this MCP, resolved workspace, whether fluxc is on PATH, which AI client dirs exist (.grok, .claude, .cursor, .codex), which flux-* skills are visible, and the exact commands to fix PATH or install flux-dev skill. Call this right after connecting a new fluxc MCP.", input_schema: json!({"type": "object", "properties": {}}) },
+        flux_mcp_status,
+    );
+    registry.register(
+        ToolDef { name: "flux_mcp_register", description: "Emit ready-to-paste registration for the *live* fluxc binary powering these tools. Client-aware output for Claude (`claude mcp add-json` or settings.json), Cursor mcp.json, Codex config.toml, plus Grok notes (host-injected or manual stdio). Use after `setup-flux.sh` or when switching fluxc builds.", input_schema: json!({"type": "object", "properties": {"client": {"type": "string", "description": "claude | cursor | codex | grok | all (default all)"}}}) },
+        flux_mcp_register,
     );
 
     // ── Analysis tools ──
@@ -67,48 +77,114 @@ fn flux_quickstart(_args: &Value) -> String {
     qs.push(format!("⚡ Flux Quickstart — v{}", env!("CARGO_PKG_VERSION")));
     qs.push("".to_string());
 
-    let workspace_root = "/home/storage/deepseek-codewhale";
+    // Make the new MCP tools unavoidable on every first connection / quickstart
+    qs.push("## Unavoidable Onboarding Tools (new in this version)".to_string());
+    qs.push("  flux_mcp_status     — binary/PATH/skills/clients health + fixes".to_string());
+    qs.push("  flux_mcp_register   — exact registration for your AI client".to_string());
+    qs.push("  flux_quickstart     — this (docs + rules + combos)".to_string());
+    qs.push("  Call flux_mcp_status FIRST after connecting a new MCP.".to_string());
+    qs.push("".to_string());
 
-    let instructions = std::fs::read_to_string(format!("{}/flux/instructions.md", workspace_root)).unwrap_or_default();
+    // Dynamic, portable paths — works for first-time users on any machine.
+    // ws() walks from the running fluxc exe (target/debug/fluxc or ~/.flux/bin/fluxc)
+    // so we get the correct source tree even if the MCP was spawned from a different cwd.
+    let ws = crate::handlers::ws();
+    let ws_str = ws.to_string_lossy().to_string();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // Read core docs relative to the resolved workspace (the dir containing the workspace Cargo.toml).
+    let instructions = std::fs::read_to_string(ws.join("instructions.md")).unwrap_or_default();
     let instructions_preview: String = instructions.lines().take(40).collect::<Vec<_>>().join("\n");
 
-    let handoff = std::fs::read_to_string(format!("{}/CODWHALE_HANDOFF.md", workspace_root)).unwrap_or_default();
+    let handoff = std::fs::read_to_string(ws.join("CODWHALE_HANDOFF.md")).unwrap_or_default();
     let handoff_preview: String = handoff.lines().take(40).collect::<Vec<_>>().join("\n");
 
-    let agents = std::fs::read_to_string(format!("{}/AGENTS.md", workspace_root)).unwrap_or_default();
-    let agents_preview: String = agents.lines().take(30).collect::<Vec<_>>().join("\n");
+    // Note: agents.md and FLUX_AI_RULES.md are available in the workspace if a future
+    // quickstart revision wants to surface more onboarding material. Currently omitted
+    // to keep the first-time output tight.
 
-    let ai_rules = std::fs::read_to_string(format!("{}/FLUX_AI_RULES.md", workspace_root)).unwrap_or_default();
-    let ai_rules_preview: String = ai_rules.lines().take(40).collect::<Vec<_>>().join("\n");
-
-    // Skills
-    let workspace_skills = format!("{}/skills", workspace_root);
-    let system_skills = "/root/.deepseek/skills";
-    let skill_names = ["flux-dev", "qflux-v2", "q-miner-flux"];
+    // Skills discovery: client-agnostic. Check the common places new users will have
+    // after running setup-flux.sh or manually installing the skill tarball.
+    // Priority: user client dirs first (.grok for this pilot, .claude, .cursor), then fallbacks.
+    let skill_dirs: Vec<String> = vec![
+        format!("{}/.grok/skills", home),
+        format!("{}/.claude/skills", home),
+        format!("{}/.cursor/skills", home),
+        "/root/.deepseek/skills".to_string(),
+        ws.join("skills").to_string_lossy().to_string(),
+        format!("{}/../skills", ws_str),
+    ];
     let mut skill_summaries: Vec<String> = Vec::new();
-    for name in &skill_names {
-        let ws_path = format!("{}/{}/SKILL.md", workspace_skills, name);
-        let sys_path = format!("{}/{}/SKILL.md", system_skills, name);
-        let skill_path = if std::path::Path::new(&ws_path).exists() { ws_path } else { sys_path };
-        if let Ok(content) = std::fs::read_to_string(&skill_path) {
-            let desc = content.lines()
-                .skip_while(|l| l.starts_with("---") || l.trim().is_empty())
-                .skip(1)
-                .find(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.starts_with('>'))
-                .unwrap_or("no description");
-            skill_summaries.push(format!("  - {}: {}", name, desc.trim()));
+    let mut seen_skills: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for dir in &skill_dirs {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let sname = entry.file_name().to_string_lossy().to_string();
+                if !sname.contains("flux") && !sname.contains("sigil") && sname != "flux-dev" { continue; }
+                if seen_skills.contains(&sname) { continue; }
+                let p = entry.path().join("SKILL.md");
+                if p.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        let desc = content.lines()
+                            .skip_while(|l| l.starts_with("---") || l.trim().is_empty())
+                            .skip(1)
+                            .find(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.starts_with('>'))
+                            .unwrap_or("no description");
+                        seen_skills.insert(sname.clone());
+                        skill_summaries.push(format!("  - {}: {}  [{}]", sname, desc.trim(), dir));
+                    }
+                }
+            }
+        }
+    }
+    if skill_summaries.is_empty() {
+        // Fallback to explicit common ones if auto-scan found nothing
+        for name in ["flux-dev", "flux-platform", "flux-logs", "sigil"] {
+            for dir in &skill_dirs {
+                let p = format!("{}/{}/SKILL.md", dir, name);
+                if std::path::Path::new(&p).exists() {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        let desc = content.lines().skip(5).find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or("see SKILL.md");
+                        skill_summaries.push(format!("  - {}: {}  [{}]", name, desc.trim(), dir));
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    // Health snapshot
+    // Health snapshot + first-time runtime info
     let arch = crate::handlers::analyze_ws();
     let health = arch.architecture_score * 100.0;
 
+    // PATH check for the command a new user would type
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let fluxc_on_path = path_var.split(':').any(|p| {
+        std::path::Path::new(p).join("fluxc").exists()
+    }) || std::process::Command::new("which").arg("fluxc").output().map(|o| o.status.success()).unwrap_or(false);
+
+    let client_hints: Vec<&str> = [
+        (format!("{}/.claude", home), "Claude Code"),
+        (format!("{}/.grok", home), "Grok"),
+        (format!("{}/.cursor", home), "Cursor"),
+        (format!("{}/.codex", home), "Codex"),
+    ].iter().filter_map(|(d, label)| if std::path::Path::new(d).exists() { Some(*label) } else { None }).collect();
+
+    qs.push("## Runtime (what a new user actually sees)".to_string());
+    qs.push(format!("  This MCP served by: {}", exe));
+    qs.push(format!("  Resolved workspace: {}", ws_str));
+    qs.push(format!("  fluxc command on PATH? {}", if fluxc_on_path { "yes ✓" } else { "NO — add the dir containing this binary or ~/.flux/bin" }));
+    if !client_hints.is_empty() {
+        qs.push(format!("  Detected client dirs: {}", client_hints.join(", ")));
+    }
+
+    qs.push("".to_string());
     qs.push("## Current State".to_string());
-    qs.push(format!("  Binary:   flux/target/debug/fluxc (v{})", env!("CARGO_PKG_VERSION")));
     qs.push(format!("  Crates:   {} (all compilable)", arch.crates.len()));
-    qs.push(format!("  MCP:      46 tools (6 phrasal verbs: combo, quickcast, ult, fullcheck, quickstart, bootstrap)"));
-    qs.push(format!("  Tests:    flux-search 15/15, flux-science 19/19, fluxc-core 19/25"));
+    qs.push(format!("  MCP surface: 180+ tools + phrasal verbs (flux_combo, flux_quickcast, flux_ult, flux_fullcheck, flux_quickstart, flux_bootstrap, flux_dev ...)"));
     qs.push(format!("  Health:   ~{:.0}% architecture score", health));
 
     qs.push("".to_string());
@@ -130,24 +206,47 @@ fn flux_quickstart(_args: &Value) -> String {
     }
 
     qs.push("".to_string());
-    qs.push("## Critical Rules".to_string());
-    qs.push("  1. Use MCP tools for builds — not raw cargo".to_string());
-    qs.push("  2. Start every session with flux_quickstart or flux_bootstrap".to_string());
-    qs.push("  3. Equip tune preset based on context".to_string());
-    qs.push("  4. Never rewrite files — incremental edits only".to_string());
-    qs.push("  5. Do NOT fix pre-existing test failures unless asked".to_string());
+    qs.push("## Critical Rules (flux-dev skill)".to_string());
+    qs.push("  1. Use MCP tools (flux_combo / fluxc mcp) for builds — NEVER raw cargo in this workspace".to_string());
+    qs.push("  2. Start EVERY session with flux_quickstart or flux_bootstrap".to_string());
+    qs.push("  3. Claim work (if using swarm) before editing; release when done".to_string());
+    qs.push("  4. Incremental edits + git commit before big moves".to_string());
+
+    if !fluxc_on_path {
+        qs.push("".to_string());
+        qs.push("## First-time PATH fix (do this now)".to_string());
+        qs.push(format!("  mkdir -p ~/.flux/bin"));
+        qs.push(format!("  ln -sf '{}' ~/.flux/bin/fluxc", exe));
+        qs.push("  export PATH=\"$HOME/.flux/bin:$PATH\"   # or add to ~/.bashrc / ~/.zshrc".to_string());
+        qs.push("  Then in new shell: fluxc --version   and restart your AI client so MCP reconnects to the right binary.".to_string());
+    }
+
+    if skill_summaries.is_empty() {
+        qs.push("".to_string());
+        qs.push("## flux-dev skill missing — install it".to_string());
+        qs.push("  The power of Flux for AI comes from the flux-dev (and sibling) skills.".to_string());
+        qs.push("  Run the official installer:".to_string());
+        qs.push("    curl -fsSL https://fluxapp.xyz/setup-flux.sh | bash".to_string());
+        qs.push("  Or manually: mkdir -p ~/.grok/skills ~/.claude/skills ; tar xzf flux-skills.tar.gz -C ~/.grok/skills".to_string());
+        qs.push("  Then tell your AI: \"load the flux-dev skill\" (or it auto-loads on client restart).".to_string());
+    }
 
     qs.push("".to_string());
-    qs.push("## Pre-Existing Failures (do NOT fix)".to_string());
-    qs.push("  predict::test_feedback_tracking — assertion".to_string());
-    qs.push("  predict::test_history_persistence_roundtrip — assertion".to_string());
-    qs.push("  predict::test_predict_no_changes — assertion".to_string());
-    qs.push("  qspec::test_safety_score_unsafe — assertion".to_string());
-    qs.push("  quantum_architect::test_analyze_single_crate — assertion".to_string());
-    qs.push("  quantum_architect::test_discover_crates — assertion".to_string());
+    qs.push("## Key MCP combos for fast dev (use these!)".to_string());
+    qs.push("  flux_combo package=fluxc-core          # compile + test + predict (the daily driver)".to_string());
+    qs.push("  flux_combo package=fluxc-mcp           # after editing MCP handlers".to_string());
+    qs.push("  flux_quickcast package=...             # tune + check + predict".to_string());
+    qs.push("  flux_ult package=...                   # parallel insight".to_string());
+    qs.push("  flux_fullcheck                         # dogfood self-build + bench + health".to_string());
+    qs.push("  flux_dev package=fluxc-mcp file=...    # unified dev loop (check+test+heal+suggest)".to_string());
+    qs.push("  After changes: call flux_combo before claiming \"done\".".to_string());
 
     qs.push("".to_string());
-    qs.push("⚡ Ready. Docs loaded (compact preview). For full docs use read_file. Run flux_diagnose or flux_architect_predict.".to_string());
+    qs.push("## Pre-Existing Test Noise (do NOT fix unless asked)".to_string());
+    qs.push("  Some predict / architect tests have known assertions left as-is for baseline.".to_string());
+
+    qs.push("".to_string());
+    qs.push("⚡ Ready. MCP + flux-dev skill surface loaded (dynamic). Call flux_mcp_status for a full health report. Next: flux_bootstrap or flux_combo on the crate you want to touch.".to_string());
     qs.join("\n")
 }
 
@@ -158,15 +257,16 @@ fn flux_bootstrap(args: &Value) -> String {
     let start = std::time::Instant::now();
     let mut report = Vec::new();
 
-    // Phase 1: Compact state (NOT full quickstart — saves ~3000 chars)
+    let ws = crate::handlers::ws();
     let arch = crate::handlers::analyze_ws();
     report.push(format!("⚡ Flux Bootstrap — v{}", env!("CARGO_PKG_VERSION")));
+    report.push(format!("  Workspace: {}", ws.display()));
     report.push(format!("  Crates: {} | Arch: {:.0}% | LOC: {}",
         arch.crates.len(), arch.architecture_score * 100.0,
         arch.crates.iter().map(|b| b.loc).sum::<usize>()));
-    report.push("  MCP: 55+ tools | 7 phrasal verbs | 20 crates".to_string());
-    report.push("  Skills: flux-dev, qflux-v2, q-miner-flux, gemma4-flux".to_string());
-    report.push("  Rules: Use cargo directly, never rewrite files, commit before deploy".to_string());
+    report.push("  MCP surface: 180+ tools + powerful phrasal verbs (flux_combo is your friend)".to_string());
+    report.push("  Skills: load flux-dev for the full methodology (never-raw-cargo, combos, swarm, provenance)".to_string());
+    report.push("  Rules: MCP tools only for builds in this tree. Start sessions with quickstart/bootstrap.".to_string());
 
     // Phase 2: Diagnose
     report.push("".to_string());
@@ -199,7 +299,7 @@ fn flux_bootstrap(args: &Value) -> String {
 
     let t = tune::load_tune();
     report.push(format!("  Tune: {} equipped", t.preset_name));
-    report.push("  Next: flux_fullcheck or flux_iterate".to_string());
+    report.push("  Next: flux_combo or flux_fullcheck (or flux_mcp_status for setup health)".to_string());
 
     report.join("\n")
 }
@@ -219,34 +319,38 @@ fn flux_context_audit(args: &Value) -> String {
         .unwrap_or(DEFAULT_WINDOW_TOKENS);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
 
-    // (name, kind, path) — owned so the slice can outlive the literals.
+    // (name, kind, path) — client-agnostic for Grok + Claude + others
     let mut entries: Vec<(String, ContextKind, String)> = vec![
-        ("CLAUDE.md".into(), ContextKind::Runbook, format!("{home}/.claude/CLAUDE.md")),
+        ("CLAUDE.md / runbook".into(), ContextKind::Runbook, format!("{home}/.claude/CLAUDE.md")),
+        ("GROK / CLAUDE.md equivalent".into(), ContextKind::Runbook, format!("{home}/.grok/CLAUDE.md")),
         (
-            "MEMORY.md".into(),
+            "MEMORY index (claude)".into(),
             ContextKind::MemoryIndex,
             format!("{home}/.claude/projects/-home-storage-claude-code/memory/MEMORY.md"),
         ),
     ];
 
-    // Auto-discover EVERY skill's SKILL.md (the real loaded skill surface — not
-    // just flux-dev), plus TOOLS.md where a skill ships one. This is the fix for
-    // "only 4 hardcoded files": the audit now reflects the whole skill catalog.
-    let skills_dir = format!("{home}/.claude/skills");
-    if let Ok(rd) = std::fs::read_dir(&skills_dir) {
-        let mut dirs: Vec<_> = rd.flatten().filter(|e| e.path().is_dir()).collect();
-        dirs.sort_by_key(|e| e.file_name());
-        for e in dirs {
-            let sname = e.file_name().to_string_lossy().to_string();
-            for doc in ["SKILL.md", "TOOLS.md"] {
-                let p = e.path().join(doc);
-                if p.exists() {
-                    let kind = if doc == "TOOLS.md" {
-                        ContextKind::ToolCatalog
-                    } else {
-                        ContextKind::SkillDoc
-                    };
-                    entries.push((format!("{sname}/{doc}"), kind, p.to_string_lossy().to_string()));
+    // Auto-discover skills from all common client locations (Grok first for this env, then Claude, Cursor).
+    for sd in [
+        format!("{home}/.grok/skills"),
+        format!("{home}/.claude/skills"),
+        format!("{home}/.cursor/skills"),
+    ] {
+        if let Ok(rd) = std::fs::read_dir(&sd) {
+            let mut dirs: Vec<_> = rd.flatten().filter(|e| e.path().is_dir()).collect();
+            dirs.sort_by_key(|e| e.file_name());
+            for e in dirs {
+                let sname = e.file_name().to_string_lossy().to_string();
+                for doc in ["SKILL.md", "TOOLS.md"] {
+                    let p = e.path().join(doc);
+                    if p.exists() {
+                        let kind = if doc == "TOOLS.md" {
+                            ContextKind::ToolCatalog
+                        } else {
+                            ContextKind::SkillDoc
+                        };
+                        entries.push((format!("{sname}/{doc}"), kind, p.to_string_lossy().to_string()));
+                    }
                 }
             }
         }
@@ -661,4 +765,103 @@ fn flux_architect_predict(args: &Value) -> String {
         }
         report.join("\n")
     }
+}
+
+// ── flux_mcp_status ──
+// The tool a new user (or Grok pilot) calls immediately after wiring a fresh fluxc MCP.
+// Gives concrete, actionable status instead of the old hardcoded quickstart assumptions.
+fn flux_mcp_status(_args: &Value) -> String {
+    let mut out = vec!["⚡ flux_mcp_status — MCP + dev skills health for first-time users".to_string()];
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let ws = crate::handlers::ws();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let path = std::env::var("PATH").unwrap_or_default();
+
+    out.push(format!("exe (the binary serving these tools): {}", exe));
+    out.push(format!("workspace (from exe walk): {}", ws.display()));
+
+    let fluxc_dir = std::path::Path::new(&exe).parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let on_path = path.split(':').any(|seg| seg == fluxc_dir || std::path::Path::new(seg).join("fluxc").exists());
+    out.push(format!("fluxc in PATH? {}", if on_path { "yes" } else { "NO" }));
+
+    // Client + skill scan
+    let candidates = [
+        (format!("{}/.grok", home), "Grok"),
+        (format!("{}/.claude", home), "Claude Code"),
+        (format!("{}/.cursor", home), "Cursor"),
+        (format!("{}/.codex", home), "Codex"),
+    ];
+    let mut found_clients = vec![];
+    let mut skill_hits = vec![];
+    for (dir, label) in &candidates {
+        if std::path::Path::new(dir).exists() {
+            found_clients.push(*label);
+        }
+        let sdir = format!("{}/skills", dir);
+        if let Ok(rd) = std::fs::read_dir(&sdir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.contains("flux") || name.contains("sigil") {
+                    if std::path::Path::new(&format!("{}/{}", sdir, name)).join("SKILL.md").exists() {
+                        skill_hits.push(format!("{} @ {}", name, sdir));
+                    }
+                }
+            }
+        }
+    }
+    out.push(format!("detected client homes: {}", if found_clients.is_empty() { "none".to_string() } else { found_clients.join(", ") }));
+    if skill_hits.is_empty() {
+        out.push("flux-* / sigil skills found: NONE — run setup-flux.sh or place flux-dev/SKILL.md under one of the client skills/ dirs".to_string());
+    } else {
+        out.push("flux/skill hits:".to_string());
+        for h in skill_hits.iter().take(8) { out.push(format!("  - {}", h)); }
+    }
+
+    out.push("".to_string());
+    out.push("Fixes (copy-paste):".to_string());
+    out.push(format!("  mkdir -p ~/.flux/bin && ln -sf {} ~/.flux/bin/fluxc", exe));
+    out.push("  export PATH=\"$HOME/.flux/bin:$PATH\"".to_string());
+    out.push("  # Then restart your AI client (or re-connect MCP) and say: load the flux-dev skill ; flux_mcp_status".to_string());
+    out.push("  # For full installer: curl -fsSL https://fluxapp.xyz/setup-flux.sh | bash".to_string());
+
+    out.push("".to_string());
+    out.push("Next after green status: flux_quickstart ; flux_combo package=fluxc-mcp   (edit MCP → combo immediately)".to_string());
+    out.join("\n")
+}
+
+// ── flux_mcp_register ──
+// Outputs the precise bits a user pastes into their client so the *current* (live) fluxc
+// becomes the MCP server. This directly addresses the pilot feedback that the one-liner
+// script is Claude-centric and Grok/other setups need explicit help.
+fn flux_mcp_register(args: &Value) -> String {
+    let client = args.get("client").and_then(|v| v.as_str()).unwrap_or("all").to_lowercase();
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+
+    let mut out = vec![format!("⚡ flux_mcp_register — live fluxc = {}", exe)];
+
+    let json_blob = format!("{{\"command\":\"{}\",\"args\":[\"mcp\"]}}", exe);
+
+    if client == "all" || client == "claude" {
+        out.push("Claude Code:".to_string());
+        out.push(format!("  claude mcp add-json flux '{}'", json_blob));
+        out.push("  # or edit ~/.claude/settings.json mcpServers.flux = the above".to_string());
+    }
+    if client == "all" || client == "cursor" {
+        out.push("Cursor (~/.cursor/mcp.json):".to_string());
+        out.push("  { \"mcpServers\": { \"flux\": ".to_string() + &json_blob + " } }");
+    }
+    if client == "all" || client == "codex" {
+        out.push("Codex (~/.codex/config.toml):".to_string());
+        out.push(format!("  [mcp_servers.flux]\n  command = \"{}\"\n  args = [\"mcp\"]", exe));
+    }
+    if client == "all" || client == "grok" {
+        out.push("Grok (this runtime):".to_string());
+        out.push("  MCP servers are usually host-injected (see system MCP list).".to_string());
+        out.push("  For local dev: ensure the host launches the desired fluxc with `mcp` subcommand".to_string());
+        out.push("  and wires it before starting the agent session.".to_string());
+        out.push("  Alternative (if your Grok build supports stdio MCP config): use the JSON blob above under flux key.".to_string());
+    }
+    out.push("".to_string());
+    out.push("After registering: restart the AI client, then call flux_mcp_status + flux_quickstart.".to_string());
+    out.join("\n")
 }

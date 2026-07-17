@@ -32,6 +32,7 @@ fn build_registry() -> ToolRegistry {
     handlers::gateway::register(&mut registry);
     handlers::bank::register(&mut registry);
     handlers::sigil_cosmos::register(&mut registry);
+    handlers::sigil_wallet::register(&mut registry);
     handlers::agora_stargate::register(&mut registry);
     handlers::dao_vm_dex::register(&mut registry);
     handlers::zerox::register(&mut registry);
@@ -68,7 +69,9 @@ pub fn run_mcp_server() {
     let tool_count = registry.tools_schema().len();
     let version_str = format!("v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("⚡ Flux MCP Server {} — stdio transport (modular registry)", version_str);
-    eprintln!("   Tools: {} tools across 8 handler modules (build, test_combo, stats, predict, webhook, session, ops, chronos)", tool_count);
+    eprintln!("   Tools: {} (build/test/combos/chronos/swarm/zk/frontend + onboarding)", tool_count);
+    eprintln!("   First-time: ALWAYS start with flux_mcp_status → flux_mcp_register → flux_quickstart");
+    eprintln!("   (these are now the canonical unavoidable onboarding tools)");
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

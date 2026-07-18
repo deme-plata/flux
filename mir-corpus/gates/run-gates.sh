@@ -33,7 +33,10 @@ check() { # $1=gate file  $2=expected exit code
   fi
 }
 
-check gate_static.rs  36
-check gate_generic.rs 25
-check gate_dyn.rs     16
+check gate_static.rs    36
+check gate_generic.rs   25
+check gate_dyn.rs       16
+# rung 7 part 3b: TWO impls behind one dyn call site — runtime dispatch via the
+# tagged lowering. 16 (Sq{4}) + 6 (Rect{2,3}) == 22; a mis-dispatch cannot hit 22.
+check gate_dyn_multi.rs 22
 exit $rc

@@ -741,9 +741,17 @@ fn trait_canon_from_impl(f: &MirFunction) -> Option<String> {
 /// method `m`, the dyn call is provably that impl: rewrite the callee to `Type__m`, rewrite
 /// `&dyn Trait`/`dyn Trait` carriers to the concrete type, and collapse the unsize coercion
 /// (`_a = copy _b as &dyn Trait (PointerCoercion(Unsize, …))`) to a plain aggregate copy.
-/// With MULTIPLE impls of `m` the target is runtime-dependent — that needs real vtables
-/// (rung 7 part 3b); we warn loudly and leave the call intact so the link fails visibly
-/// instead of emitting silently-wrong code.
+/// Rung 7 part 3b (MULTI-impl dyn dispatch, tagged defunctionalization): with several
+/// impls the target is runtime-dependent. In a closed single-unit world the honest
+/// lowering is a tagged union, not a fat pointer: `dyn Trait` becomes a flat tuple
+/// `(tag, payload…)` (payload width = max impl field count, scalar-replaced like every
+/// aggregate here), the unsize coercion becomes tuple construction with the source
+/// type's tag, and the dyn call becomes a SwitchInt over the tag fanning out to the
+/// already-canonicalized static impls. Same call site, target chosen by runtime data —
+/// that IS dyn dispatch; indirect calls buy nothing extra without dynamic loading.
+/// Impl field counts are inferred from construction sites in the same unit (no layout
+/// plumbing). Anything the lowering can't prove (no construction found, unknown shape)
+/// is left untouched → the old loud link failure, never silent mis-dispatch.
 pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     use std::collections::HashMap;
     let touches = funcs.iter().any(|f| f.name.starts_with("<impl")
@@ -770,8 +778,10 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
         }
     }
 
-    // Pass 2 — devirtualize `dyn Trait__method` callees with a unique providing impl.
-    let mut dyn_map: HashMap<String, String> = HashMap::new(); // "dyn Trait" -> "Type"
+    // Pass 2 — resolve `dyn Trait__method` callees. Unique impl → devirtualize now.
+    // Multiple impls → collect for the pass-4 tagged lowering.
+    let mut dyn_map: HashMap<String, String> = HashMap::new(); // "dyn Trait" -> "Type" (unique impl)
+    let mut multi_dyn: HashMap<String, Vec<String>> = HashMap::new(); // "dyn Trait" -> sorted impl types
     for f in &mut funcs {
         for b in &mut f.blocks {
             if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
@@ -783,12 +793,13 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
                         dyn_map.insert(dyn_ty, one.clone());
                         *func = format!("{}__{}", one, method);
                     }
-                    Some(many) => eprintln!(
-                        "flux-frontend: dyn dispatch on `{}` has {} impls of `{}` — runtime \
-                         target needs vtables (rung 7 part 3b, unimplemented); leaving the \
-                         call unresolved (will fail at link, not silently mis-dispatch)",
-                        dyn_ty, many.len(), method),
-                    None => {}
+                    Some(many) if many.len() > 1 => {
+                        let mut impls = many.to_vec();
+                        impls.sort();
+                        impls.dedup();
+                        multi_dyn.insert(dyn_ty, impls);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -801,25 +812,33 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
         // their pointee and get scalar-replaced by value. Consistent caller+callee; the
         // deref/ref-op rewrites in parse_rhs make the bodies agree. Devirtualized
         // `dyn Trait` carriers become the concrete type BEFORE recv_base would
-        // otherwise mangle `&dyn Trait` into the meaningless base `dyn`.
+        // otherwise mangle `&dyn Trait` into the meaningless base `dyn`. Multi-impl
+        // carriers keep their full `dyn Trait` spelling for the pass-4 lowering.
         for pp in f.params.iter_mut().chain(f.locals.iter_mut()) {
-            let bare = pp.ty.trim().trim_start_matches("&mut ").trim_start_matches('&').trim();
-            if let Some(conc) = dyn_map.get(bare) {
+            let bare = pp.ty.trim().trim_start_matches("&mut ").trim_start_matches('&')
+                .trim().to_string();
+            if let Some(conc) = dyn_map.get(&bare) {
                 pp.ty = conc.clone();
+            } else if multi_dyn.contains_key(&bare) {
+                pp.ty = bare; // preserve "dyn Trait" verbatim for pass 4
             } else if pp.ty.trim_start().starts_with('&') {
                 pp.ty = recv_base(&pp.ty);
             }
         }
         if dyn_map.is_empty() { continue; }
+        // Collapse unsize casts ONLY for single-impl (devirtualized) dyn types —
+        // multi-impl casts become tagged constructions in pass 4. The cast target
+        // is truncated to "&dyn" by parse_rhs, so the dst LOCAL's type (already
+        // rewritten above) is the discriminator: concrete → devirt'd → collapse.
+        let ty_of: HashMap<String, String> = f.params.iter().chain(f.locals.iter())
+            .filter(|l| !l.ty.is_empty()) // debug entries shadow real decls with ty:""
+            .map(|l| (format!("_{}", l.index), l.ty.clone())).collect();
         for b in &mut f.blocks {
             for s in &mut b.statements {
-                if let MirStmt::Assign { op, args, .. } = s {
-                    // `copy _3 as &dyn Trait (PointerCoercion(Unsize, …))` — after
-                    // devirtualization both sides are the same concrete aggregate, so the
-                    // coercion is the identity: plain copy. (parse_rhs keeps only the first
-                    // token of the cast target, hence the `dyn` prefix check.)
+                if let MirStmt::Assign { dst, op, args } = s {
                     if op == "as" && args.len() >= 2
-                        && args[1].trim_start_matches('&').starts_with("dyn") {
+                        && args[1].trim_start_matches('&').starts_with("dyn")
+                        && ty_of.get(dst).map(|t| !t.starts_with("dyn ")).unwrap_or(false) {
                         let operand = args[0].trim()
                             .trim_start_matches("copy ").trim_start_matches("move ")
                             .trim().to_string();
@@ -830,7 +849,189 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
             }
         }
     }
+
+    // Pass 4 — tagged defunctionalization of multi-impl dyn (rung 7 part 3b).
+    if !multi_dyn.is_empty() {
+        lower_multi_dyn(&mut funcs, &multi_dyn);
+    }
     funcs
+}
+
+/// Rung 7 part 3b: lower every multi-impl `dyn Trait` to a tagged flat tuple and
+/// every dyn call to a SwitchInt fan-out over the tag. See normalize_traits docs.
+fn lower_multi_dyn(
+    funcs: &mut Vec<MirFunction>,
+    multi_dyn: &std::collections::HashMap<String, Vec<String>>,
+) {
+    use std::collections::HashMap;
+
+    // Impl payload widths, inferred from construction sites in this unit:
+    // `_d = Ty { f: …, g: … }` parses as Assign{op:"", args:[fields…]} with the
+    // dst local typed `Ty`. No construction found → shape unknown → skip that
+    // dyn type entirely (old loud link failure, never a guessed layout).
+    let mut nfields: HashMap<String, usize> = HashMap::new();
+    for f in funcs.iter() {
+        let ty_of: HashMap<String, String> = f.params.iter().chain(f.locals.iter())
+            .filter(|l| !l.ty.is_empty()) // debug entries shadow real decls with ty:""
+            .map(|l| (format!("_{}", l.index), l.ty.clone())).collect();
+        for b in &f.blocks {
+            for s in &b.statements {
+                if let MirStmt::Assign { dst, op, args } = s {
+                    if op.is_empty() && !args.is_empty() {
+                        if let Some(t) = ty_of.get(dst) {
+                            nfields.entry(t.clone()).or_insert(args.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let lowered: HashMap<String, (Vec<String>, usize)> = multi_dyn.iter()
+        .filter_map(|(dyn_ty, impls)| {
+            let widths: Option<Vec<usize>> = impls.iter().map(|t| nfields.get(t).copied()).collect();
+            widths.map(|w| (dyn_ty.clone(), (impls.clone(), w.into_iter().max().unwrap_or(0))))
+        })
+        .collect();
+    if lowered.is_empty() {
+        for (d, i) in multi_dyn {
+            eprintln!("flux-frontend: dyn dispatch on `{}` ({} impls) — no construction \
+                       site found to infer payload shape; leaving unresolved (loud link \
+                       failure, not silent mis-dispatch)", d, i.len());
+        }
+        return;
+    }
+    let tuple_ty = |payload: usize| {
+        let slots = vec!["i64"; payload + 1];
+        format!("({})", slots.join(", "))
+    };
+
+    for f in funcs.iter_mut() {
+        // Snapshot pre-rewrite local types (concrete cast sources + dyn carriers).
+        let orig_ty: HashMap<String, String> = f.params.iter().chain(f.locals.iter())
+            .filter(|l| !l.ty.is_empty()) // debug entries shadow real decls with ty:""
+            .map(|l| (format!("_{}", l.index), l.ty.clone())).collect();
+        let mut next_idx = f.params.iter().chain(f.locals.iter())
+            .map(|l| l.index).max().unwrap_or(0) + 1;
+        let mut fresh = |locals: &mut Vec<MirLocal>| -> String {
+            let name = format!("_{}", next_idx);
+            locals.push(MirLocal { index: next_idx, name: String::new(), ty: "i64".into(), mutable: false });
+            next_idx += 1;
+            name
+        };
+
+        // Carrier types → tagged tuple.
+        for pp in f.params.iter_mut().chain(f.locals.iter_mut()) {
+            if let Some((_, payload)) = lowered.get(pp.ty.trim()) {
+                pp.ty = tuple_ty(*payload);
+            }
+        }
+
+        // Unsize casts → tagged tuple construction (payload extracted through
+        // fresh temps so construction args stay simple operands).
+        let mut locals_add: Vec<MirLocal> = Vec::new();
+        for b in &mut f.blocks {
+            let mut out: Vec<MirStmt> = Vec::with_capacity(b.statements.len());
+            for s in b.statements.drain(..) {
+                match s {
+                    MirStmt::Assign { dst, op, args }
+                        if op == "as" && args.len() >= 2
+                            && args[1].trim_start_matches('&').starts_with("dyn")
+                            && orig_ty.get(&dst).map(|t| lowered.contains_key(t.trim())).unwrap_or(false) =>
+                    {
+                        let dyn_ty = orig_ty.get(&dst).unwrap().trim().to_string();
+                        let (impls, payload) = &lowered[&dyn_ty];
+                        let src = args[0].trim()
+                            .trim_start_matches("copy ").trim_start_matches("move ")
+                            .trim().to_string();
+                        let src_ty = orig_ty.get(&src).cloned().unwrap_or_default();
+                        let (Some(tag), Some(&n)) =
+                            (impls.iter().position(|t| *t == src_ty), nfields.get(&src_ty))
+                        else {
+                            // Unknown source type — keep the cast (loud downstream).
+                            out.push(MirStmt::Assign { dst, op, args });
+                            continue;
+                        };
+                        let mut ctor: Vec<String> = vec![format!("const {}_i64", tag)];
+                        for k in 0..n {
+                            let t = fresh(&mut locals_add);
+                            out.push(MirStmt::Assign {
+                                dst: t.clone(), op: "copy".into(),
+                                args: vec![format!("{}.{}", src, k)],
+                            });
+                            ctor.push(format!("copy {}", t));
+                        }
+                        for _ in n..*payload {
+                            ctor.push("const 0_i64".into());
+                        }
+                        out.push(MirStmt::Assign { dst, op: String::new(), args: ctor });
+                    }
+                    other => out.push(other),
+                }
+            }
+            b.statements = out;
+        }
+
+        // Dyn calls → tag switch fanning out to the static impls.
+        let mut new_blocks: Vec<MirBlock> = Vec::new();
+        let mut seq = 0usize;
+        for bi in 0..f.blocks.len() {
+            let Some(MirTerminator::Call { func, args, dst, target }) = f.blocks[bi].terminator.clone()
+            else { continue };
+            if !func.starts_with("dyn ") { continue; }
+            let Some(pos) = func.find("__") else { continue };
+            let (dyn_ty, method) = (func[..pos].to_string(), func[pos + 2..].to_string());
+            let Some((impls, _)) = lowered.get(&dyn_ty) else { continue };
+            let recv = args.first().map(|a| a.trim()
+                .trim_start_matches("copy ").trim_start_matches("move ").trim().to_string())
+                .unwrap_or_default();
+            // Tag extraction in the calling block.
+            let tag_local = fresh(&mut locals_add);
+            f.blocks[bi].statements.push(MirStmt::Assign {
+                dst: tag_local.clone(), op: "copy".into(),
+                args: vec![format!("{}.0", recv)],
+            });
+            // One branch block per impl: unpack that impl's receiver fields from the
+            // payload slots, call the canonicalized static impl, continue to the
+            // original target.
+            let mut targets: Vec<(String, String)> = Vec::new();
+            let mut otherwise = String::new();
+            for (tag, imp) in impls.iter().enumerate() {
+                let label = format!("bbdyn{}_{}", seq, tag);
+                let n = nfields.get(imp).copied().unwrap_or(0);
+                let mut stmts: Vec<MirStmt> = Vec::new();
+                let mut call_args: Vec<String> = Vec::new();
+                for k in 0..n {
+                    let t = fresh(&mut locals_add);
+                    stmts.push(MirStmt::Assign {
+                        dst: t.clone(), op: "copy".into(),
+                        args: vec![format!("{}.{}", recv, k + 1)],
+                    });
+                    call_args.push(format!("copy {}", t));
+                }
+                new_blocks.push(MirBlock {
+                    label: label.clone(),
+                    statements: stmts,
+                    terminator: Some(MirTerminator::Call {
+                        func: format!("{}__{}", imp, method),
+                        args: call_args,
+                        dst: dst.clone(),
+                        target: target.clone(),
+                    }),
+                });
+                if tag + 1 == impls.len() {
+                    otherwise = label; // last impl is the switch fallback
+                } else {
+                    targets.push((tag.to_string(), label));
+                }
+            }
+            seq += 1;
+            f.blocks[bi].terminator = Some(MirTerminator::SwitchInt {
+                discr: tag_local, targets, otherwise,
+            });
+        }
+        f.blocks.extend(new_blocks);
+        f.locals.extend(locals_add);
+    }
 }
 
 /// Monomorphize a parsed MIR function list. See the module-section comment above. No turbofish calls →
@@ -1435,6 +1636,84 @@ fn call_generic(_1: Sq) -> i64 {
         };
         assert_eq!(callee, "Sq__area",
             "specialized area_of$Sq must call the CONCRETE impl (Sq__area), not the still-generic T__area");
+    }
+
+    #[test]
+    fn multi_impl_dyn_lowers_to_tagged_switch() {
+        // Rung 7 part 3b: TWO impls of `area` → the dyn call must become a
+        // SwitchInt over the tag slot fanning out to Rect__area / Sq__area,
+        // the `&dyn Area` carrier must become the (tag, p0, p1) tuple, and the
+        // unsize casts must become tagged constructions (Sq zero-padded).
+        let mir = "fn <impl at t.rs:1:1: 1:1>::area(_1: &Sq) -> i64 {
+    bb0: {
+        _0 = copy ((*_1).0: i64);
+        return;
+    }
+}
+fn <impl at t.rs:2:2: 2:2>::area(_1: &Rect) -> i64 {
+    bb0: {
+        _0 = copy ((*_1).0: i64);
+        return;
+    }
+}
+fn dyn_call(_1: &dyn Area) -> i64 {
+    bb0: {
+        _0 = <dyn Area as Area>::area(copy _1) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+fn main() -> i64 {
+    let mut _0: i64;
+    let _1: Sq;
+    let _2: Rect;
+    let mut _3: &dyn Area;
+    let _4: &Sq;
+    bb0: {
+        _1 = Sq { s: const 4_i64 };
+        _2 = Rect { w: const 2_i64, h: const 3_i64 };
+        _4 = &_1;
+        _3 = copy _4 as &dyn Area (PointerCoercion(Unsize, Implicit));
+        _0 = dyn_call(move _3) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+";
+        let funcs = normalize_traits(parse_mir(mir).unwrap());
+        // dyn_call's param is now the tagged tuple (tag + max(1,2) payload slots).
+        let dc = funcs.iter().find(|f| f.name == "dyn_call").unwrap();
+        assert_eq!(dc.params[0].ty, "(i64, i64, i64)",
+            "multi-impl dyn carrier must become the tagged tuple");
+        // Its call became a switch fanning out to both canon impls.
+        let (targets, otherwise) = match &dc.blocks[0].terminator {
+            Some(MirTerminator::SwitchInt { targets, otherwise, .. }) => (targets.clone(), otherwise.clone()),
+            other => panic!("dyn call must lower to SwitchInt, got {:?}", other),
+        };
+        let mut callees: Vec<String> = targets.iter().map(|(_, l)| l.clone())
+            .chain([otherwise]).filter_map(|l| {
+                dc.blocks.iter().find(|b| b.label == l).and_then(|b| match &b.terminator {
+                    Some(MirTerminator::Call { func, .. }) => Some(func.clone()),
+                    _ => None,
+                })
+            }).collect();
+        callees.sort();
+        assert_eq!(callees, vec!["Rect__area".to_string(), "Sq__area".to_string()],
+            "switch branches must call BOTH canonicalized impls");
+        // main's Sq unsize cast became a tagged construction, zero-padded to
+        // the Rect width: (const <sq_tag>_i64, copy <field>, const 0_i64).
+        let mn = funcs.iter().find(|f| f.name == "main").unwrap();
+        let ctor = mn.blocks[0].statements.iter().find_map(|s| match s {
+            MirStmt::Assign { op, args, .. } if op.is_empty() && args.len() == 3
+                && args[0].starts_with("const ") && args[2] == "const 0_i64" => Some(args.clone()),
+            _ => None,
+        });
+        assert!(ctor.is_some(),
+            "Sq's unsize cast must become a zero-padded tagged tuple construction");
+        assert!(mn.locals.iter().all(|l| !l.ty.contains("dyn")),
+            "no dyn carrier may survive the lowering");
     }
 
     #[test]

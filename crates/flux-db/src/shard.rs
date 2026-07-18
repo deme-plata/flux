@@ -152,6 +152,12 @@ impl ShardedDb {
             db.set_defer_compaction(defer);
         }
     }
+
+    pub fn set_max_wal_bytes(&self, bytes: u64) {
+        for db in &self.shards {
+            db.set_max_wal_bytes(bytes);
+        }
+    }
 }
 
 /// Does a sharded store already exist at this path (marker present)?

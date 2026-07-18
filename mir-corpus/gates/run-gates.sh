@@ -43,4 +43,9 @@ check gate_dyn_multi.rs 22
 # monomorphizing a generic apply<F: Fn> — the iterator-adapter shape (7+15).
 check gate_closure.rs         20
 check gate_closure_generic.rs 22
+# rung 9: heap collections. Vec<i64> = opaque handle into the C runtime shims
+# (__flux_vec_*). Basic new/push/index (3+4), then loops + len() + variable
+# indexing + usize→i64 cast (sum 0..8 evens = 20, + len 5).
+check gate_vec.rs       7
+check gate_vec_loop.rs 25
 exit $rc

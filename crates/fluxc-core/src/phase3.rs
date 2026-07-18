@@ -125,6 +125,45 @@ pub fn compile_file(path: &str) {
     compile_impl(path, false);
 }
 
+/// The flux runtime (rung 9): heap-collection shims. Vec<i64> is an opaque
+/// i64 handle to this growable buffer; all params/returns are i64 to match
+/// the backend's uniform import ABI. Kept dependency-free C so the existing
+/// cc link step owns it. Drop-glue currently lowers to a no-op (bounded
+/// leak, exits reclaim); __flux_vec_free exists for the drop-lowering slice.
+const FLUX_RT_C: &str = r#"
+#include <stdlib.h>
+typedef struct { long long len, cap; long long *data; } fluxvec;
+long long __flux_vec_new(void) {
+    fluxvec *v = (fluxvec*)malloc(sizeof(fluxvec));
+    v->len = 0; v->cap = 0; v->data = 0;
+    return (long long)v;
+}
+long long __flux_vec_push(long long h, long long x) {
+    fluxvec *v = (fluxvec*)h;
+    if (v->len == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 4;
+        v->data = (long long*)realloc(v->data, (size_t)v->cap * sizeof(long long));
+    }
+    v->data[v->len++] = x;
+    return 0;
+}
+long long __flux_vec_index(long long h, long long i) {
+    return ((fluxvec*)h)->data[i];
+}
+long long __flux_vec_len(long long h) {
+    return ((fluxvec*)h)->len;
+}
+long long __flux_vec_pop(long long h) {
+    fluxvec *v = (fluxvec*)h;
+    return v->len ? v->data[--v->len] : 0;
+}
+long long __flux_vec_free(long long h) {
+    fluxvec *v = (fluxvec*)h;
+    free(v->data); free(v);
+    return 0;
+}
+"#;
+
 // ── JIT Execution ──
 /// Compile a standalone .rs source file → native executable → run it.
 /// Returns the process exit code. This is the `fluxc run test.rs` path.
@@ -204,10 +243,26 @@ pub fn compile_run(path: &str, args: &[String]) -> i32 {
         println!("  Cache: ✓ hit (skipping rustc)");
     }
 
-    // Link: cc obj_path → exe_path
+    // Rung 9: the flux runtime — C shims backing heap collections (__flux_vec_*).
+    // std bodies are precompiled and generic, so recognized ops lower to these
+    // instead (every compiler links a runtime it didn't compile itself; this is
+    // ours). Compiled once per content hash into the shared tmp dir.
+    let rt_o = tmp_dir.join(format!("flux_rt_{}.o", &blake3::hash(FLUX_RT_C.as_bytes()).to_hex()[..16]));
+    if !rt_o.exists() {
+        let rt_c = tmp_dir.join("flux_rt.c");
+        let _ = std::fs::write(&rt_c, FLUX_RT_C);
+        let cc_rt = Command::new("cc").arg("-c").arg(&rt_c).arg("-O2")
+            .args(["-o", &rt_o.to_string_lossy()]).status();
+        if !matches!(cc_rt, Ok(s) if s.success()) {
+            eprintln!("  Runtime shim compile failed"); return 1;
+        }
+    }
+
+    // Link: cc obj_path + runtime → exe_path
     println!("  Link: cc → {}", exe_path.display());
     let link = Command::new("cc")
         .arg(&obj_path)
+        .arg(&rt_o)
         .args(["-o", &exe_path.to_string_lossy()])
         .status();
     match link {

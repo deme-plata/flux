@@ -487,7 +487,21 @@ fn compile_mir_into_function(
                     arg_vals.push(resolve_mir_operand_to_value(a, &vars, &tuple_vars, &mut bc));
                 }
                 let cleaned = func.rsplit("::").next().unwrap_or(func).to_string();
-                if let Some(&fid) = func_ids.get(&cleaned) {
+                let maybe_fid = if let Some(&fid) = func_ids.get(&cleaned) {
+                    Some(fid)
+                } else if cleaned.starts_with("__flux_") {
+                    // Rung 9: runtime shim (heap collections etc.) — declare as an
+                    // imported symbol, uniform i64 ABI (handles/values/lengths are
+                    // all i64; the C runtime linked by fluxc run defines it).
+                    // cranelift-module dedups repeated declarations by name.
+                    let mut sig = module.make_signature();
+                    for _ in 0..arg_vals.len() { sig.params.push(AbiParam::new(types::I64)); }
+                    sig.returns.push(AbiParam::new(types::I64));
+                    module.declare_function(&cleaned, Linkage::Import, &sig).ok()
+                } else {
+                    None
+                };
+                if let Some(fid) = maybe_fid {
                     let func_ref = module.declare_func_in_func(fid, bc.func);
                     let inst = bc.ins().call(func_ref, &arg_vals);
                     let results = bc.inst_results(inst).to_vec();

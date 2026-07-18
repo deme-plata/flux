@@ -818,7 +818,9 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     use std::collections::HashMap;
     let touches = funcs.iter().any(|f| f.name.starts_with("<impl")
         || f.blocks.iter().any(|b| matches!(&b.terminator,
-            Some(MirTerminator::Call { func, .. }) if func.starts_with('<') && func.contains(" as "))));
+            Some(MirTerminator::Call { func, .. })
+                if (func.starts_with('<') && func.contains(" as "))
+                    || func.starts_with("Vec::<"))));
     if !touches { return funcs; }
 
     // Pass 1 — canonicalize impl-definition and call-site names to `Type__method`.
@@ -848,6 +850,21 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
         for b in &mut f.blocks {
             if let Some(MirTerminator::Call { func, .. }) = &mut b.terminator {
                 if let Some(canon) = trait_canon_from_call(func) { *func = canon; }
+                // Rung 9 (heap): std collection bodies never appear in the local
+                // MIR dump — they live precompiled in std. Recognized Vec<i64>
+                // operations rewrite to __flux_vec_* runtime shims (Vec = an
+                // opaque i64 heap handle; the C runtime links in fluxc run).
+                // Anything outside the recognized set keeps its std name and
+                // fails LOUD at link — never a guessed lowering.
+                let mapped = match func.as_str() {
+                    "Vec::<i64>::new" => Some("__flux_vec_new"),
+                    "Vec::<i64>::push" => Some("__flux_vec_push"),
+                    "Vec::<i64>::len" => Some("__flux_vec_len"),
+                    "Vec::<i64>::pop" => Some("__flux_vec_pop"),
+                    "Vec<i64>__index" => Some("__flux_vec_index"),
+                    _ => None,
+                };
+                if let Some(m) = mapped { *func = m.to_string(); }
             }
         }
     }
@@ -1751,6 +1768,49 @@ fn call_generic(_1: Sq) -> i64 {
         };
         assert_eq!(callee, "Sq__area",
             "specialized area_of$Sq must call the CONCRETE impl (Sq__area), not the still-generic T__area");
+    }
+
+    #[test]
+    fn vec_ops_rewrite_to_runtime_shims() {
+        // Rung 9: recognized Vec<i64> std calls rewrite to __flux_vec_* shims
+        // (incl. the Index call, which first canonicalizes through the trait
+        // machinery); an UNRECOGNIZED std op must keep its name → loud link.
+        let mir = "fn main() -> i64 {
+    let mut _0: i64;
+    let mut _1: std::vec::Vec<i64>;
+    let mut _3: &mut std::vec::Vec<i64>;
+    let mut _7: &i64;
+    let mut _8: &std::vec::Vec<i64>;
+    bb0: {
+        _1 = Vec::<i64>::new() -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        _3 = &mut _1;
+        _2 = Vec::<i64>::push(move _3, const 3_i64) -> [return: bb2, unwind continue];
+    }
+    bb2: {
+        _8 = &_1;
+        _7 = <Vec<i64> as Index<usize>>::index(move _8, const 0_usize) -> [return: bb3, unwind continue];
+    }
+    bb3: {
+        _9 = Vec::<i64>::truncate(move _8, const 1_usize) -> [return: bb4, unwind continue];
+    }
+    bb4: {
+        return;
+    }
+}
+";
+        let funcs = normalize_traits(parse_mir(mir).unwrap());
+        let callees: Vec<String> = funcs[0].blocks.iter().filter_map(|b| match &b.terminator {
+            Some(MirTerminator::Call { func, .. }) => Some(func.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(callees, vec![
+            "__flux_vec_new".to_string(),
+            "__flux_vec_push".to_string(),
+            "__flux_vec_index".to_string(),
+            "Vec::<i64>::truncate".to_string(), // unrecognized → untouched → loud
+        ]);
     }
 
     #[test]

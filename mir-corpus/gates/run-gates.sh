@@ -39,4 +39,8 @@ check gate_dyn.rs       16
 # rung 7 part 3b: TWO impls behind one dyn call site — runtime dispatch via the
 # tagged lowering. 16 (Sq{4}) + 6 (Rect{2,3}) == 22; a mis-dispatch cannot hit 22.
 check gate_dyn_multi.rs 22
+# rung 8: closures. Capture-by-ref + direct Fn::call (7+13), and TWO closures
+# monomorphizing a generic apply<F: Fn> — the iterator-adapter shape (7+15).
+check gate_closure.rs         20
+check gate_closure_generic.rs 22
 exit $rc

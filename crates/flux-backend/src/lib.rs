@@ -157,7 +157,10 @@ pub fn compile_unit_to_object_with_mir(
         let mut ctx = Context::new();
         ctx.func = func_ir;
         module.define_function(func_id, &mut ctx)
-            .map_err(|e| format!("define {}: {}", func.name, e))?;
+            // {:?} not {}: a verifier failure's Display is just "Verifier errors" —
+            // the Debug form carries the per-instruction detail, the only
+            // actionable part. Include the CLIF so the bad instruction is findable.
+            .map_err(|e| format!("define {}: {:?}\nCLIF:\n{}", func.name, e, ctx.func.display()))?;
     }
 
     let product = module.finish();
@@ -660,7 +663,10 @@ fn parse_tuple_type(ty: &str) -> Option<Vec<String>> {
     let inner = &t[1..t.len()-1];
     if inner.is_empty() { return None; }
     // Quick depth-balanced split on top-level commas (no nested tuples for now).
-    Some(inner.split(',').map(|s| s.trim().to_string()).collect())
+    // Rung 8: rustc spells the 1-tuple `(i64,)` — the trailing comma must not
+    // become a phantom field (it materialized as a spurious 0-arg at call sites).
+    Some(inner.split(',').map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()).collect())
 }
 
 /// Field type-strings of an aggregate local: a tuple `(i64,i64)` via parse_tuple_type, or a named

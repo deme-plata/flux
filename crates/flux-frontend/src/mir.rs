@@ -167,7 +167,43 @@ pub fn parse_mir(mir_text: &str) -> Result<Vec<MirFunction>, String> {
 /// The raw rustc `--emit=mir` text parser (the single place that knows the
 /// dialect — FIP-0001). Public for benchmarks/diagnostics; production code
 /// should call `parse_mir` (cached).
+/// Rung 8 (closures): rustc renders the closure's synthetic capture type as
+/// `{closure@FILE:L:C: L:C}` — braces inside type positions that break the
+/// line-oriented parser (a construction's `find('{')` hits the TYPE's brace).
+/// Pre-lex every occurrence to a deterministic flat identifier
+/// `__closure_<blake3-8>` of the full site string: same site → same name in
+/// the local decls, the construction, the `<.. as Fn..>::call` site, and the
+/// closure fn's receiver param — which is exactly the agreement the trait
+/// canonicalizer needs downstream.
+fn flatten_closure_types(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("{closure@") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("{closure@") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        match after.find('}') {
+            Some(j) => {
+                let site = &after[..=j];
+                let h = blake3::hash(site.as_bytes()).to_hex().to_string();
+                out.push_str("__closure_");
+                out.push_str(&h[..8]);
+                rest = &after[j + 1..];
+            }
+            None => {
+                out.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn parse_mir_uncached(mir_text: &str) -> Result<Vec<MirFunction>, String> {
+    let mir_text = flatten_closure_types(mir_text);
     let mut functions = Vec::new();
     let mut lines = mir_text.lines().peekable();
 
@@ -315,7 +351,9 @@ fn parse_block<'a, I>(lines: &mut std::iter::Peekable<I>) -> Result<MirBlock, St
 where I: Iterator<Item = &'a str>
 {
     let header = lines.next().unwrap().trim().to_string();
-    let label = header.trim_end_matches(": {").to_string();
+    // Rung 8: unwind-path blocks render as `bb3 (cleanup): {` — strip the marker.
+    let label = header.trim_end_matches(": {")
+        .trim_end_matches(" (cleanup)").to_string();
 
     let mut statements = Vec::new();
     let mut terminator = None;
@@ -327,7 +365,21 @@ where I: Iterator<Item = &'a str>
             break;
         }
 
-        if trimmed.starts_with("return") {
+        if trimmed.starts_with("drop(") {
+            // Rung 8: `drop(_1) -> [return: bb2, unwind …];` — generic-by-value
+            // params get drop glue. Every type in this pipeline is scalar-
+            // replaced plain data (no Drop impls, no heap), so the drop is a
+            // no-op: lower to a Goto of the return target.
+            let target = trimmed.find("return: ")
+                .map(|i| trimmed[i + 8..].split([',', ']']).next().unwrap_or("").trim().to_string())
+                .unwrap_or_default();
+            terminator = Some(MirTerminator::Goto(target));
+            lines.next();
+        } else if trimmed.starts_with("resume") || trimmed.starts_with("terminate") {
+            // Unwind-only exits — unreachable in our no-unwind world.
+            terminator = Some(MirTerminator::Unreachable);
+            lines.next();
+        } else if trimmed.starts_with("return") {
             terminator = Some(MirTerminator::Return);
             lines.next();
         } else if trimmed.starts_with("goto") {
@@ -483,6 +535,16 @@ fn parse_rhs(rhs: &str) -> (String, Vec<String>) {
     // which would otherwise split on the inner " as " and mangle the operand.
     if let Some(proj) = strip_downcast_projection(rhs) {
         return ("copy".to_string(), vec![proj]);
+    }
+    // Rung 8: bare deref `copy (*_5)` — a by-ref capture read. After whole-program
+    // by-value elision the local holds the VALUE, so the deref is the identity.
+    {
+        let s = rhs.trim().trim_start_matches("copy ").trim_start_matches("move ").trim();
+        if let Some(digits) = s.strip_prefix("(*_").and_then(|r| r.strip_suffix(')')) {
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                return ("copy".to_string(), vec![format!("_{}", digits)]);
+            }
+        }
     }
     // Cast rvalue: "move _1 as i64 (IntToInt)" / "_1 as f64 (IntToFloat)" — capture operand + target type.
     if let Some(pos) = rhs.find(" as ") {
@@ -764,6 +826,18 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     // (a user fn that happens to contain `__` must not be mistaken for one).
     let mut method_impls: HashMap<String, Vec<String>> = HashMap::new(); // method -> concrete types
     for f in &mut funcs {
+        // Rung 8: `parent::{closure#N}` bodies are the impl of `call` for their
+        // flattened capture type (the receiver param names it) — rename to the
+        // same `__closure_X__call` the call-site canonicalizer produces, and the
+        // rung-7 name unification does the rest.
+        if f.name.contains("::{closure#") {
+            if let Some(base) = f.params.first().map(|p| recv_base(&p.ty)) {
+                if base.starts_with("__closure_") {
+                    method_impls.entry("call".to_string()).or_default().push(base.clone());
+                    f.name = format!("{}__call", base);
+                }
+            }
+        }
         if let Some(canon) = trait_canon_from_impl(f) {
             if let Some(pos) = canon.find("__") {
                 method_impls.entry(canon[pos + 2..].to_string())
@@ -853,6 +927,47 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     // Pass 4 — tagged defunctionalization of multi-impl dyn (rung 7 part 3b).
     if !multi_dyn.is_empty() {
         lower_multi_dyn(&mut funcs, &multi_dyn);
+    }
+
+    // Pass 5 (rung 8) — tuple-ize closure capture types. `__closure_X` is a
+    // synthetic struct that exists in no source file, so the backend has no
+    // layout for it; but its construction is already positional and its body
+    // reads are `_1.K` projections — exactly a tuple. Rewrite the TYPE to
+    // `(i64, …)` of the construction's field count and everything downstream
+    // (flattened params, aggregate call args, projections) is existing tuple
+    // machinery. A closure type with no construction in the unit (e.g. a
+    // non-capturing closure's unit value) is left untouched → loud, not guessed.
+    let has_closures = funcs.iter().any(|f| f.params.iter().chain(f.locals.iter())
+        .any(|l| l.ty.contains("__closure_")));
+    if has_closures {
+        let mut nfields: HashMap<String, usize> = HashMap::new();
+        for f in funcs.iter() {
+            let ty_of: HashMap<String, String> = f.params.iter().chain(f.locals.iter())
+                .filter(|l| !l.ty.is_empty())
+                .map(|l| (format!("_{}", l.index), l.ty.clone())).collect();
+            for b in &f.blocks {
+                for s in &b.statements {
+                    if let MirStmt::Assign { dst, op, args } = s {
+                        if op.is_empty() && !args.is_empty() {
+                            if let Some(t) = ty_of.get(dst) {
+                                if t.starts_with("__closure_") {
+                                    nfields.entry(t.clone()).or_insert(args.len());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for f in funcs.iter_mut() {
+            for pp in f.params.iter_mut().chain(f.locals.iter_mut()) {
+                let base = recv_base(&pp.ty);
+                if let Some(&n) = nfields.get(&base) {
+                    let slots = vec!["i64"; n];
+                    pp.ty = format!("({})", slots.join(", "));
+                }
+            }
+        }
     }
     funcs
 }
@@ -1636,6 +1751,80 @@ fn call_generic(_1: Sq) -> i64 {
         };
         assert_eq!(callee, "Sq__area",
             "specialized area_of$Sq must call the CONCRETE impl (Sq__area), not the still-generic T__area");
+    }
+
+    #[test]
+    fn closures_flatten_canonicalize_and_tupleize() {
+        // Rung 8: the `{closure@FILE:L:C}` type flattens to a deterministic
+        // identifier, `parent::{closure#N}` renames to `<flat>__call` matching
+        // the canonicalized `<flat as Fn<..>>::call` site, the capture struct
+        // tuple-izes, drop glue becomes a Goto, and `resume` is unreachable.
+        let mir = "fn main::{closure#0}(_1: &{closure@t.rs:3:17: 3:25}, _2: i64) -> i64 {
+    bb0: {
+        _5 = copy ((*_1).0: &i64);
+        _3 = copy (*_5);
+        _0 = copy _3;
+        return;
+    }
+}
+fn apply(_1: F, _2: i64) -> i64 {
+    let mut _0: i64;
+    let mut _3: &F;
+    let mut _4: (i64,);
+    bb0: {
+        _3 = &_1;
+        _4 = (copy _2,);
+        _0 = <F as Fn<(i64,)>>::call(move _3, move _4) -> [return: bb1, unwind: bb3];
+    }
+    bb1: {
+        drop(_1) -> [return: bb2, unwind continue];
+    }
+    bb2: {
+        return;
+    }
+    bb3 (cleanup): {
+        resume;
+    }
+}
+fn main() -> i64 {
+    let mut _0: i64;
+    let _1: i64;
+    let mut _3: &i64;
+    let _2: {closure@t.rs:3:17: 3:25};
+    bb0: {
+        _1 = const 3_i64;
+        _3 = &_1;
+        _2 = {closure@t.rs:3:17: 3:25} { k: move _3 };
+        _0 = apply::<{closure@t.rs:3:17: 3:25}>(move _2, const 4_i64) -> [return: bb1, unwind continue];
+    }
+    bb1: {
+        return;
+    }
+}
+";
+        let funcs = monomorphize(parse_mir(mir).unwrap());
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        // The closure body canonicalized to <flat>__call and the specialized
+        // apply instance's inner `F__call` was rewritten to it.
+        let call_fn = names.iter().find(|n| n.starts_with("__closure_") && n.ends_with("__call"))
+            .expect("closure body must canonicalize to __closure_<h>__call");
+        let inst = funcs.iter().find(|f| f.name.starts_with("apply$")).expect("apply must specialize");
+        match &inst.blocks[0].terminator {
+            Some(MirTerminator::Call { func, .. }) =>
+                assert_eq!(func, call_fn, "specialized apply must call the concrete closure"),
+            other => panic!("expected call, got {:?}", other),
+        }
+        // Drop glue → Goto; cleanup resume → Unreachable; capture struct → 1-tuple.
+        assert!(matches!(
+            inst.blocks.iter().find(|b| b.label == "bb1").unwrap().terminator,
+            Some(MirTerminator::Goto(ref t)) if t == "bb2"), "drop must lower to Goto");
+        assert!(matches!(
+            inst.blocks.iter().find(|b| b.label == "bb3").unwrap().terminator,
+            Some(MirTerminator::Unreachable)), "resume must lower to Unreachable");
+        let body = funcs.iter().find(|f| f.name == **call_fn).unwrap();
+        assert_eq!(body.params[0].ty, "(i64)", "capture struct must tuple-ize");
+        assert!(funcs.iter().all(|f| f.params.iter().chain(f.locals.iter())
+            .all(|l| !l.ty.contains("closure@"))), "no raw closure type may survive");
     }
 
     #[test]

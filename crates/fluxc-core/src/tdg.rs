@@ -440,6 +440,33 @@ pub fn record_edges(from_id: &str, to_ids: &[String]) {
     }
 }
 
+/// FIP-0003 write-path #3: one node per settled swarm task (complete or
+/// release), unit_id = task_id per the FIP's unit_id table. Edges to the
+/// claimed crates were written at claim time (same swarm critical section).
+pub fn record_swarm_task(task_id: &str, display: &str, green: bool, wall_ms: u64) {
+    if !enabled() || task_id.is_empty() {
+        return;
+    }
+    let record = NodeRecord {
+        unit_kind: UNIT_KIND_SWARM,
+        display: display.to_string(),
+        identity: IdentityKey {
+            source_key: blake3::hash(task_id.as_bytes()).to_hex().to_string(),
+            dep_idents: vec![],
+            closure_hash: String::new(),
+            rustc_version: flux_driver::RUSTC_VERSION.to_string(),
+            ir_version: flux_frontend::IR_VERSION,
+            identity_degraded: true, // task ids have no content identity
+        },
+        outcome: if green { Outcome::Green } else { Outcome::Red },
+        wall_ms,
+        rustc_spawns: 0,
+        created_unix: now_unix(),
+        agent: agent_name(),
+    };
+    record_unit(UNIT_KIND_SWARM, task_id, &record);
+}
+
 /// The phase-1 convenience writer hooked into `run_cargo`: one node per fluxc
 /// build-family invocation. `cmd` is the cargo subcommand ("build", "test", …).
 /// Also drains the wrapper spool (write-path #1) in the same db open, and

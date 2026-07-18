@@ -1206,6 +1206,10 @@ fn flux_swarm_claim(args: &Value) -> String {
                 flux_swarm_tools::ActivityKind::Claimed,
                 format!("{} ({:?})", c.task_id, c.crates),
             );
+            // FIP-0003 write-path #3: the claim's task→crate containment edges
+            // enter the TDG inside this same critical section. Advisory —
+            // record_edges swallows its own failures.
+            fluxc_core::tdg::record_edges(&c.task_id, &c.crates);
             format!(
                 "Claimed {} crate(s) — task_id: {} — est. {:.1} QUG (pass task_id to flux_swarm_complete or flux_swarm_release when done)",
                 c.crates.len(),
@@ -1252,6 +1256,14 @@ fn flux_swarm_complete(args: &Value) -> String {
                 flux_swarm_tools::ActivityKind::Completed,
                 format!("{} → {:.2} QUG", tid, t.qug_earned),
             );
+            // FIP-0003 write-path #3: the settled task becomes a SWARM node
+            // (its crate edges were recorded at claim time).
+            fluxc_core::tdg::record_swarm_task(
+                tid,
+                &format!("swarm {}: {:?} ({:.2} QUG)", id, t.crates, t.qug_earned),
+                t.success,
+                0,
+            );
             format!("Complete: task_id {} — {:.2} QUG settled", tid, t.qug_earned)
         }
         None => format!(
@@ -1274,6 +1286,13 @@ fn flux_swarm_release(args: &Value) -> String {
     fluxc_core::swarm::force_reload();
     if fluxc_core::swarm::release_claim(id, tid) {
         log_swarm(id, flux_swarm_tools::ActivityKind::Released, tid.to_string());
+        // FIP-0003: a released claim is a settled-without-delivery task — Red.
+        fluxc_core::tdg::record_swarm_task(
+            tid,
+            &format!("swarm {}: released, no delivery", id),
+            false,
+            0,
+        );
         format!("Released task_id {} — no payment, claim cleared", tid)
     } else {
         format!("Not found: no active claim with task_id '{}' for agent '{}'", tid, id)

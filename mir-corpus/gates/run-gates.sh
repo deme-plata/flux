@@ -54,4 +54,8 @@ check gate_vec_loop.rs 25
 check gate_string.rs   21
 check gate_range.rs    10
 check gate_vec_for.rs   7
+# rung 11: iterator adapter chains by FUSION — sum(map(into_iter(v), f))
+# deforests into a loop over the handle iterator with a direct closure call;
+# the Map adapter never materializes. (3*2)+(4*2) with a captured k=2.
+check gate_iter_chain.rs 14
 exit $rc

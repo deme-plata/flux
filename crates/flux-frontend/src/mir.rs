@@ -996,6 +996,15 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
         }
     }
 
+    // Pass 7 (rung 11) — iterator adapter chain FUSION. `v.into_iter()
+    // .map(f).sum()` reaches MIR as three std calls whose bodies are hidden
+    // generic code (the Map adapter is a lazy struct; sum is its consumer).
+    // With the WHOLE chain visible, the honest lowering is deforestation:
+    // fuse it into the loop it means, built from parts already proven —
+    // the rung-10 handle iterator and a DIRECT static call to the (already
+    // canonicalized) closure. The Map struct never materializes at all.
+    lower_iter_fusion(&mut funcs);
+
     // Pass 6 (rung 10) — range for-loop desugar. `for i in a..b` reaches MIR as
     // Range construction + IntoIterator::into_iter (the identity) + repeated
     // Iterator::next calls matched on Option. Range<i64> and Option<i64> both
@@ -1006,6 +1015,125 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
     // Some(start) } else { None }. No runtime, no hidden std body.
     lower_range_sugar(&mut funcs);
     funcs
+}
+
+/// Rung 11: fuse `sum(map(into_iter(v), closure))` into a loop. Guardrails:
+/// the map receiver must trace to a `__flux_vec_intoiter` result (a vec
+/// handle), and the closure symbol must be extractable from map's turbofish —
+/// otherwise the chain is left intact and fails LOUD at link (undefined
+/// `Map<..>__sum`), never a guessed fusion.
+fn lower_iter_fusion(funcs: &mut Vec<MirFunction>) {
+    for f in funcs.iter_mut() {
+        // Locate the sum call.
+        let Some(sum_bi) = f.blocks.iter().position(|b| matches!(&b.terminator,
+            Some(MirTerminator::Call { func, .. })
+                if func.starts_with("Map<") && func.contains("__sum")))
+        else { continue };
+        let Some(MirTerminator::Call { args: sum_args, dst: sum_dst, target: sum_tgt, .. }) =
+            f.blocks[sum_bi].terminator.clone() else { continue };
+        let map_local = sum_args.first().map(|a| a.trim()
+            .trim_start_matches("copy ").trim_start_matches("move ").trim().to_string())
+            .unwrap_or_default();
+        // Locate the map call producing that local.
+        let Some(map_bi) = f.blocks.iter().position(|b| matches!(&b.terminator,
+            Some(MirTerminator::Call { func, dst, .. })
+                if func.contains("__map::<") && *dst == map_local))
+        else { continue };
+        let Some(MirTerminator::Call { func: map_fn, args: map_args, target: map_tgt, .. }) =
+            f.blocks[map_bi].terminator.clone() else { continue };
+        // Closure symbol from map's turbofish: `..__map::<i64, __closure_h>`.
+        let Some(cl_name) = map_fn.split("__map::<").nth(1)
+            .and_then(|t| t.trim_end_matches('>').split(',').last())
+            .map(|c| c.trim().to_string())
+            .filter(|c| c.starts_with("__closure_"))
+        else { continue };
+        let iter_op = map_args.first().map(|a| a.trim()
+            .trim_start_matches("copy ").trim_start_matches("move ").trim().to_string())
+            .unwrap_or_default();
+        let cl_op = map_args.get(1).map(|a| a.trim()
+            .trim_start_matches("copy ").trim_start_matches("move ").trim().to_string())
+            .unwrap_or_default();
+        // The iterator must be a vec handle from the rung-10 shim.
+        let is_vec_iter = f.blocks.iter().any(|b| matches!(&b.terminator,
+            Some(MirTerminator::Call { func, dst, .. })
+                if func == "__flux_vec_intoiter" && *dst == iter_op));
+        if !is_vec_iter || iter_op.is_empty() || cl_op.is_empty() { continue; }
+
+        // Fresh locals.
+        let mut next_idx = f.params.iter().chain(f.locals.iter())
+            .map(|l| l.index).max().unwrap_or(0) + 1;
+        let mut fresh = |ty: &str, locals: &mut Vec<MirLocal>| -> String {
+            let name = format!("_{}", next_idx);
+            locals.push(MirLocal { index: next_idx, name: String::new(), ty: ty.into(), mutable: true });
+            next_idx += 1;
+            name
+        };
+        let mut locals_add: Vec<MirLocal> = Vec::new();
+        let acc = fresh("i64", &mut locals_add);
+        let tag_t = fresh("i64", &mut locals_add);
+        let val_t = fresh("i64", &mut locals_add);
+        let map_t = fresh("i64", &mut locals_add);
+
+        // The map call vanishes — the adapter never materializes.
+        f.blocks[map_bi].terminator = Some(MirTerminator::Goto(map_tgt));
+
+        // The sum block seeds the accumulator and enters the fused loop.
+        let l_head = "bbfuse_head".to_string();
+        let l_body = "bbfuse_body".to_string();
+        let l_body2 = "bbfuse_body2".to_string();
+        let l_body3 = "bbfuse_body3".to_string();
+        let l_done = "bbfuse_done".to_string();
+        f.blocks[sum_bi].statements.push(MirStmt::Assign {
+            dst: acc.clone(), op: "const".into(), args: vec!["const 0_i64".into()],
+        });
+        f.blocks[sum_bi].terminator = Some(MirTerminator::Goto(l_head.clone()));
+        f.blocks.push(MirBlock {
+            label: l_head.clone(), statements: vec![],
+            terminator: Some(MirTerminator::Call {
+                func: "__flux_vec_next_tag".into(), args: vec![format!("copy {}", iter_op)],
+                dst: tag_t.clone(), target: format!("{}_chk", l_head),
+            }),
+        });
+        f.blocks.push(MirBlock {
+            label: format!("{}_chk", l_head), statements: vec![],
+            terminator: Some(MirTerminator::SwitchInt {
+                discr: tag_t.clone(),
+                targets: vec![("0".into(), l_done.clone())],
+                otherwise: l_body.clone(),
+            }),
+        });
+        f.blocks.push(MirBlock {
+            label: l_body, statements: vec![],
+            terminator: Some(MirTerminator::Call {
+                func: "__flux_vec_lastval".into(), args: vec![format!("copy {}", iter_op)],
+                dst: val_t.clone(), target: l_body2.clone(),
+            }),
+        });
+        f.blocks.push(MirBlock {
+            label: l_body2, statements: vec![],
+            terminator: Some(MirTerminator::Call {
+                func: format!("{}__call", cl_name),
+                args: vec![format!("copy {}", cl_op), format!("copy {}", val_t)],
+                dst: map_t.clone(), target: l_body3.clone(),
+            }),
+        });
+        f.blocks.push(MirBlock {
+            label: l_body3,
+            statements: vec![MirStmt::Assign {
+                dst: acc.clone(), op: "Add".into(),
+                args: vec![format!("copy {}", acc), format!("copy {}", map_t)],
+            }],
+            terminator: Some(MirTerminator::Goto(l_head)),
+        });
+        f.blocks.push(MirBlock {
+            label: l_done,
+            statements: vec![MirStmt::Assign {
+                dst: sum_dst, op: "copy".into(), args: vec![acc.clone()],
+            }],
+            terminator: Some(MirTerminator::Goto(sum_tgt)),
+        });
+        f.locals.extend(locals_add);
+    }
 }
 
 fn lower_range_sugar(funcs: &mut Vec<MirFunction>) {

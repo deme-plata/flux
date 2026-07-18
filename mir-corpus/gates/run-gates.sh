@@ -48,4 +48,10 @@ check gate_closure_generic.rs 22
 # indexing + usize→i64 cast (sum 0..8 evens = 20, + len 5).
 check gate_vec.rs       7
 check gate_vec_loop.rs 25
+# rung 10: String (opaque handle, char pushes, len*7), range for-loops (next()
+# desugared to pure MIR — no hidden std body), and `for x in v` (heap-handle
+# iterator; two single-return shims because Cranelift multi-return != C ABI).
+check gate_string.rs   21
+check gate_range.rs    10
+check gate_vec_for.rs   7
 exit $rc

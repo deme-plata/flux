@@ -324,6 +324,18 @@ fn compile_mir_into_function(
                     // correct field offset from the enum layout, handling nested aggregates.
                     if (op == "copy" || op == "move") && args.len() == 1 {
                         if let Some((src_local, variant, sub_idx)) = parse_downcast_operand(&args[0]) {
+                            // Rung 10: tuple-ized std enums (Option<i64> -> (tag, payload))
+                            // have no source variant table -- their payload K lives at
+                            // slot K+1 by the same data-enum convention.
+                            if !variant_fields.contains_key(&variant)
+                                && parse_tuple_type(&mir_type_strs.get(&src_local).cloned().unwrap_or_default()).is_some()
+                            {
+                                let src_field = format!("_{}.{}", src_local, sub_idx + 1);
+                                let val = resolve_mir_operand_to_value(&src_field, &vars, &tuple_vars, &mut bc);
+                                if let Some(&var) = vars.get(&dst_idx) { bc.def_var(var, val); }
+                                else if let Some(&var) = tuple_vars.get(&(dst_idx, 0)) { bc.def_var(var, val); }
+                                continue;
+                            }
                             if let Some(vf) = variant_fields.get(&variant) {
                                 if sub_idx < vf.len() {
                                     // Compute starting offset: 1 (skip tag) + sum of sizes
@@ -496,6 +508,10 @@ fn compile_mir_into_function(
                     // cranelift-module dedups repeated declarations by name.
                     let mut sig = module.make_signature();
                     for _ in 0..arg_vals.len() { sig.params.push(AbiParam::new(types::I64)); }
+                    // Uniform SINGLE i64 return: Cranelift's multi-value return
+                    // convention is NOT C-struct-compatible (measured: rdx never
+                    // read at the call site) — pair-returning shims are split
+                    // into two single-return calls by the frontend instead.
                     sig.returns.push(AbiParam::new(types::I64));
                     module.declare_function(&cleaned, Linkage::Import, &sig).ok()
                 } else {
@@ -809,6 +825,11 @@ fn resolve_mir_operand_to_value(
         let r = rest.trim();
         if r == "true"  { return bc.ins().iconst(types::I8, 1); }
         if r == "false" { return bc.ins().iconst(types::I8, 0); }
+        // Rung 10: char literals `const 'a'` — the codepoint as i64 (ASCII shims).
+        if let Some(ch) = r.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) {
+            let cp = ch.chars().next().map(|c| c as i64).unwrap_or(0);
+            return bc.ins().iconst(types::I64, cp);
+        }
         // Floats: rustc renders them as `0f64` / `1.5f64` / `2.5e3f32` — the f-suffix is
         // attached DIRECTLY (no underscore, unlike ints `3_i64`). Strip the suffix, then
         // parse, or the literal falls back to iconst(I64) and mismatches its F64 Variable

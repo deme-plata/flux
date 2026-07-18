@@ -820,7 +820,8 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
         || f.blocks.iter().any(|b| matches!(&b.terminator,
             Some(MirTerminator::Call { func, .. })
                 if (func.starts_with('<') && func.contains(" as "))
-                    || func.starts_with("Vec::<"))));
+                    || func.starts_with("Vec::<")
+                    || func.starts_with("String::"))));
     if !touches { return funcs; }
 
     // Pass 1 — canonicalize impl-definition and call-site names to `Type__method`.
@@ -862,6 +863,14 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
                     "Vec::<i64>::len" => Some("__flux_vec_len"),
                     "Vec::<i64>::pop" => Some("__flux_vec_pop"),
                     "Vec<i64>__index" => Some("__flux_vec_index"),
+                    // Rung 10: String, same opaque-handle pattern (ASCII chars).
+                    "String::new" => Some("__flux_string_new"),
+                    "String::push" => Some("__flux_string_push"),
+                    "String::len" => Some("__flux_string_len"),
+                    // Rung 10: `for x in v` — a heap-handle iterator, so &mut
+                    // mutation happens BEHIND the handle (elision-safe).
+                    "Vec<i64>__into_iter" => Some("__flux_vec_intoiter"),
+                    "std::vec::IntoIter<i64>__next" => Some("__flux_vec_next"),
                     _ => None,
                 };
                 if let Some(m) = mapped { *func = m.to_string(); }
@@ -986,7 +995,175 @@ pub fn normalize_traits(mut funcs: Vec<MirFunction>) -> Vec<MirFunction> {
             }
         }
     }
+
+    // Pass 6 (rung 10) — range for-loop desugar. `for i in a..b` reaches MIR as
+    // Range construction + IntoIterator::into_iter (the identity) + repeated
+    // Iterator::next calls matched on Option. Range<i64> and Option<i64> both
+    // tuple-ize as (i64, i64) — Option's (tag, payload) layout matches the
+    // data-enum convention (tag slot 0, payload 1+), so discriminant() and the
+    // `(_ as Some).0` downcast resolve through EXISTING machinery. next()'s
+    // semantics inline as pure MIR: if start < end { r = (start+1, end);
+    // Some(start) } else { None }. No runtime, no hidden std body.
+    lower_range_sugar(&mut funcs);
     funcs
+}
+
+fn lower_range_sugar(funcs: &mut Vec<MirFunction>) {
+    use std::collections::HashMap;
+    const RANGE_T: &str = "std::ops::Range<i64>";
+    let is_opt = |t: &str| t == "Option<i64>" || t == "std::option::Option<i64>";
+    // NOT recv_base — that strips the `<i64>` generic and nothing matches.
+    let bare = |t: &str| t.trim().trim_start_matches("&mut ").trim_start_matches('&').trim().to_string();
+    let uses_sugar = funcs.iter().any(|f| f.params.iter().chain(f.locals.iter())
+        .any(|l| { let b = bare(&l.ty); b == RANGE_T || is_opt(&b) }));
+    if !uses_sugar { return; }
+
+    for f in funcs.iter_mut() {
+        // Tuple-ize the carriers.
+        for pp in f.params.iter_mut().chain(f.locals.iter_mut()) {
+            let b = bare(&pp.ty);
+            if b == RANGE_T || is_opt(&b) {
+                pp.ty = "(i64, i64)".to_string();
+            }
+        }
+        let mut next_idx = f.params.iter().chain(f.locals.iter())
+            .map(|l| l.index).max().unwrap_or(0) + 1;
+        let mut locals_add: Vec<MirLocal> = Vec::new();
+        let mut fresh = |ty: &str, locals: &mut Vec<MirLocal>| -> String {
+            let name = format!("_{}", next_idx);
+            locals.push(MirLocal { index: next_idx, name: String::new(), ty: ty.into(), mutable: false });
+            next_idx += 1;
+            name
+        };
+        // Ref-elided copies (`_6 = &mut _4` parsed as `_6 = copy _4`) — resolve a
+        // next() receiver back to the UNDERLYING range local, or refuse loudly.
+        let mut copy_src: HashMap<String, String> = HashMap::new();
+        for b in &f.blocks {
+            for s in &b.statements {
+                if let MirStmt::Assign { dst, op, args } = s {
+                    if op == "copy" && args.len() == 1 && args[0].starts_with('_')
+                        && !args[0].contains('.') {
+                        copy_src.insert(dst.clone(), args[0].clone());
+                    }
+                }
+            }
+        }
+        let resolve_recv = |a: &str, copy_src: &HashMap<String, String>| -> String {
+            let mut r = a.trim().trim_start_matches("copy ").trim_start_matches("move ")
+                .trim().to_string();
+            for _ in 0..4 { // follow short copy chains
+                match copy_src.get(&r) {
+                    Some(src) => r = src.clone(),
+                    None => break,
+                }
+            }
+            r
+        };
+
+        let mut new_blocks: Vec<MirBlock> = Vec::new();
+        let mut seq = 0usize;
+        for bi in 0..f.blocks.len() {
+            let Some(MirTerminator::Call { func, args, dst, target }) = f.blocks[bi].terminator.clone()
+            else { continue };
+            if func == format!("{}__into_iter", RANGE_T) {
+                // IntoIterator for Range is the identity.
+                let recv = args.first().cloned().unwrap_or_default();
+                let src = recv.trim().trim_start_matches("copy ").trim_start_matches("move ")
+                    .trim().to_string();
+                f.blocks[bi].statements.push(MirStmt::Assign {
+                    dst: dst.clone(), op: "copy".into(), args: vec![src],
+                });
+                f.blocks[bi].terminator = Some(MirTerminator::Goto(target));
+                continue;
+            }
+            if func == "__flux_vec_next" {
+                // Pair-returning shims can't cross the C ABI (Cranelift's
+                // multi-return isn't struct-compatible) — chain two
+                // single-return calls: tag (advances + stashes) then lastval,
+                // then assemble the Option tuple.
+                let recv = args.first().cloned().unwrap_or_default();
+                let tag_t = fresh("i64", &mut locals_add);
+                let val_t = fresh("i64", &mut locals_add);
+                let l_val = format!("bbvnext{}_val", seq);
+                let l_asm = format!("bbvnext{}_asm", seq);
+                seq += 1;
+                new_blocks.push(MirBlock {
+                    label: l_val.clone(),
+                    statements: vec![],
+                    terminator: Some(MirTerminator::Call {
+                        func: "__flux_vec_lastval".into(),
+                        args: vec![recv.clone()],
+                        dst: val_t.clone(),
+                        target: l_asm.clone(),
+                    }),
+                });
+                new_blocks.push(MirBlock {
+                    label: l_asm.clone(),
+                    statements: vec![MirStmt::Assign {
+                        dst: dst.clone(), op: String::new(),
+                        args: vec![format!("copy {}", tag_t), format!("copy {}", val_t)],
+                    }],
+                    terminator: Some(MirTerminator::Goto(target)),
+                });
+                f.blocks[bi].terminator = Some(MirTerminator::Call {
+                    func: "__flux_vec_next_tag".into(),
+                    args: vec![recv],
+                    dst: tag_t,
+                    target: l_val,
+                });
+                continue;
+            }
+            if func == format!("{}__next", RANGE_T) {
+                let recv = resolve_recv(args.first().map(String::as_str).unwrap_or(""), &copy_src);
+                if !recv.starts_with('_') { continue; } // unresolvable → loud link
+                let cmp = fresh("bool", &mut locals_add);
+                f.blocks[bi].statements.push(MirStmt::Assign {
+                    dst: cmp.clone(), op: "Lt".into(),
+                    args: vec![format!("copy {}.0", recv), format!("copy {}.1", recv)],
+                });
+                let some_l = format!("bbrange{}_some", seq);
+                let none_l = format!("bbrange{}_none", seq);
+                seq += 1;
+                // Some branch: dst = (1, start); range = (start+1, end). All
+                // whole-local assignments — the statement path has no projected
+                // destinations, so the range tuple is RECONSTRUCTED, not patched.
+                let old_start = fresh("i64", &mut locals_add);
+                let old_end = fresh("i64", &mut locals_add);
+                let new_start = fresh("i64", &mut locals_add);
+                new_blocks.push(MirBlock {
+                    label: some_l.clone(),
+                    statements: vec![
+                        MirStmt::Assign { dst: old_start.clone(), op: "copy".into(),
+                            args: vec![format!("{}.0", recv)] },
+                        MirStmt::Assign { dst: old_end.clone(), op: "copy".into(),
+                            args: vec![format!("{}.1", recv)] },
+                        MirStmt::Assign { dst: new_start.clone(), op: "Add".into(),
+                            args: vec![format!("copy {}", old_start), "const 1_i64".into()] },
+                        MirStmt::Assign { dst: recv.clone(), op: String::new(),
+                            args: vec![format!("copy {}", new_start), format!("copy {}", old_end)] },
+                        MirStmt::Assign { dst: dst.clone(), op: String::new(),
+                            args: vec!["const 1_i64".into(), format!("copy {}", old_start)] },
+                    ],
+                    terminator: Some(MirTerminator::Goto(target.clone())),
+                });
+                new_blocks.push(MirBlock {
+                    label: none_l.clone(),
+                    statements: vec![
+                        MirStmt::Assign { dst: dst.clone(), op: String::new(),
+                            args: vec!["const 0_i64".into(), "const 0_i64".into()] },
+                    ],
+                    terminator: Some(MirTerminator::Goto(target)),
+                });
+                f.blocks[bi].terminator = Some(MirTerminator::SwitchInt {
+                    discr: cmp,
+                    targets: vec![("0".into(), none_l)],
+                    otherwise: some_l,
+                });
+            }
+        }
+        f.blocks.extend(new_blocks);
+        f.locals.extend(locals_add);
+    }
 }
 
 /// Rung 7 part 3b: lower every multi-impl `dyn Trait` to a tagged flat tuple and

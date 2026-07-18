@@ -162,6 +162,45 @@ long long __flux_vec_free(long long h) {
     free(v->data); free(v);
     return 0;
 }
+/* Rung 10: String — same opaque-handle pattern, ASCII byte per push. */
+typedef struct { long long len, cap; char *data; } fluxstr;
+long long __flux_string_new(void) {
+    fluxstr *s = (fluxstr*)malloc(sizeof(fluxstr));
+    s->len = 0; s->cap = 0; s->data = 0;
+    return (long long)s;
+}
+long long __flux_string_push(long long h, long long ch) {
+    fluxstr *s = (fluxstr*)h;
+    if (s->len == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 8;
+        s->data = (char*)realloc(s->data, (size_t)s->cap);
+    }
+    s->data[s->len++] = (char)ch;
+    return 0;
+}
+long long __flux_string_len(long long h) {
+    return ((fluxstr*)h)->len;
+}
+/* Rung 10: `for x in v` — heap iterator handle; mutation lives BEHIND the
+   handle so by-value elision of &mut receivers stays sound. next() returns
+   Option<i64> as a two-eightbyte pair (SysV rax:rdx == Cranelift 2×i64). */
+typedef struct { fluxvec *v; long long pos, last; } fluxit;
+long long __flux_vec_intoiter(long long h) {
+    fluxit *it = (fluxit*)malloc(sizeof(fluxit));
+    it->v = (fluxvec*)h; it->pos = 0; it->last = 0;
+    return (long long)it;
+}
+/* Two single-return calls, NOT a pair-struct return: Cranelift's multi-value
+   return convention is not C-struct-ABI-compatible (measured: the caller
+   never reads rdx). next_tag advances and stashes; lastval fetches. */
+long long __flux_vec_next_tag(long long h) {
+    fluxit *it = (fluxit*)h;
+    if (it->pos < it->v->len) { it->last = it->v->data[it->pos++]; return 1; }
+    return 0;
+}
+long long __flux_vec_lastval(long long h) {
+    return ((fluxit*)h)->last;
+}
 "#;
 
 // ── JIT Execution ──
@@ -215,6 +254,24 @@ pub fn compile_run(path: &str, args: &[String]) -> i32 {
             Err(e) => { eprintln!("  MIR parse error: {}", e); return 1; }
         };
         let funcs = flux_frontend::mir::monomorphize(funcs);
+
+        // FLUX_MIR_DEBUG=1: dump the LOWERED MIR (post-normalize/monomorphize/
+        // desugar) — the form the backend actually consumes. The rustc dump
+        // shows the input; this shows what our passes made of it.
+        if std::env::var("FLUX_MIR_DEBUG").as_deref() == Ok("1") {
+            for f in &funcs {
+                eprintln!("── {} ({:?}) -> {}", f.name,
+                    f.params.iter().map(|p| p.ty.as_str()).collect::<Vec<_>>(), f.return_type);
+                for l in &f.locals {
+                    if !l.ty.is_empty() { eprintln!("   let _{}: {}", l.index, l.ty); }
+                }
+                for b in &f.blocks {
+                    eprintln!("   {}:", b.label);
+                    for st in &b.statements { eprintln!("     {:?}", st); }
+                    eprintln!("     => {:?}", b.terminator);
+                }
+            }
+        }
 
         println!("  MIR: {} functions", funcs.len());
         let ir_funcs: Vec<flux_frontend::FunctionDef> = funcs.iter()

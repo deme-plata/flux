@@ -1,5 +1,67 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.38.0 — The ladder release: everyday Rust compiles natively (2026-07-18)
+
+Three days after v0.37, the compiler ladder climbed five rungs. fluxc's
+MIR-direct Cranelift path now compiles the feature set most everyday Rust
+is written in — every rung admitted by an end-to-end gate whose process
+exit code IS the computed value. TWELVE enforced gates, all green:
+36/25/16/22/20/22/7/25/21/10/7/14.
+
+### Compiler ladder (rungs 7b–11)
+- **Multi-impl dyn dispatch** (rung 7 part 3b): tagged defunctionalization —
+  `dyn Trait` = (tag, payload…) flat tuple, calls = SwitchInt fan-out to the
+  canonicalized impls. Two shapes through ONE call site prove runtime
+  dispatch (gate: 16+6==22). Payload widths inferred from construction
+  sites; unprovable shapes stay loud-at-link.
+- **Closures** (rung 8): `{closure@..}` types pre-lex to deterministic flat
+  names; bodies rename to `__closure_h__call` matching the canonicalized
+  `Fn::call` sites — so closures THROUGH generic fns (`apply<F: Fn>`) reuse
+  rung-7 machinery unchanged. Capture structs tuple-ize; drop glue → Goto;
+  `bbN (cleanup)`/`resume` parse as unreachable unwind paths.
+- **Heap collections** (rung 9): the flux runtime is born — a dependency-
+  free C runtime embedded in fluxc, linked by `fluxc run`. Vec<i64> is an
+  opaque i64 handle to a malloc-backed buffer (__flux_vec_*); the backend
+  gained an extern-import path (uniform i64 ABI) for __flux_ shims.
+- **String + iteration** (rung 10): String via the same handle pattern
+  (char pushes); `for i in a..b` desugars Range::next to PURE MIR (no
+  runtime, no hidden std body) with Option<i64> tuple-ized onto the data-
+  enum convention; `for x in v` via a heap-handle iterator. Measured ABI
+  lesson: Cranelift multi-value returns are NOT C-struct-compatible
+  (objdump: rdx never read) — pair shims split into two single-return calls.
+- **Iterator adapter chains** (rung 11): FUSION/deforestation —
+  `v.into_iter().map(f).sum()` fuses into the loop it means (handle
+  iterator + direct static closure call); the Map adapter never
+  materializes. Guardrailed: unprovable chains die loud at link.
+
+### Build/debug tooling
+- `FLUX_MIR_DEBUG=1` dumps the LOWERED MIR (post-normalize/desugar) — the
+  form the backend consumes; found three rung bugs.
+- Verifier failures print Debug detail + the offending CLIF (Display was
+  just "Verifier errors").
+- 1-tuple `(i64,)` phantom-field fix (trailing comma made a spurious arg).
+
+### FIP-0003 complete (write paths)
+- Swarm tasks enter the TDG: claims edge task→crates inside the swarm
+  lock; complete/release become Green/Red nodes (task_id as unit id). All
+  three FIP write paths now live. Post-release sanity: warm `fluxc self`
+  = 9.38s (≤12.4s invariant holds with tracer + module-tree keys active).
+
+### Boundaries (stated, loud)
+- Collections are i64-element only; drop leaks until exit (free shims
+  ready); slice `.iter()`, filter/multi-adapter chains, non-capturing
+  closures in chains = follow-on slices; unknown non-__flux callees still
+  SKIP silently in the backend (flagged for hardening).
+
+### Docs
+- Whitepaper "Flux v0.37: The Incremental Release" (5pp), typeset via
+  fluxc's own LaTeX path; published to fluxapp.xyz/downloads.
+
+### Deployment notes
+- No cache-key changes this release — warm builds carry over. Pre-v0.36
+  binaries still cannot read v3 SSTs.
+
+
 ## v0.37.0 — The incremental release: run only what changed, prove what didn't (2026-07-17)
 
 The FIP-0003 release. Builds and test runs stop rediscovering the world:

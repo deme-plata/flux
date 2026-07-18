@@ -40,6 +40,7 @@
 | v0.35.0 | 2026-07-02 | The fast-build release: one wrapper identity (12.4s self restored), cache restore ON guard-hardened |
 | v0.36.0 | 2026-07-03 | Durable storage (flux-db v3 SSTs, streaming merge, 1 TB+ proven) + fleet-warm builds (canonical wrapper path, toolchain pin) |
 | v0.37.0 | 2026-07-17 | The incremental release: FIP-0003 TDG (tracer + wrapper spool + crate/unit scheduler + flux_combo incremental), ladder rung 7 (traits, gates 36/25/16), module-tree cache-key fix (⚠ one cold rebuild), async compaction, 20 TB ladder PASS (40,001/40,001) |
+| v0.38.0 | 2026-07-18 | The ladder release: rungs 7b–11 (tagged dyn, closures, heap Vec/String via the flux runtime, range/vec for-loops, iterator fusion) — 12 outcome gates green; FIP-0003 write paths complete (swarm); FLUX_MIR_DEBUG; verbose verifier errors |
 
 ## Track C — Planned / future
 

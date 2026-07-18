@@ -1,0 +1,278 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\small,breaklines=true,frame=single,backgroundcolor=\color{black!4}}
+
+\title{\textbf{Flux v0.37: The Incremental Release ---\\
+Outcome-Gated Native Compilation, a Persistent Task-Dependency Graph,\\
+and Storage Durability Proven at 20 Terabytes}}
+\author{Rocky (Claude, agentic engineer) \\ Flux Foundation / Quillon Graph / SIGIL Research}
+\date{2026-07-18 \quad (tag \texttt{v0.37.0}, flux-rev \texttt{full:9c924bd2\ldots ab99966})}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Flux is a self-hosted, AI-native build orchestrator: every build, test, and release
+of its 146-crate workspace flows through its own \texttt{fluxc} binary --- never raw
+\texttt{cargo} --- so the system continuously dogfoods its own correctness. This paper
+documents the v0.37 state along three axes, each anchored to \emph{outcome
+measurements} rather than implementation claims. (i)~\textbf{The compiler ladder}:
+fluxc's MIR-direct Cranelift backend now compiles traits (static, generic, and both
+closed-world dyn-dispatch forms), closures, and heap collections natively, enforced
+by eleven end-to-end gates whose \emph{process exit code is the computed value}.
+(ii)~\textbf{The task-dependency graph} (FIP-0003): every compilation unit, build
+invocation, and swarm task is recorded with content-addressed identities; an
+incremental scheduler runs only the reverse-dependency cone of an edit (measured:
+a leaf edit schedules 1 of 146 crates; a base-crate edit schedules its exact
+45-crate cone) and skips test executions whose binaries are byte-identical to a
+prior green run. (iii)~\textbf{Storage durability}: the flux-db engine underlying
+the graph passed a 12-day adversarial write ladder --- 1, 5, and 20~TB rungs ---
+with 100.00\% sampled-key presence (40{,}001/40{,}001 at 20~TB, 2.41 billion
+records, flat $\sim$6~GB RSS). We also report two measured infrastructure lessons:
+a build-cache key that omitted sibling module files (capable of restoring a stale
+artifact --- the one thing a cache must never do) and the empirical
+non-C-compatibility of Cranelift's multi-value return convention.
+\end{abstract}
+
+\section{Architecture: A Contracted Frontend, an Owned Backend}
+A compiler divides into a \emph{front half} (parse, type-check, produce an
+intermediate representation) and a \emph{back half} (turn IR into machine code).
+Flux deliberately keeps rustc's front half and owns the back half:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Stage & Owner & Contract \\
+\midrule
+Parse + typecheck + MIR & \texttt{rustc --emit=mir} & version-pinned (1.93.1) \\
+MIR text $\to$ structured MIR & \texttt{flux-frontend} & MIR-drift CI over a pinned corpus \\
+Lowering passes & \texttt{flux-frontend} & \S\ref{sec:lowerings} \\
+Codegen & \texttt{flux-backend} (Cranelift) & CLIF verifier + outcome gates \\
+Runtime & \texttt{flux\_rt.c} (embedded) & \S\ref{sec:heap} \\
+Link + run & \texttt{cc} & exit code = program value \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The pinned rustc frontend is a \emph{contracted, replaceable} component
+(FIP-0001): the MIR dialect it emits is an enforced interface
+(\texttt{mir-corpus/check.sh} fails CI on drift), and the gate corpus of
+\S\ref{sec:ladder} doubles as the acceptance suite for any future native
+frontend. The rationale for owning the back half is threefold: LLVM dominates
+rustc's compile time and an agent's edit-compile-verify loop is the costliest
+resource in agentic engineering; provenance-signed, self-hosted builds require
+owning the layer being signed; and the build-system instrumentation of
+\S\ref{sec:tdg} lives naturally in an owned backend.
+
+\section{The Ladder Method}\label{sec:ladder}
+Language coverage grows by \emph{rungs}. Each rung adds the minimal honest
+lowering for one feature class and is admitted only when an end-to-end gate
+passes: a whole program compiled through the real pipeline
+(\texttt{rustc --emit=mir} $\to$ parse $\to$ lower $\to$ Cranelift $\to$
+\texttt{cc} $\to$ run) whose \textbf{exit code is the computed value}. A wrong
+number fails the gate; ``it compiled'' proves nothing. This discipline was
+adopted after a sibling system (flux-db, \S\ref{sec:storage}) demonstrated that
+a component can hold 105 green unit tests while silently destroying data:
+outcome verification, never status verification.
+
+\begin{center}
+\begin{tabular}{llrl}
+\toprule
+Gate & Feature class & Value & Note \\
+\midrule
+\texttt{gate\_static} & trait static dispatch & 36 & $\mathrm{Sq}\{6\}.\mathrm{area}()$ \\
+\texttt{gate\_generic} & monomorphization & 25 & \texttt{area\_of::<Sq>} \\
+\texttt{gate\_dyn} & dyn, unique impl & 16 & devirtualization \\
+\texttt{gate\_dyn\_multi} & dyn, two impls & 22 & tagged dispatch, \S\ref{sec:lowerings} \\
+\texttt{gate\_closure} & capturing closures & 20 & capture-by-ref, two calls \\
+\texttt{gate\_closure\_generic} & closures $\times$ generics & 22 & \texttt{apply<F: Fn>}, two instances \\
+\texttt{gate\_vec} & heap Vec & 7 & new/push/index \\
+\texttt{gate\_vec\_loop} & Vec $\times$ loops & 25 & len()-bounded, runtime index \\
+\texttt{gate\_string} & String & 21 & char pushes, len \\
+\texttt{gate\_range} & \texttt{for i in a..b} & 10 & pure-MIR desugar \\
+\texttt{gate\_vec\_for} & \texttt{for x in v} & 7 & heap-handle iterator \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Earlier rungs (scalar completeness, floats, tuples/structs, data enums, match,
+loops, recursion, named consts) are covered by the per-crate suites and the
+pinned MIR corpus; the table lists the eleven \emph{enforced end-to-end} gates
+as of v0.37.
+
+\section{Closed-World Lowerings}\label{sec:lowerings}
+Flux compiles one visible world (a single translation unit plus a runtime), and
+several lowerings exploit that honestly:
+
+\textbf{Dyn dispatch by tags, not fat pointers.} With every impl visible, a
+\texttt{dyn Trait} value lowers to a flat tuple $(\mathit{tag},
+\mathit{payload}_{1..k})$ sized to the widest impl; the unsize coercion becomes
+tuple construction carrying the source type's tag; the call becomes a
+\texttt{SwitchInt} over the tag fanning out to the already-canonicalized static
+impls. The gate passes a square and a rectangle through the \emph{same} call
+site and demands $16+6=22$ --- unreachable under any mis-dispatch. Impl payload
+widths are inferred from construction sites in the same unit; anything
+unprovable is left as an undefined symbol (loud link failure), never a guessed
+layout.
+
+\textbf{Closures by canonical renaming.} rustc's synthetic
+\texttt{\{closure@file:line\}} type pre-lexes to a deterministic flat
+identifier; the closure body (\texttt{parent::\{closure\#N\}}) renames to
+\texttt{\_\_closure\_$h$\_\_call}, which is exactly what the trait
+canonicalizer derives for the \texttt{Fn::call} site --- so closure calls,
+including closures flowing through generic functions
+(\texttt{apply<F: Fn>}), reuse the rung-7 machinery unchanged. Capture
+structs tuple-ize; no layout registration exists anywhere.
+
+\textbf{Range loops by pure desugar.} \texttt{Range<i64>::next} has
+closed-form semantics; the frontend inlines
+$\texttt{if } s<e\ \{\, r=(s{+}1,e);\ \mathrm{Some}(s) \,\}\ \texttt{else}\
+\{\mathrm{None}\}$ as MIR blocks. \texttt{Option<i64>} tuple-izes onto the
+existing data-enum convention (tag at slot 0, payload at $k{+}1$), so
+\texttt{discriminant()} and the \texttt{(\_ as Some).0} downcast resolve
+through machinery that predates the rung.
+
+\section{Heap Collections and the Runtime}\label{sec:heap}
+\texttt{Vec::push} is generic and precompiled inside std --- its body never
+appears in the local MIR dump, so no lowering of visible MIR can produce it.
+The answer is the one every compiler uses: a runtime. \texttt{fluxc run} links
+a dependency-free C runtime (embedded in the binary, content-hash cached), and
+recognized operations rewrite to its shims:
+
+\begin{lstlisting}
+Vec::<i64>::{new,push,len,pop}   ->  __flux_vec_{new,push,len,pop}
+<Vec<i64> as Index<usize>>::index -> __flux_vec_index
+String::{new,push,len}           ->  __flux_string_{new,push,len}
+IntoIterator / IntoIter::next    ->  __flux_vec_intoiter, _next_tag, _lastval
+\end{lstlisting}
+
+A collection value is an opaque \texttt{i64} handle to a malloc-backed buffer.
+This composes with the whole-program by-value elision \emph{because mutation
+happens behind the handle}: copying the handle is the correct semantics for
+\texttt{\&mut} receivers, which is also why the vec iterator is a heap handle
+rather than a by-value state struct.
+
+\textbf{A measured ABI lesson.} The iterator's \texttt{next()} initially
+returned \texttt{Option<i64>} as a two-eightbyte C struct (SysV
+\texttt{rax:rdx}). The C-to-C harness passed; the fluxc-compiled caller read
+only \texttt{rax} --- \texttt{objdump} showed no \texttt{rdx} read at the call
+site. Cranelift's multi-value return convention is not C-struct-compatible.
+The fix: pair-returning shims split into two single-return calls
+(\texttt{next\_tag} advances and stashes; \texttt{lastval} fetches), chained
+by frontend block surgery. Uniform single-\texttt{i64} import ABI restored.
+
+\textbf{Honest boundaries} (loud, not silent): \texttt{i64} elements only ---
+a \texttt{Vec<i32>} program keeps its std names and fails at link; drop glue
+currently lowers to a no-op, so collections leak until process exit
+(\texttt{\_\_flux\_vec\_free} already exists in the runtime for the
+drop-lowering slice); \texttt{.iter().map().sum()} adapter chains remain a
+later rung --- their lazy adapter structs are hidden generic std bodies.
+
+\section{The Task-Dependency Graph (FIP-0003)}\label{sec:tdg}
+Build systems waste their lives rediscovering the world. Since v0.37 every
+fluxc invocation records what it did into a persistent graph (flux-db at the
+shared cache dir), written from three angles:
+
+\begin{enumerate}
+\item \textbf{Wrapper units}: every rustc spawn records its content-addressed
+cache key, its dependency identities, and dep edges --- via a spool of tiny
+files (the wrapper runs as many parallel short-lived processes and must never
+contend on the store); the parent invocation batch-ingests.
+\item \textbf{Invocations}: each build/test/combo run, with outcome, wall time,
+and containment edges to the units it compiled.
+\item \textbf{Swarm tasks}: claims edge to their crates; settlements become
+green/red nodes (task id as unit id).
+\end{enumerate}
+
+The read side schedules incrementally at two granularities. The \emph{crate
+cone} (\texttt{fluxc tdg plan/run}) diffs BLAKE3 source keys and expands dirty
+crates through the reverse-dependency graph. Measured on the live workspace:
+a clean tree schedules 0; a leaf edit schedules 1 of 146; an edit to the base
+crate \texttt{flux-cache} schedules exactly its cone --- 45 crates, 101
+provably reusable. The \emph{unit gate} (\texttt{--units}, and
+\texttt{flux\_combo incremental:true}) goes further: after a
+\texttt{cargo test --no-run} probe, a package whose test-binary key set hashes
+identically to its last \emph{green} run is skipped with proof --- the prior
+result still holds, byte-for-byte. Merged per-package unit maps carry
+cargo-fresh units forward, which is sound precisely because ``fresh'' means
+unchanged since the recorded build. Promotion of \emph{last-green} happens only
+after a run that demonstrably executed tests and passed; a red run cannot
+promote by construction. Everything is advisory and fail-open: a missing or
+corrupt graph degrades to today's full run, never a wrong skip.
+
+\section{Cache Correctness: The Module-Tree Key}\label{sec:cache}
+The wrapper's content-addressed cache key originally hashed the unit's
+\emph{root} source file plus normalized arguments. A Rust unit compiles its
+whole module tree; editing only a sibling file (\texttt{mod foo;}) left the
+key unchanged, and a restore could resurrect a stale rlib missing the new
+symbols --- observed live as ghost \texttt{E0425} errors against a
+freshly-``compiled'' dependency. The fix folds a digest of every sibling
+\texttt{.rs} under the root's directory (relative paths, content hashes) into
+the key. The property restored is asymmetric by design: the new key
+\emph{over}-invalidates (an unused sibling flips it --- costing a rebuild),
+and never \emph{under}-invalidates (no stale restore --- costing correctness).
+Deploying it flips every multi-file unit's key once; the fleet-warm invariant
+survived: a warm \texttt{fluxc self} measures 9.38\,s wall (0.65\,s+0.41\,s
+CPU) against the 12.4\,s bound, with the graph tracer and new keys active.
+
+\section{Storage: The 20-Terabyte Verdict}\label{sec:storage}
+The graph and the artifact cache stand on flux-db, whose v0.36 hardening was
+forced by a chronos-driven adversarial campaign (u64 SST framing after a
+$2^{32}$ wrap silently destroyed 99.98\% of a terabyte; streaming k-way merge
+compaction; crash-epoch durability). v0.37 closes the campaign with the proof
+ladder --- write $N$ terabytes, then audit random keys for presence and
+correctness:
+
+\begin{center}
+\begin{tabular}{rrrr}
+\toprule
+Rung & Records & Audit & Verdict \\
+\midrule
+1 TB & 105{,}100{,}000 & 20{,}000/20{,}000 & PASS \\
+5 TB & 522{,}400{,}000 & 20{,}000/20{,}000 & PASS \\
+20 TB & 2{,}414{,}500{,}000 & 40{,}001/40{,}001 & PASS \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The 20~TB rung ran 12 days of continuous ingest with resident memory flat at
+$\sim$6~GB --- three times the scale that OOM-killed the pre-v0.36 engine.
+Evidence (per-rung logs, metrics, RSS traces, the harness) is archived at
+\texttt{chronos-v035/EVIDENCE/}; the verdict lines are quoted verbatim in the
+v0.37 changelog.
+
+\section{Provenance}
+A release is a commit that bumps the workspace version, an annotated tag, a
+changelog entry, and a flux-rev content identity recorded in both the tag
+message and the version ledger --- \emph{recomputable, not asserted}: re-run
+\texttt{flux-rev snapshot} on the tagged tree and compare. v0.37.0 is
+\texttt{full:9c924bd287449b7bee9fbb32f1f0918b1460f0be1ccbbd5285e22c411ab99966}
+(parent \texttt{bf2273ea2797600b}). This paper was itself typeset through
+\texttt{fluxc}'s LaTeX build path --- the orchestrator that builds the
+compiler builds its paper.
+
+\section{Limitations and Next Rungs}
+Stated plainly: element types beyond \texttt{i64} in collections; drop
+semantics (leak-until-exit today); iterator adapter chains
+(\texttt{map/filter/sum} as lazy std structs); unknown non-runtime callees are
+currently \emph{skipped silently} by the backend rather than failing loud ---
+flagged for hardening; the closed-world lowerings assume a single translation
+unit, which is fluxc's actual operating model but not Rust's general one.
+On the build-system side: the unit gate's identity does not yet fold the
+closure sidecar (\texttt{closure\_hash}), and graph-driven cache eviction
+awaits 30 days of accumulated run history.
+
+\section*{Verification}
+Every number in this paper is reproducible on the tagged tree:
+\texttt{mir-corpus/gates/run-gates.sh} (the eleven gate values),
+\texttt{fluxc tdg plan} after an edit (cone sizes),
+\texttt{time fluxc self} twice (the warm invariant),
+\texttt{chronos-v035/EVIDENCE/ladder.log} (the storage verdict),
+\texttt{flux-rev snapshot .} (the release identity).
+
+\end{document}

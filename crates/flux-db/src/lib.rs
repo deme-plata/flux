@@ -46,6 +46,7 @@ pub mod merge;
 pub mod range_tomb;
 pub mod skeleton;
 pub mod ttl;
+pub mod shard;
 
 pub use skeleton::{SkeletonRecord, SkeletonStore};
 pub use ingest::{build_sorted_sst_bytes, sst_ingest_enabled, BulkMode};

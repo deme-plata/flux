@@ -136,8 +136,14 @@ fn flux_iterate(args: &Value) -> String {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let (passed, failed) = crate::handlers::parse_test_counts(&stdout, &stderr);
-                format!("{} passed, {} failed", passed, failed)
+                let (passed, failed, suites) = crate::handlers::parse_test_outcome(&stdout, &stderr);
+                if suites == 0 {
+                    // Never render a silent no-op run as "0 passed, 0 failed"
+                    // — that reads as green (the 0/0 trap, see b5216de6).
+                    "⚠ UNVERIFIED — no test suite executed (run the deps test binary directly)".to_string()
+                } else {
+                    format!("{} passed, {} failed", passed, failed)
+                }
             }
             Err(e) => format!("error: {}", e),
         }

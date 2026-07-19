@@ -32,6 +32,10 @@ pub struct ComboResult {
     pub compile_ok: bool,
     pub tests_passed: u64,
     pub tests_failed: u64,
+    /// How many `test result:` summary lines were observed. 0 = no test
+    /// harness demonstrably ran (broken run, spawn failure, or the
+    /// likely_red check-only path) — verdict is YELLOW, never GREEN.
+    pub suites_seen: u64,
     pub first_error: Option<Value>,
     pub prediction: Value,
     pub timing_breakdown_ms: Option<Value>, // {"compile_ms":.., "link_ms":.., "test_run_ms":..}
@@ -50,7 +54,7 @@ impl ComboResult {
             "cmd_ms": self.cmd_ms,
             "predict_ms": self.predict_ms,
             "compile_ok": self.compile_ok,
-            "tests": {"passed": self.tests_passed, "failed": self.tests_failed},
+            "tests": {"passed": self.tests_passed, "failed": self.tests_failed, "suites_seen": self.suites_seen},
             "first_error": self.first_error,
             "prediction": self.prediction,
             "timing_breakdown_ms": self.timing_breakdown_ms,
@@ -64,11 +68,22 @@ impl ComboResult {
 /// Robust to multiple test binaries, --quiet, and summary location drift.
 /// (Factored here so both CLI `fluxc combo` and MCP supersonic use identical logic.)
 pub fn parse_test_counts(stdout: &str, stderr: &str) -> (usize, usize) {
+    let (passed, failed, _suites) = parse_test_outcome(stdout, stderr);
+    (passed, failed)
+}
+
+/// Suites-aware variant: also counts `test result:` summary lines. 0 suites
+/// means NO harness executed — indistinguishable from green by counts alone
+/// (the "0/0 green" trap), so verdict logic must key on it. A crate with zero
+/// tests still prints `test result: ok. 0 passed; …` and thus reads suites=1.
+pub fn parse_test_outcome(stdout: &str, stderr: &str) -> (usize, usize, usize) {
     let mut passed = 0;
     let mut failed = 0;
+    let mut suites = 0;
     for stream in [stdout, stderr] {
         for line in stream.lines() {
             if let Some(after) = line.find("test result:") {
+                suites += 1;
                 let tail = &line[after + "test result:".len()..];
                 let toks: Vec<&str> = tail.split_whitespace().collect();
                 for window in toks.windows(2) {
@@ -81,7 +96,7 @@ pub fn parse_test_counts(stdout: &str, stderr: &str) -> (usize, usize) {
             }
         }
     }
-    (passed, failed)
+    (passed, failed, suites)
 }
 
 /// Scan rustc/cargo stderr for first error[CODE] or "error: " + --> loc.
@@ -172,16 +187,17 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     let out = cmd.output();
     let cmd_ms = cmd_start.elapsed().as_millis() as u64;
 
-    let (compile_ok, passed, failed, ferr) = match out {
+    let (compile_ok, passed, failed, suites, ferr) = match out {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout).to_string();
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let compile_ok = !stderr.contains("error[") && !stderr.contains("error: ");
-            let (p, f) = parse_test_counts(&stdout, &stderr);
-            (compile_ok, p as u64, f as u64, first_error(&stderr))
+            let (p, f, s) = parse_test_outcome(&stdout, &stderr);
+            (compile_ok, p as u64, f as u64, s as u64, first_error(&stderr))
         }
         Err(e) => (
             false,
+            0,
             0,
             0,
             Some(json!({"code":"SPAWN","message":format!("{e}"),"file":"","line":0,"col":0,"snippet":""})),
@@ -205,22 +221,28 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
         crate::persist_build(h, m, total_ms);
     }
 
-    // `warm` must mean "a real, green combo finished fast" — NOT "it failed fast".
-    // Without the compile_ok/failed gate, a RED combo that errors out in <10s (e.g. the
-    // cargo rustc-probe failure in a fresh CARGO_TARGET_DIR, which runs 0 tests) would
-    // falsely read warm:true. Require GREEN.
-    let warm = total_ms < 10_000 && compile_ok && failed == 0;
+    // `warm` must mean "a real, green combo finished fast" — NOT "it failed fast"
+    // and NOT "nothing demonstrably ran fast". Without the compile_ok/failed gate,
+    // a RED combo that errors out in <10s (e.g. the cargo rustc-probe failure in a
+    // fresh CARGO_TARGET_DIR, which runs 0 tests) would falsely read warm:true;
+    // without the suites gate, a broken test run (0 summary lines) would too.
+    let warm = total_ms < 10_000 && compile_ok && failed == 0 && suites > 0;
 
-    let next_action = if !compile_ok {
-        "fix_first_error".to_string()
+    // Three-way verdict. GREEN requires at least one executed test suite — a
+    // crate with zero tests still prints a summary line and stays GREEN, but
+    // "compiled fine, nothing demonstrably tested" (broken test run, or the
+    // likely_red check-only path when the red prediction was wrong) is YELLOW.
+    let (verdict, next_action) = if !compile_ok {
+        ("RED", "fix_first_error".to_string())
     } else if failed > 0 {
-        "fix_failing_tests".to_string()
+        ("RED", "fix_failing_tests".to_string())
+    } else if suites == 0 {
+        ("YELLOW", "verify_tests_directly".to_string())
     } else if !warm {
-        "warm_cache_then_rerun".to_string()
+        ("GREEN", "warm_cache_then_rerun".to_string())
     } else {
-        "ship".to_string()
+        ("GREEN", "ship".to_string())
     };
-    let verdict = if compile_ok && failed == 0 { "GREEN" } else { "RED" };
 
     // Timing breakdown (v2 stub: full --timings parse is future; for now split heuristically + show cmd vs predict)
     // cmd_ms is the wall of the one cargo test (which internally does compile+link+test_run).
@@ -271,6 +293,7 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
         compile_ok,
         tests_passed: passed,
         tests_failed: failed,
+        suites_seen: suites,
         first_error: ferr,
         prediction: json!({
             "predicted_ms": pred.predicted_ms,

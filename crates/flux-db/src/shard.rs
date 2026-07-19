@@ -234,6 +234,17 @@ impl ShardedDb {
         win.into_iter().collect()
     }
 
+    /// Iterate EVERY live pair across all shards — NO global key order (keys
+    /// come shard by shard; each shard is internally sorted). Named so nobody
+    /// mistakes it for sorted iteration: a globally sorted scan is a k-way
+    /// merge across shards — do not fake it with concatenation. Owned
+    /// snapshot per shard, tombstones already resolved (same contract as
+    /// `Database::iter`). This is the SHARDED-BLOCKSTORE-PLAN prereq for
+    /// BlockStore's open-time index rebuild (order-independent consumption).
+    pub fn iter_unordered(&self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+        self.shards.iter().flat_map(|db| db.iter())
+    }
+
     /// Durability barrier across EVERY shard (parallel fsyncs).
     pub fn sync_wal(&self) -> Result<(), String> {
         let results: Vec<Result<(), String>> = std::thread::scope(|s| {
@@ -434,6 +445,35 @@ mod tests {
         // Limit larger than population returns everything under the prefix.
         assert_eq!(db.scan_prefix_recent(b"p:", 1000).len(), 200);
         assert_eq!(db.scan_prefix_recent(b"p:", 0).len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iter_unordered_covers_every_shard_exactly_once() {
+        let dir = tmp("iterun");
+        let db = ShardedDb::open(&dir, 8).unwrap();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..400)
+            .map(|i| (format!("iu-{:04}", i).into_bytes(), format!("v-{}", i).into_bytes()))
+            .collect();
+        db.put_many(&entries).unwrap();
+        // Tombstone a slice — deleted keys must NOT appear in the iteration.
+        for i in 100..150 {
+            db.delete(format!("iu-{:04}", i).as_bytes()).unwrap();
+        }
+        let got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = db.iter_unordered().collect();
+        assert_eq!(got.len(), 350, "exactly the live set, no dupes across shards");
+        for i in 0..400 {
+            let k = format!("iu-{:04}", i).into_bytes();
+            if (100..150).contains(&i) {
+                assert!(!got.contains_key(&k), "deleted key iu-{:04} must be absent", i);
+            } else {
+                assert_eq!(got.get(&k).map(|v| v.as_slice()),
+                    Some(format!("v-{}", i).as_bytes()), "iu-{:04} must round-trip", i);
+            }
+        }
+        // Coverage really spans shards: per-shard iter counts sum to the total.
+        let per_shard: usize = (0..db.shard_count()).map(|i| db.shard(i).iter().count()).sum();
+        assert_eq!(per_shard, 350, "per-shard iteration must account for every live key");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

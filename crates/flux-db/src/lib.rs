@@ -611,10 +611,11 @@ impl Database {
 
     // ── v0.16: TTL ──
 
-    /// Insert a key with an expiry time (seconds since UNIX epoch). After
-    /// that point `get()` returns None and the next compaction drops the
-    /// key. Internally stores `[u64 expiry_unix][value]`; readers detect
-    /// the TTL prefix via length + expiry sanity.
+    /// Insert a key with an expiry time (seconds since UNIX epoch). Stores
+    /// `[u64 expiry_unix][value]`; `get()` returns the RAW wrapped bytes —
+    /// readers enforce expiry with `ttl::unwrap(raw, now)` (get() cannot
+    /// unwrap unconditionally without corrupting ordinary >=8-byte values).
+    /// Compaction drops expired keys for good.
     pub fn put_with_ttl(&self, key: &[u8], value: &[u8], expiry_unix: u64) -> Result<(), String> {
         let wrapped = ttl::wrap(value, expiry_unix);
         self.put(key, &wrapped)

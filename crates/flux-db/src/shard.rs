@@ -243,6 +243,53 @@ impl ShardedDb {
         Ok(())
     }
 
+    /// Range delete across the WHOLE store: hash routing scatters any key
+    /// range over every shard, so the tombstone goes to ALL of them. Each
+    /// shard's tombstone is one cheap push (no key scan), so fan-out is not
+    /// N× the single-store cost in any way that matters.
+    pub fn delete_range(&self, start: &[u8], end: &[u8]) -> Result<(), String> {
+        for db in &self.shards {
+            db.delete_range(start, end)?;
+        }
+        Ok(())
+    }
+
+    /// Install (or replace) the merge operator on EVERY shard. Merges route
+    /// by key, so each shard must hold the operator for `merge` to work
+    /// wherever the key lands.
+    pub fn set_merge_operator(&self, op: Arc<dyn crate::merge::MergeOperator>) {
+        for db in &self.shards {
+            db.set_merge_operator(op.clone());
+        }
+    }
+
+    /// Merge a delta into a key (routed to its shard). Same contract as the
+    /// single store: errors if no operator is installed.
+    pub fn merge(&self, key: &[u8], delta: &[u8]) -> Result<(), String> {
+        self.shards[self.shard_for(key)].merge(key, delta)
+    }
+
+    /// TTL put (routed). Same contract as the single store: the value is
+    /// stored TTL-wrapped, readers unwrap with `ttl::unwrap` (get() returns
+    /// the raw wrapped bytes), and the owning shard's compaction drops
+    /// expired keys for good.
+    pub fn put_with_ttl(&self, key: &[u8], value: &[u8], expiry_unix: u64) -> Result<(), String> {
+        self.shards[self.shard_for(key)].put_with_ttl(key, value, expiry_unix)
+    }
+
+    /// Convenience: live for `seconds` from now (routed).
+    pub fn put_ttl_seconds(&self, key: &[u8], value: &[u8], seconds: u64) -> Result<(), String> {
+        self.shards[self.shard_for(key)].put_ttl_seconds(key, value, seconds)
+    }
+
+    /// Aggregate block-cache stats over every shard: (hits, misses, entries).
+    pub fn block_cache_stats(&self) -> (u64, u64, usize) {
+        self.shards.iter().fold((0, 0, 0), |(h, m, e), db| {
+            let (sh, sm, se) = db.block_cache_stats();
+            (h + sh, m + sm, e + se)
+        })
+    }
+
     pub fn set_defer_compaction(&self, defer: bool) {
         for db in &self.shards {
             db.set_defer_compaction(defer);
@@ -384,6 +431,81 @@ mod tests {
         // Limit larger than population returns everything under the prefix.
         assert_eq!(db.scan_prefix_recent(b"p:", 1000).len(), 200);
         assert_eq!(db.scan_prefix_recent(b"p:", 0).len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_range_covers_every_shard() {
+        let dir = tmp("delrange");
+        let db = ShardedDb::open(&dir, 8).unwrap();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..300)
+            .map(|i| (format!("dr-{:04}", i).into_bytes(), b"v".to_vec()))
+            .collect();
+        db.put_many(&entries).unwrap();
+        // Delete the middle band [dr-0100, dr-0200) — scattered over all shards.
+        db.delete_range(b"dr-0100", b"dr-0200").unwrap();
+        for i in 0..300 {
+            let k = format!("dr-{:04}", i);
+            let got = db.get(k.as_bytes()).unwrap();
+            if (100..200).contains(&i) {
+                assert_eq!(got, None, "{} is inside the range and must be gone", k);
+            } else {
+                assert!(got.is_some(), "{} is outside the range and must survive", k);
+            }
+        }
+        // End bound is exclusive.
+        assert!(db.get(b"dr-0200").unwrap().is_some(), "end bound must be exclusive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_routes_to_owning_shard_and_accumulates() {
+        struct AddInt;
+        impl crate::merge::MergeOperator for AddInt {
+            fn merge(&self, existing: Option<&[u8]>, delta: &[u8]) -> Vec<u8> {
+                let cur = existing
+                    .map(|e| i64::from_le_bytes(e.try_into().unwrap_or([0; 8])))
+                    .unwrap_or(0);
+                (cur + i64::from_le_bytes(delta.try_into().unwrap_or([0; 8])))
+                    .to_le_bytes().to_vec()
+            }
+        }
+        let dir = tmp("merge");
+        let db = ShardedDb::open(&dir, 4).unwrap();
+        // Without an operator installed, merge must refuse (same as single store).
+        assert!(db.merge(b"ctr-0", &1i64.to_le_bytes()).is_err(),
+            "merge without operator must error");
+        db.set_merge_operator(Arc::new(AddInt));
+        // Counters spread across shards; deltas must accumulate wherever they land.
+        for c in 0..20 {
+            let key = format!("ctr-{}", c);
+            for d in 1..=5i64 {
+                db.merge(key.as_bytes(), &d.to_le_bytes()).unwrap();
+            }
+        }
+        for c in 0..20 {
+            let key = format!("ctr-{}", c);
+            let got = db.get(key.as_bytes()).unwrap().expect("counter must exist");
+            assert_eq!(i64::from_le_bytes(got.as_slice().try_into().unwrap()), 15,
+                "{} must sum 1..=5 on its owning shard", key);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ttl_put_routes_and_unwrap_enforces_expiry() {
+        // Same contract as the single-store TTL test: get() returns the raw
+        // TTL-wrapped bytes; ttl::unwrap at read time enforces expiry.
+        let dir = tmp("ttl");
+        let db = ShardedDb::open(&dir, 4).unwrap();
+        db.put_with_ttl(b"ttl-dead", b"gone", 100).unwrap(); // expired long ago
+        let raw = db.get(b"ttl-dead").unwrap().expect("wrapped bytes must be stored");
+        assert_eq!(crate::ttl::unwrap(&raw, crate::ttl::now_unix()), None,
+            "past expiry must unwrap to None");
+        db.put_ttl_seconds(b"ttl-live", b"here", 3600).unwrap();
+        let raw = db.get(b"ttl-live").unwrap().expect("wrapped bytes must be stored");
+        assert_eq!(crate::ttl::unwrap(&raw, crate::ttl::now_unix()).as_deref(),
+            Some(b"here" as &[u8]), "future expiry must unwrap to the value");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -106,14 +106,28 @@ pub fn cargo_cmd() -> std::process::Command {
 /// Both stdout and stderr are scanned because cargo's summary location has
 /// drifted between versions.
 pub fn parse_test_counts(stdout: &str, stderr: &str) -> (usize, usize) {
+    let (passed, failed, _suites) = parse_test_outcome(stdout, stderr);
+    (passed, failed)
+}
+
+/// Suites-aware variant of [`parse_test_counts`]: also returns how many
+/// `test result:` summary lines were seen. `suites == 0` means NO test
+/// harness executed at all — the "0/0 green" ambiguity: a crate with zero
+/// tests still prints `test result: ok. 0 passed; …`, so a genuinely empty
+/// suite is distinguishable from a test run that silently never happened
+/// (broken subcommand, filtered binary, spawn failure). Callers rendering a
+/// verdict must treat `suites == 0` as UNVERIFIED, never as green.
+pub fn parse_test_outcome(stdout: &str, stderr: &str) -> (usize, usize, usize) {
     let mut passed = 0;
     let mut failed = 0;
+    let mut suites = 0;
     for stream in [stdout, stderr] {
         for line in stream.lines() {
             // Match the canonical summary line — robust to both
             //   "test result: ok. N passed; M failed; …"
             //   "test result: FAILED. N passed; M failed; …"
             if let Some(after) = line.find("test result:") {
+                suites += 1;
                 let tail = &line[after + "test result:".len()..];
                 let toks: Vec<&str> = tail.split_whitespace().collect();
                 for window in toks.windows(2) {
@@ -126,7 +140,7 @@ pub fn parse_test_counts(stdout: &str, stderr: &str) -> (usize, usize) {
             }
         }
     }
-    (passed, failed)
+    (passed, failed, suites)
 }
 
 #[cfg(test)]
@@ -165,6 +179,24 @@ mod parse_test_counts_tests {
         let stdout = ".....F\n\
                       test result: FAILED. 5 passed; 1 failed; 0 ignored; …\n";
         assert_eq!(parse_test_counts(stdout, ""), (5, 1));
+    }
+
+    #[test]
+    fn no_summary_lines_means_zero_suites() {
+        // A broken test subcommand (or a run that never reached any test
+        // binary) prints no `test result:` line at all. This is the 0/0
+        // ambiguity: counts alone look like "green"; suites==0 is the tell.
+        let stderr = "error: unexpected argument '--package' found\n";
+        assert_eq!(super::parse_test_outcome("", stderr), (0, 0, 0));
+    }
+
+    #[test]
+    fn empty_suite_still_counts_as_executed() {
+        // A crate with zero tests DID run its harness — that is a legitimate
+        // green, and distinguishable from the broken-run case above.
+        let stdout = "running 0 tests\n\
+                      test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        assert_eq!(super::parse_test_outcome(stdout, ""), (0, 0, 1));
     }
 }
 

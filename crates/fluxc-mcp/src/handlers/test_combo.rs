@@ -191,6 +191,10 @@ fn flux_combo(args: &Value) -> String {
     let test_handle = std::thread::spawn({
         let pkg2 = pkg2.clone();
         let exe = flux_exe.clone();
+        // Returns (passed, failed, suites_seen, run_ok). `suites_seen == 0`
+        // means no test harness printed a summary — the "0/0 green" lie this
+        // handler used to tell; `run_ok == false` means the subcommand itself
+        // failed to spawn or exited non-zero without any suite output.
         move || {
             let raw = std::process::Command::new(&exe)
                 .args(["test", "-p", &pkg2])
@@ -199,9 +203,10 @@ fn flux_combo(args: &Value) -> String {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    crate::handlers::parse_test_counts(&stdout, &stderr)
+                    let (p, f, suites) = crate::handlers::parse_test_outcome(&stdout, &stderr);
+                    (p, f, suites, o.status.success() || suites > 0)
                 }
-                Err(_) => (0, 0),
+                Err(_) => (0, 0, 0, false),
             }
         }
     });
@@ -211,10 +216,13 @@ fn flux_combo(args: &Value) -> String {
         move || predict::predict_build(&p, false, &[])
     });
 
-    let (test_passed, test_failed) = test_handle.join().unwrap();
+    let (test_passed, test_failed, suites_seen, run_ok) = test_handle.join().unwrap();
     let pred = predict_handle.join().unwrap();
 
     let total_ms = start.elapsed().as_millis();
+    // Three-way verdict: tests executed and all green / something red /
+    // NOTHING demonstrably ran (never report that as green).
+    let unverified = suites_seen == 0;
 
     // Incremental promote: last-green := last-built, but ONLY on a green run
     // that demonstrably executed tests (0/0 is the known "test binary never
@@ -223,24 +231,66 @@ fn flux_combo(args: &Value) -> String {
         fluxc_core::tdg_sched::combo_promote(&pkg, total_ms as u64);
     }
 
+    let verdict = if unverified {
+        "UNVERIFIED"
+    } else if test_failed == 0 {
+        "green"
+    } else {
+        "RED"
+    };
+
     webhook::auto_dispatch("combo_complete", serde_json::json!({
         "package": pkg, "compile_ms": total_ms,
         "tests_passed": test_passed, "tests_failed": test_failed,
+        "suites_seen": suites_seen, "verdict": verdict,
         "predicted_ms": pred.predicted_ms
     }));
 
     let total = test_passed + test_failed;
     let test_frac = if total > 0 { test_passed as f64 / total as f64 } else { 1.0 };
-    let status = if test_failed == 0 { "✓" } else { "✗" };
     let fired = webhook_fired("combo_complete");
     let pulse = "◉ ".repeat(fired.min(8));
+
+    if unverified {
+        // The old behavior rendered this exact case as "0/0 ✓ green" — the
+        // known trap that sent agents shipping unverified code. Fail loud:
+        // no green claim, and a concrete next action.
+        let build_line = if run_ok {
+            " BUILD     ? subcommand exited 0 but NO test suite ran".to_string()
+        } else {
+            " BUILD     ✗ `fluxc test` failed before any suite ran".to_string()
+        };
+        return format!(
+            "⚡⚡⚡  F L U X   C O M B O  ⚡⚡⚡\n{}",
+            dashboard(
+                &format!("{} · {}ms · UNVERIFIED", pkg, total_ms),
+                &[
+                    build_line,
+                    " TESTS     ░░░░░░░░░░░░░░░░░░░░░░░░  0 suites executed".to_string(),
+                    " VERDICT   ⚠ NOT green — no test harness produced output".to_string(),
+                    format!(" NEXT      fluxc check -p {} · then run target/debug/deps/<crate>-<hash> directly", pkg),
+                    "--".to_string(),
+                    format!(" WEBHOOKS  combo_complete ▶ {} fired   {}", fired, pulse.trim_end()),
+                ]
+            )
+        );
+    }
+
+    let status = if test_failed == 0 { "✓" } else { "✗" };
+    let tests_line = if total == 0 {
+        // Suites ran and reported zero tests: a real (empty-suite) green,
+        // labeled so it can't be confused with the unverified case above.
+        format!(" TESTS     {}  0 tests in crate ({} suite(s) ran) {}", bar(1.0, 24), suites_seen, status)
+    } else {
+        format!(" TESTS     {}  {}/{} {}", bar(test_frac, 24), test_passed, total, status)
+    };
     format!(
         "⚡⚡⚡  F L U X   C O M B O  ⚡⚡⚡\n{}",
         dashboard(
-            &format!("{} · {}ms · {}", pkg, total_ms, if test_failed == 0 { "green" } else { "RED" }),
+            &format!("{} · {}ms · {}", pkg, total_ms, verdict),
             &[
                 " BUILD     ✓ (via fluxc test, no redundant check)".to_string(),
-                format!(" TESTS     {}  {}/{} {}", bar(test_frac, 24), test_passed, total, status),
+                tests_line,
                 format!(" PREDICT   {}ms   cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 12), (pred.predicted_cache_rate * 100.0) as u64),
                 format!("           confidence {} {}%", bar(pred.confidence, 12), (pred.confidence * 100.0) as u64),
                 "--".to_string(),

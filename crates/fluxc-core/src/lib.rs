@@ -358,7 +358,78 @@ pub fn canonical_wrapper_path() -> std::path::PathBuf {
     if let Ok(p) = env::var("FLUX_WRAPPER_PATH") {
         if !p.is_empty() { return std::path::PathBuf::from(p); }
     }
-    env::current_exe().expect("current fluxc executable")
+    live_fluxc_path()
+}
+
+/// The on-disk fluxc binary to SPAWN (subcommands, RUSTC_WRAPPER value).
+///
+/// Long-running servers (`fluxc mcp`, `fluxc serve`) outlive rebuilds: cargo
+/// replaces the binary by rename, the old inode is unlinked, and from then on
+/// the server's `current_exe()` (= readlink /proc/self/exe) yields
+/// "<path> (deleted)" — a path that does not exist and fails to spawn in ~70ms.
+/// That single mechanism was the TRUE root cause of the 0/0-green combo trap
+/// (confirmed live 2026-07-19: the serving mcp process's exe read
+/// ".../target/debug/fluxc (deleted)" while a fresh binary sat at the clean
+/// path), and it equally poisons RUSTC_WRAPPER handed to cargo by a stale
+/// server. Resolution order:
+/// 1. `FLUX_WRAPPER_PATH` (fleet symlink, operator keeps it live)
+/// 2. `current_exe()` as-is, when that file still exists
+/// 3. `current_exe()` with the " (deleted)" suffix stripped, when THAT exists
+///    — the freshly rebuilt binary at the same path (newer than the running
+///    process, and exactly the right thing to spawn)
+/// 4. `current_exe()` unchanged — let the caller surface the spawn error
+pub fn live_fluxc_path() -> std::path::PathBuf {
+    if let Ok(p) = env::var("FLUX_WRAPPER_PATH") {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    if exe.exists() {
+        return exe;
+    }
+    if let Some(stripped) = strip_deleted_suffix(&exe) {
+        if stripped.exists() {
+            return stripped;
+        }
+    }
+    exe
+}
+
+/// "<path> (deleted)" → Some("<path>") — the shape /proc/self/exe takes after
+/// the running binary is rename-replaced. None when the suffix is absent.
+pub fn strip_deleted_suffix(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let s = p.to_str()?;
+    s.strip_suffix(" (deleted)").map(std::path::PathBuf::from)
+}
+
+#[cfg(test)]
+mod live_fluxc_path_tests {
+    use super::*;
+
+    #[test]
+    fn deleted_suffix_strips_exactly() {
+        assert_eq!(
+            strip_deleted_suffix(std::path::Path::new("/a/b/fluxc (deleted)")),
+            Some(std::path::PathBuf::from("/a/b/fluxc"))
+        );
+        assert_eq!(strip_deleted_suffix(std::path::Path::new("/a/b/fluxc")), None);
+        // Only the exact readlink suffix counts — not a lookalike inside the name.
+        assert_eq!(
+            strip_deleted_suffix(std::path::Path::new("/a/b (deleted)/fluxc")),
+            None
+        );
+    }
+
+    #[test]
+    fn live_path_resolves_to_an_existing_binary_here() {
+        // In a test process current_exe() is the (existing) test binary, so
+        // the resolver must return a path that exists — never a
+        // " (deleted)" phantom.
+        let p = live_fluxc_path();
+        assert!(p.exists(), "resolved {:?} does not exist", p);
+        assert!(!p.to_string_lossy().ends_with(" (deleted)"));
+    }
 }
 
 /// Quarantine a poisoned cargo target-info probe cache before spawning cargo.

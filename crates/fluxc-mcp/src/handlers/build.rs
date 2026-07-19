@@ -274,7 +274,7 @@ fn flux_self_build(args: &Value) -> String {
     let mut cmd = crate::handlers::cargo_cmd();
     cmd.arg("build").arg("--package").arg("fluxc");
     if release { cmd.arg("--release"); }
-    cmd.env("RUSTC_WRAPPER", std::env::current_exe().unwrap_or_else(|_| "fluxc".into()));
+    cmd.env("RUSTC_WRAPPER", fluxc_core::live_fluxc_path());
     cmd.env("FLUXC_WRAPPING", "1");
     let real = std::env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
     cmd.env("REAL_RUSTC", &real);

@@ -102,7 +102,7 @@ fn flux_test(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str());
     let filter = args.get("filter").and_then(|v| v.as_str());
 
-    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let flux_exe = fluxc_core::live_fluxc_path();
     let mut cmd = std::process::Command::new(&flux_exe);
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["--package", pkg]); }
@@ -183,7 +183,7 @@ fn flux_combo(args: &Value) -> String {
         }
     }
 
-    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let flux_exe = fluxc_core::live_fluxc_path();
 
     // NOTE: no per-call tune spawn (per swarm feedback to avoid latency). Assume SPEED_BOOTS or set at boot.
     // Dogfood: use fluxc test (which already does the type-check, no redundant check thread to avoid lock contention).
@@ -360,7 +360,7 @@ fn flux_quickcast(args: &Value) -> String {
         .unwrap_or_else(|_| tune::load_tune());
 
     // Check via fluxc (dogfood, no raw cargo)
-    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let flux_exe = fluxc_core::live_fluxc_path();
     let _ = std::process::Command::new(&flux_exe)
         .args(["tune", "--preset", "speed-boots"])
         .status();
@@ -391,7 +391,7 @@ fn flux_ult(args: &Value) -> String {
 
     // Parallel: check + heatmap + predict (dogfood via fluxc + speed tune)
     let pkg = package.to_string();
-    let flux_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    let flux_exe = fluxc_core::live_fluxc_path();
     let _ = std::process::Command::new(&flux_exe)
         .args(["tune", "--preset", "speed-boots"])
         .status();

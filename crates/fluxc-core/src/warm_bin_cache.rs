@@ -217,7 +217,7 @@ pub fn evict(max_bytes: u64) {
 /// Fire-and-forget, capped at `max` crates, niced. Returns the prewarmed crate names.
 pub fn reverse_dep_prewarm(workspace_root: &Path, pkg: &str, max: usize) -> Vec<String> {
     let deps = direct_dependents(workspace_root, pkg);
-    let flux_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fluxc"));
+    let flux_exe = crate::live_fluxc_path();
     let mut fired = Vec::new();
     for dep in deps.into_iter().take(max) {
         // nice + detached `fluxc test -p <dep>` — warms its test artifacts; ignore result

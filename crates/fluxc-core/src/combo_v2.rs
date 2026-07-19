@@ -138,8 +138,9 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     let start = Instant::now();
     let pkg = package.to_string();
 
-    let flux_exe = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
+    // live_fluxc_path, NOT raw current_exe: a long-running server post-rebuild
+    // reads "<path> (deleted)" and every wrapper/subcommand spawn fails.
+    let flux_exe = crate::live_fluxc_path();
     let real_rustc = std::env::var("REAL_RUSTC").unwrap_or_else(|_| "rustc".to_string());
 
     // Predict in parallel (pure CPU, no lock, Amdahl overlap with the cmd leg)

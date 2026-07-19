@@ -73,6 +73,20 @@ impl ShardedDb {
         Ok(ShardedDb { shards })
     }
 
+    /// Open an EXISTING sharded store, taking the shard count from the
+    /// persisted `SHARDS` marker. Removes the caller-must-remember-n footgun:
+    /// `open(path, wrong_n)` refuses loudly, but the right count was on disk
+    /// all along. Errors if no marker exists (use `open` to create).
+    pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self, String> {
+        let root: PathBuf = path.into();
+        let marker = root.join("SHARDS");
+        let existing = std::fs::read_to_string(&marker)
+            .map_err(|e| format!("no sharded store at {} (SHARDS marker unreadable: {})", root.display(), e))?;
+        let n: usize = existing.trim().parse()
+            .map_err(|e| format!("corrupt SHARDS marker at {}: {:?} ({})", root.display(), existing.trim(), e))?;
+        Self::open(root, n)
+    }
+
     #[inline]
     pub fn shard_count(&self) -> usize {
         self.shards.len()
@@ -133,6 +147,87 @@ impl ShardedDb {
             r?;
         }
         Ok(())
+    }
+
+    /// Batch read: partition keys by routing hash, read every shard's slice IN
+    /// PARALLEL, and reassemble results in INPUT order (index i of the return
+    /// is the lookup for keys[i]). The read-path mirror of `put_many`.
+    pub fn get_many<K: AsRef<[u8]> + Sync>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Vec<u8>>>, String> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let n = self.shards.len();
+        // (original index, key) per shard, so answers slot back in input order.
+        let mut parts: Vec<Vec<(usize, &[u8])>> = vec![Vec::new(); n];
+        for (i, k) in keys.iter().enumerate() {
+            let k = k.as_ref();
+            parts[(route_hash(k) % n as u64) as usize].push((i, k));
+        }
+        let results: Vec<Result<Vec<(usize, Option<Vec<u8>>)>, String>> =
+            std::thread::scope(|s| {
+                let handles: Vec<_> = self
+                    .shards
+                    .iter()
+                    .zip(parts.iter())
+                    .map(|(db, part)| {
+                        s.spawn(move || {
+                            part.iter()
+                                .map(|&(i, k)| db.get(k).map(|v| (i, v)))
+                                .collect()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err("shard reader panicked".into())))
+                    .collect()
+            });
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
+        for r in results {
+            for (i, v) in r? {
+                out[i] = v;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Cross-shard `scan_prefix_recent`: hash routing scatters a prefix over
+    /// every shard, so fan out IN PARALLEL and re-apply the same
+    /// keep-the-`limit`-largest window over the union. Result is ascending by
+    /// key, exactly like the single-store call; per-shard semantics
+    /// (best-effort-recent under in-range deletes) carry over unchanged.
+    pub fn scan_prefix_recent(&self, prefix: &[u8], limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let per_shard: Vec<Vec<(Vec<u8>, Vec<u8>)>> = std::thread::scope(|s| {
+            let handles: Vec<_> = self
+                .shards
+                .iter()
+                .map(|db| s.spawn(move || db.scan_prefix_recent(prefix, limit)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+        let mut win: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+        for part in per_shard {
+            for (k, v) in part {
+                win.insert(k, v);
+            }
+        }
+        while win.len() > limit {
+            if let Some(min_k) = win.keys().next().cloned() {
+                win.remove(&min_k);
+            } else {
+                break;
+            }
+        }
+        win.into_iter().collect()
     }
 
     /// Durability barrier across EVERY shard (parallel fsyncs).
@@ -210,6 +305,84 @@ mod tests {
             Ok(_) => panic!("mismatched shard count must not open"),
         };
         assert!(err.contains("refusing"), "mismatch must refuse: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_existing_reads_marker_and_serves_all_keys() {
+        let dir = tmp("openexist");
+        let keys: Vec<String> = (0..200).map(|i| format!("oe-{:04}", i)).collect();
+        {
+            let db = ShardedDb::open(&dir, 6).unwrap();
+            let entries: Vec<(&[u8], Vec<u8>)> = keys.iter()
+                .map(|k| (k.as_bytes(), format!("v-{}", k).into_bytes())).collect();
+            db.put_many(&entries).unwrap();
+            db.sync_wal().unwrap();
+        }
+        // No shard count supplied — must come from the marker.
+        let db = ShardedDb::open_existing(&dir).unwrap();
+        assert_eq!(db.shard_count(), 6, "count must come from the SHARDS marker");
+        for k in &keys {
+            assert_eq!(db.get(k.as_bytes()).unwrap().as_deref(),
+                Some(format!("v-{}", k).as_bytes()), "key {} must resolve", k);
+        }
+        // A path with no marker refuses instead of silently creating.
+        let empty = tmp("openexist-none");
+        assert!(ShardedDb::open_existing(&empty).is_err(), "no marker must refuse");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn get_many_preserves_input_order_and_misses() {
+        let dir = tmp("getmany");
+        let db = ShardedDb::open(&dir, 4).unwrap();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..300)
+            .map(|i| (format!("gm-{:04}", i).into_bytes(), format!("val-{}", i).into_bytes()))
+            .collect();
+        db.put_many(&entries).unwrap();
+        // Interleave hits and guaranteed misses, unsorted order.
+        let lookups: Vec<Vec<u8>> = vec![
+            b"gm-0299".to_vec(), b"missing-a".to_vec(), b"gm-0000".to_vec(),
+            b"gm-0150".to_vec(), b"missing-b".to_vec(), b"gm-0007".to_vec(),
+        ];
+        let got = db.get_many(&lookups).unwrap();
+        assert_eq!(got.len(), lookups.len());
+        assert_eq!(got[0].as_deref(), Some(b"val-299" as &[u8]));
+        assert_eq!(got[1], None);
+        assert_eq!(got[2].as_deref(), Some(b"val-0" as &[u8]));
+        assert_eq!(got[3].as_deref(), Some(b"val-150" as &[u8]));
+        assert_eq!(got[4], None);
+        assert_eq!(got[5].as_deref(), Some(b"val-7" as &[u8]));
+        // Every stored key must round-trip through the batch path too.
+        let all_keys: Vec<&[u8]> = entries.iter().map(|(k, _)| k.as_slice()).collect();
+        let all = db.get_many(&all_keys).unwrap();
+        assert!(all.iter().all(|v| v.is_some()), "batch read must find every written key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_prefix_recent_merges_across_shards() {
+        let dir = tmp("scanpfx");
+        let db = ShardedDb::open(&dir, 8).unwrap();
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = (0..200)
+            .map(|i| (format!("p:{:05}", i).into_bytes(), format!("pv-{}", i).into_bytes()))
+            .collect();
+        // Noise under a different prefix must never leak into the scan.
+        entries.extend((0..100).map(|i| {
+            (format!("q:{:05}", i).into_bytes(), b"noise".to_vec())
+        }));
+        db.put_many(&entries).unwrap();
+        let got = db.scan_prefix_recent(b"p:", 50);
+        assert_eq!(got.len(), 50, "window must fill to limit");
+        // The 50 LARGEST p: keys, ascending — same contract as single-store.
+        let expect: Vec<Vec<u8>> = (150..200).map(|i| format!("p:{:05}", i).into_bytes()).collect();
+        let got_keys: Vec<Vec<u8>> = got.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(got_keys, expect, "must be the top-50 keys of the prefix, ascending");
+        assert!(got.iter().all(|(k, _)| k.starts_with(b"p:")), "no cross-prefix leakage");
+        // Limit larger than population returns everything under the prefix.
+        assert_eq!(db.scan_prefix_recent(b"p:", 1000).len(), 200);
+        assert_eq!(db.scan_prefix_recent(b"p:", 0).len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

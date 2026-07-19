@@ -24,6 +24,7 @@
 
 use crate::Database;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Stable, dependency-free FNV-1a 64-bit. NOT cryptographic — routing only.
 #[inline]

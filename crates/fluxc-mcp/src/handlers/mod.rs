@@ -91,6 +91,14 @@ pub fn cargo_cmd() -> std::process::Command {
     if !path.contains("/root/.cargo/bin") {
         cmd.env("PATH", format!("/root/.cargo/bin:{path}"));
     }
+    // MCP Dogfood Rule + the 12.4s invariant: cargo hashes RUSTC_WRAPPER into
+    // every unit fingerprint, so a bare handler spawn (no wrapper) lives in a
+    // DIFFERENT fingerprint universe than fluxc build/test/self — each
+    // handler↔CLI alternation was a full multi-minute rebuild. One wrapper
+    // identity everywhere keeps warm builds warm; live_fluxc_path (inside
+    // canonical_wrapper_path) keeps the wrapper spawnable across rebuilds
+    // even from long-running servers.
+    fluxc_core::apply_wrapper_env(&mut cmd);
     cmd
 }
 

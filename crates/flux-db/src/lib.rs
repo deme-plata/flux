@@ -885,6 +885,82 @@ impl Database {
         Ok(None)
     }
 
+    /// Batch read: resolve many keys with ONE memtable lock scope and ONE
+    /// shared newest-first SST pass, instead of a full `get()` per key.
+    /// Results come back in input order (`out[i]` answers `keys[i]`); misses
+    /// stay `None`. Semantics are identical to calling `get()` per key:
+    /// range/point tombstones and memtable entries shadow SSTs, and the
+    /// newest SST copy wins. The read-path mirror of `put_many` — the batch
+    /// amortizes the inner-lock acquisition, the SST-list fetch, and the
+    /// reader-cache probes across the whole batch.
+    pub fn get_many<K: AsRef<[u8]>>(&self, keys: &[K]) -> Result<Vec<Option<Vec<u8>>>, String> {
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        // Phase 1 — one lock scope for the whole batch: range tombstones +
+        // memtable. Keys resolved here (value OR tombstone) never touch disk.
+        let mut pending: Vec<(usize, &[u8])> = Vec::new();
+        {
+            let inner = self.inner.read();
+            for (i, k) in keys.iter().enumerate() {
+                let k = k.as_ref();
+                if range_tomb::is_covered(&inner.range_tombs, k) {
+                    continue; // deleted — stays None
+                }
+                if let Some(v) = inner.memtable.get(k) {
+                    if !v.is_empty() {
+                        out[i] = Some(v.clone());
+                    }
+                    continue; // resolved: value or point tombstone
+                }
+                pending.push((i, k));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(out);
+        }
+        // Phase 2 — one newest-first SST walk shared by every unresolved key.
+        // Per-key first-hit-wins is preserved: a key leaves `pending` the
+        // moment the newest table holding it answers (value or tombstone).
+        // Same bounded retry as get() against the compact_async()
+        // vanished-file race, but only still-unresolved keys re-walk.
+        for attempt in 0..2 {
+            SST_VANISHED_RACE.with(|c| c.set(false));
+            let ssts = self.cached_sst_paths()?;
+            for sst in ssts.iter().rev() {
+                if pending.is_empty() {
+                    break;
+                }
+                let table = match self.sst_cached(sst) {
+                    Ok(t) => t,
+                    Err(e) if e.starts_with("VANISHED") => continue,
+                    Err(e) => return Err(e),
+                };
+                pending.retain(|&(i, k)| {
+                    if !table.bloom.may_contain(k) {
+                        return true; // definitely not here — still unresolved
+                    }
+                    match table.lookup_cached(k, Some(&self.block_cache)) {
+                        Some(v) => {
+                            if !v.is_empty() {
+                                out[i] = Some(v);
+                            }
+                            false // resolved: value or tombstone
+                        }
+                        None => true, // bloom false positive — keep looking
+                    }
+                });
+            }
+            let raced = SST_VANISHED_RACE.with(|c| c.get());
+            if pending.is_empty() || !raced || attempt == 1 {
+                break;
+            }
+            self.invalidate_sst_paths();
+        }
+        Ok(out)
+    }
+
     /// Delete a key. Writes a tombstone (empty value) to both WAL and memtable
     /// so the deletion shadows any older copy persisted in an SST.
     pub fn delete(&self, key: &[u8]) -> Result<(), String> {
@@ -2987,6 +3063,58 @@ mod tests {
         db.put(b"key", b"val").unwrap();
         db.delete(b"key").unwrap();
         assert_eq!(db.get(b"key").unwrap(), None);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_get_many_parity_with_get() {
+        // get_many must be byte-identical to per-key get() across every layer
+        // a key can live in: memtable, flushed SSTs, overwrites (newest copy
+        // wins), point tombstones, range tombstones, and plain misses.
+        let tmp = std::env::temp_dir().join("flux-db-test-getmany");
+        let _ = fs::remove_dir_all(&tmp);
+        let db = Database::open(&tmp).unwrap();
+
+        // Layer 1: flushed to SST.
+        for i in 0..50u32 {
+            db.put(format!("sst-{:03}", i).as_bytes(), format!("old-{}", i).as_bytes()).unwrap();
+        }
+        db.flush().unwrap();
+        // Layer 2: newer SST shadowing some of layer 1, plus point deletes.
+        for i in 0..20u32 {
+            db.put(format!("sst-{:03}", i).as_bytes(), format!("new-{}", i).as_bytes()).unwrap();
+        }
+        db.delete(b"sst-030").unwrap();
+        db.flush().unwrap();
+        // Layer 3: memtable-only entries + a memtable overwrite + range delete.
+        db.put(b"mem-a", b"in-memtable").unwrap();
+        db.put(b"sst-040", b"memtable-wins").unwrap();
+        db.delete_range(b"sst-045", b"sst-048").unwrap();
+
+        let mut keys: Vec<Vec<u8>> = (0..50u32).map(|i| format!("sst-{:03}", i).into_bytes()).collect();
+        keys.push(b"mem-a".to_vec());
+        keys.push(b"missing-1".to_vec());
+        keys.insert(7, b"missing-0".to_vec()); // miss in the middle, order must hold
+
+        let batch = db.get_many(&keys).unwrap();
+        assert_eq!(batch.len(), keys.len());
+        for (k, got) in keys.iter().zip(batch.iter()) {
+            let single = db.get(k).unwrap();
+            assert_eq!(got, &single, "get_many diverged from get() on key {:?}", String::from_utf8_lossy(k));
+        }
+        // Spot-check the interesting layers directly.
+        let idx = |k: &[u8]| keys.iter().position(|x| x.as_slice() == k).unwrap();
+        assert_eq!(batch[idx(b"sst-005")].as_deref(), Some(b"new-5" as &[u8]), "newer SST must shadow older");
+        assert_eq!(batch[idx(b"sst-025")].as_deref(), Some(b"old-25" as &[u8]), "unshadowed key reads old SST");
+        assert_eq!(batch[idx(b"sst-030")], None, "point tombstone must hide SST copy");
+        assert_eq!(batch[idx(b"sst-040")].as_deref(), Some(b"memtable-wins" as &[u8]), "memtable shadows SSTs");
+        assert_eq!(batch[idx(b"sst-045")], None, "range tombstone start covered");
+        assert_eq!(batch[idx(b"sst-047")], None, "range tombstone interior covered");
+        assert_eq!(batch[idx(b"mem-a")].as_deref(), Some(b"in-memtable" as &[u8]));
+        assert_eq!(batch[idx(b"missing-0")], None);
+        assert_eq!(batch[idx(b"missing-1")], None);
+        // Empty batch is a clean no-op.
+        assert!(db.get_many(&Vec::<Vec<u8>>::new()).unwrap().is_empty());
         let _ = fs::remove_dir_all(&tmp);
     }
 

@@ -375,12 +375,15 @@ impl HistoryStore {
     }
 
     fn fetch_primaries(&self, ids: &[(u64, u64)]) -> Result<Vec<HistoryEntry>, HistoryError> {
+        // Batched read (Database::get_many): one memtable lock scope + one SST
+        // walk for the whole id list, instead of a full get() per entry. This
+        // is the hot path behind every by_tag/explorer lookup.
+        let keys: Vec<Vec<u8>> = ids.iter().map(|(ts, seq)| time_key(P_PRIMARY, *ts, *seq)).collect();
+        let vals = self.db.get_many(&keys).map_err(HistoryError::Db)?;
         let mut out = Vec::with_capacity(ids.len());
-        for (ts, seq) in ids {
-            if let Some(v) = self.db.get(&time_key(P_PRIMARY, *ts, *seq)).map_err(HistoryError::Db)? {
-                let stored: Stored = serde_json::from_slice(&v).map_err(|e| HistoryError::Codec(e.to_string()))?;
-                out.push(stored.entry);
-            }
+        for v in vals.into_iter().flatten() {
+            let stored: Stored = serde_json::from_slice(&v).map_err(|e| HistoryError::Codec(e.to_string()))?;
+            out.push(stored.entry);
         }
         Ok(out)
     }

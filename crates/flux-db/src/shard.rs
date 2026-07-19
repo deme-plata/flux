@@ -174,10 +174,13 @@ impl ShardedDb {
                     .iter()
                     .zip(parts.iter())
                     .map(|(db, part)| {
-                        s.spawn(move || {
-                            part.iter()
-                                .map(|&(i, k)| db.get(k).map(|v| (i, v)))
-                                .collect()
+                        s.spawn(move || -> Result<Vec<(usize, Option<Vec<u8>>)>, String> {
+                            // One batched read per shard: a single memtable
+                            // lock scope + a single SST walk for the whole
+                            // slice (Database::get_many), not a get() per key.
+                            let ks: Vec<&[u8]> = part.iter().map(|&(_, k)| k).collect();
+                            let vals = db.get_many(&ks)?;
+                            Ok(part.iter().map(|&(i, _)| i).zip(vals).collect())
                         })
                     })
                     .collect();

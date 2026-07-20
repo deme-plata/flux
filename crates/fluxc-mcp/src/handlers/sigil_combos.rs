@@ -489,7 +489,7 @@ fn flux_sigil_heal(args: &Value) -> String {
 }
 
 fn run_heal(path: &std::path::Path, max_attempts: usize) -> String {
-    let output = std::process::Command::new("fluxc")
+    let output = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["heal", &path.to_string_lossy(), "-n", &max_attempts.to_string()])
         .output();
 
@@ -562,7 +562,7 @@ fn flux_sigil_dev(args: &Value) -> String {
     let start = std::time::Instant::now();
 
     // 1. Check
-    let check = std::process::Command::new("fluxc")
+    let check = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["check", "-p", crate_name]).output();
     results.push(json!({
         "step": "check",
@@ -570,7 +570,7 @@ fn flux_sigil_dev(args: &Value) -> String {
     }));
 
     // 2. Test
-    let test = std::process::Command::new("fluxc")
+    let test = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["test", "-p", crate_name]).output();
     results.push(json!({
         "step": "test",
@@ -579,7 +579,7 @@ fn flux_sigil_dev(args: &Value) -> String {
 
     // 3. Chronos simulation
     if !skip_chronos {
-        let chronos = std::process::Command::new("fluxc")
+        let chronos = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["chronos-run", "--nodes", "4", "--messages", "100"]).output();
         results.push(json!({
             "step": "chronos",
@@ -596,7 +596,7 @@ fn flux_sigil_dev(args: &Value) -> String {
 
     // 5. Deploy
     if deploy {
-        let deploy_cmd = std::process::Command::new("fluxc")
+        let deploy_cmd = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["release", crate_name]).output();
         results.push(json!({
             "step": "deploy",

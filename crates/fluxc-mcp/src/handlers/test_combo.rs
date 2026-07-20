@@ -442,19 +442,19 @@ fn flux_dev(args: &Value) -> String {
     let mut steps = Vec::new();
     let start = std::time::Instant::now();
 
-    let check = std::process::Command::new("fluxc")
+    let check = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["check", "-p", package]).output();
     let check_ok = check.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "check", "ok": check_ok}));
 
-    let test = std::process::Command::new("fluxc")
+    let test = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["t", package]).output();
     let test_ok = test.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "test", "ok": test_ok}));
 
     if !skip_ai {
         if let Some(f) = file {
-            let suggest = std::process::Command::new("fluxc")
+            let suggest = std::process::Command::new(fluxc_core::live_fluxc_path())
                 .args(["suggest", f]).output();
             steps.push(json!({"step": "suggest", "ok": suggest.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
         }
@@ -462,12 +462,12 @@ fn flux_dev(args: &Value) -> String {
 
     if !check_ok && !skip_heal {
         let target = file.unwrap_or(package);
-        let heal = std::process::Command::new("fluxc")
+        let heal = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["heal", target, "-n", "3"]).output();
         steps.push(json!({"step": "heal", "ok": heal.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
 
-    let cortex = std::process::Command::new("fluxc")
+    let cortex = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["cortex-summary"]).output();
     steps.push(json!({"step": "cortex", "ok": cortex.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
 
@@ -475,7 +475,7 @@ fn flux_dev(args: &Value) -> String {
     steps.push(json!({"step": "webhooks", "listeners": listener_count}));
 
     if deploy && check_ok && test_ok {
-        let dep = std::process::Command::new("fluxc")
+        let dep = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["release", package]).output();
         steps.push(json!({"step": "deploy", "ok": dep.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
@@ -503,8 +503,15 @@ fn flux_develop(args: &Value) -> String {
     let mut steps = Vec::new();
     let start = std::time::Instant::now();
 
-    // 1. Flux-rev snapshot
-    let rev = std::process::Command::new("flux-rev")
+    // 1. Flux-rev snapshot — resolve as a sibling of the live fluxc binary
+    // (same target/debug dir); bare "flux-rev" is PATH-dependent and the MCP
+    // server's non-interactive env rarely has it.
+    let flux_rev_bin = fluxc_core::live_fluxc_path()
+        .parent()
+        .map(|d| d.join("flux-rev"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("flux-rev"));
+    let rev = std::process::Command::new(&flux_rev_bin)
         .args(["snapshot", "--message", message, "--author", "flux_develop"]).output();
     let rev_ok = rev.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "snapshot", "ok": rev_ok,
@@ -512,46 +519,46 @@ fn flux_develop(args: &Value) -> String {
     }));
 
     // 2. Build
-    let build = std::process::Command::new("fluxc")
+    let build = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["build", "-p", package]).output();
     let build_ok = build.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "build", "ok": build_ok}));
 
     // 3. AI Cortex review
     if !skip_ai {
-        let ai = std::process::Command::new("fluxc")
+        let ai = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["cortex-ai", "review", "--json"]).output();
         steps.push(json!({"step": "cortex-ai", "ok": ai.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
 
     // 4. Auto-heal if build failed
     if !build_ok && !skip_heal {
-        let heal = std::process::Command::new("fluxc")
+        let heal = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["heal", &format!("crates/{}/src/lib.rs", package), "-n", "3"]).output();
         let heal_ok = heal.as_ref().map(|o| o.status.success()).unwrap_or(false);
         steps.push(json!({"step": "heal", "ok": heal_ok}));
         // Rebuild after heal
         if heal_ok {
-            let rebuild = std::process::Command::new("fluxc")
+            let rebuild = std::process::Command::new(fluxc_core::live_fluxc_path())
                 .args(["build", "-p", package]).output();
             steps.push(json!({"step": "rebuild", "ok": rebuild.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
         }
     }
 
     // 5. Test
-    let test = std::process::Command::new("fluxc")
+    let test = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["test", "-p", package]).output();
     let test_ok = test.as_ref().map(|o| o.status.success()).unwrap_or(false);
     steps.push(json!({"step": "test", "ok": test_ok}));
 
     // 6. Cortex summary
-    let cortex = std::process::Command::new("fluxc")
+    let cortex = std::process::Command::new(fluxc_core::live_fluxc_path())
         .args(["cortex-summary"]).output();
     steps.push(json!({"step": "cortex", "ok": cortex.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
 
     // 7. Deploy
     if deploy {
-        let dep = std::process::Command::new("fluxc")
+        let dep = std::process::Command::new(fluxc_core::live_fluxc_path())
             .args(["release", package]).output();
         steps.push(json!({"step": "deploy", "ok": dep.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }

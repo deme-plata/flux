@@ -183,12 +183,14 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_sigil_benchmark",
-            description: "Run a SIGIL chronos benchmark (turbosync = verify-every-block sync, or market = trades/s). \
-                          Real blocks/sec. Args: [mode=turbosync], [blocks=100000].",
+            description: "SIGIL benchmark. mode=live (RULE 0) measures the RUNNING node over FLUX_SIGIL_RPC: \
+                          block rate, state-height rate, live TPS from /recent tx timestamps, API latency p50/p95 — \
+                          args [seconds=15]. mode=turbosync/market run the chronos sim benches (args [blocks=100000]).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "mode": {"type": "string", "enum": ["turbosync", "market"]},
+                    "mode": {"type": "string", "enum": ["live", "turbosync", "market"]},
+                    "seconds": {"type": "number", "description": "live mode: measurement window (default 15, clamp 3-120)"},
                     "blocks": {"type": "number"}
                 }
             }),
@@ -338,6 +340,12 @@ fn sigil_batch(a: &Value) -> String {
 fn sigil_benchmark(a: &Value) -> String {
     let mode = arg_str(a, "mode", "turbosync");
     let blocks = arg_u128(a, "blocks", 100_000);
+    // mode=live — RULE 0: measure the RUNNING node (block rate, height rate,
+    // live TPS, API latency percentiles) over `seconds`, not a chronos replay.
+    if mode == "live" {
+        let seconds = a.get("seconds").and_then(|v| v.as_u64()).unwrap_or(15);
+        return crate::handlers::sigil_wallet::live_node_bench(seconds);
+    }
     // Honest: run the real bench if its binary is reachable; otherwise report the
     // last measured figure + the exact command, never a fabricated number.
     let bench_bin = std::env::var("SIGIL_BENCH_BIN").ok();

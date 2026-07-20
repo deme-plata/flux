@@ -515,9 +515,137 @@ fn wallet_sdk(a: &Value) -> String {
     }
 }
 
+// ── LIVE node benchmark (SIGIL RULE 0) ─────────────────────────────────────
+//
+// Every existing SIGIL bench is a sim: chronos replay (flux_sigil_benchmark
+// turbosync/market), virtual-time pipeline gates (commit_pipeline_bench), or
+// build-time prediction (flux_benchmark). RULE 0 says measure the LIVE path —
+// this does, over the same FLUX_SIGIL_RPC transport the wallet tools use, so
+// it works on-box (:8099) and off-box (:8843). Every number comes off the
+// wire during the window; nothing is fabricated or replayed.
+
+/// GET with measured round-trip; returns (parsed json, rtt_ms) on success.
+fn timed_get(path: &str) -> Option<(Value, f64)> {
+    let s = std::time::Instant::now();
+    let body = get(path);
+    let rtt = s.elapsed().as_secs_f64() * 1000.0;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) { Some((v, rtt)) } else { None }
+}
+
+/// (entries, span_secs, rate_per_sec) over the ts_ms range of /recent rows.
+/// rate uses N-1 intervals across the span — the honest per-second rate of
+/// the OBSERVED tail, not an extrapolation.
+fn recent_rate(kind: &str, limit: usize) -> (usize, f64, f64) {
+    let body = get(&format!("/api/v1/recent?kind={kind}&limit={limit}"));
+    let Ok(v) = serde_json::from_str::<Value>(&body) else { return (0, 0.0, 0.0) };
+    let ts: Vec<u64> = v["results"].as_array().map(|rows| {
+        rows.iter().filter_map(|r| r["ts"].as_u64()).collect()
+    }).unwrap_or_default();
+    if ts.len() < 2 { return (ts.len(), 0.0, 0.0); }
+    let (mn, mx) = (*ts.iter().min().unwrap(), *ts.iter().max().unwrap());
+    let span = ((mx - mn) as f64 / 1000.0).max(0.001);
+    (ts.len(), span, (ts.len() as f64 - 1.0) / span)
+}
+
+/// Poll the live node for `window_secs` and report block rate, state-height
+/// rate, live TPS, and API latency percentiles. Exposed to the MCP as
+/// `flux_sigil_benchmark mode=live`.
+pub fn live_node_bench(window_secs: u64) -> String {
+    let secs = window_secs.clamp(3, 120);
+    let t0 = std::time::Instant::now();
+    let mut lat_ms: Vec<f64> = Vec::new();
+    let mut first: Option<(f64, u64, u64)> = None; // (t_rel, block_height, height)
+    let mut last: Option<(f64, u64, u64)> = None;
+    let mut genesis_us: Option<u64> = None;
+    let mut errors = 0usize;
+    while t0.elapsed().as_secs() < secs {
+        match timed_get("/api/v1/tip") {
+            Some((v, rtt)) => {
+                lat_ms.push(rtt);
+                let bh = v["block_height"].as_u64().unwrap_or(0);
+                let h = v["height"].as_u64().unwrap_or(0);
+                if genesis_us.is_none() {
+                    genesis_us = v["genesis_ts_us"].as_str().and_then(|s| s.parse().ok())
+                        .or_else(|| v["genesis_ts_us"].as_u64());
+                }
+                let now = t0.elapsed().as_secs_f64();
+                if first.is_none() { first = Some((now, bh, h)); }
+                last = Some((now, bh, h));
+            }
+            None => errors += 1,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+    let (Some((t_a, bh_a, h_a)), Some((t_b, bh_b, h_b))) = (first, last) else {
+        return json!({
+            "ok": false, "mode": "live",
+            "error": format!("live node unreachable for the whole {secs}s window ({errors} failed polls)"),
+            "endpoint": rpc_base(),
+            "hint": "set FLUX_SIGIL_RPC to a reachable sigil-rpcd (on-box http://127.0.0.1:8099)"
+        }).to_string();
+    };
+    let dt = (t_b - t_a).max(0.001);
+    let block_rate = bh_b.saturating_sub(bh_a) as f64 / dt;
+    let height_rate = h_b.saturating_sub(h_a) as f64 / dt;
+    let lifetime_rate = genesis_us.and_then(|g| {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).ok()?.as_micros() as u64;
+        let since = now_us.saturating_sub(g) as f64 / 1e6;
+        (since > 1.0).then(|| bh_b as f64 / since)
+    });
+    let (tx_n, tx_span, tps) = recent_rate("tx", 200);
+    let (blk_n, blk_span, blk_recent_rate) = recent_rate("block", 100);
+    lat_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f64| lat_ms[((lat_ms.len() as f64 - 1.0) * p).round() as usize];
+    let report = json!({
+        "ok": true, "mode": "live", "rule0": "measured on the LIVE node — no sim, no replay",
+        "endpoint": rpc_base(), "window_secs": dt, "polls": lat_ms.len(), "failed_polls": errors,
+        "height": {"start": h_a, "end": h_b, "rate_per_sec": height_rate},
+        "blocks": {
+            "start": bh_a, "end": bh_b, "rate_per_sec_window": block_rate,
+            "rate_per_sec_recent_tail": blk_recent_rate,
+            "recent_tail": {"entries": blk_n, "span_secs": blk_span},
+            "rate_per_sec_lifetime_avg": lifetime_rate
+        },
+        "tps": {"live": tps, "observed_tx": tx_n, "span_secs": tx_span},
+        "api_latency_ms": {"p50": pct(0.50), "p95": pct(0.95), "max": pct(1.0)}
+    });
+    format!(
+        "⬡ SIGIL LIVE node benchmark — {} · {:.1}s window · {} polls ({} failed)\n\
+         height     {} → {}  ({:.3} h/s)\n\
+         blocks     {} → {}  ({:.3} blk/s window · {:.3} blk/s recent tail · {} blk/s lifetime avg)\n\
+         live TPS   {:.3}  ({} tx over {:.1}s observed tail)\n\
+         API rtt    p50 {:.1} ms · p95 {:.1} ms · max {:.1} ms\n\
+         RULE 0: every number measured on the live node this window.\n{}",
+        rpc_base(), dt, lat_ms.len(), errors,
+        h_a, h_b, height_rate,
+        bh_a, bh_b, block_rate, blk_recent_rate,
+        lifetime_rate.map(|r| format!("{r:.4}")).unwrap_or_else(|| "—".into()),
+        tps, tx_n, tx_span,
+        pct(0.50), pct(0.95), pct(1.0),
+        report
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RULE 0 smoke: when a real rpcd is reachable, the live bench must
+    /// return measured numbers (ok:true + polls>0). Skips silently when no
+    /// node is up so CI stays hermetic — the live run is the real gate.
+    #[test]
+    fn live_bench_measures_real_node_when_up() {
+        if serde_json::from_str::<Value>(&get("/api/v1/tip")).ok()
+            .and_then(|v| v.get("ok").and_then(|b| b.as_bool())) != Some(true) {
+            eprintln!("live_bench smoke: no reachable rpcd at {} — skipped", rpc_base());
+            return;
+        }
+        let out = live_node_bench(3);
+        assert!(out.contains("\"ok\":true") || out.contains("\"ok\": true"), "bench must report ok on a live node: {out}");
+        assert!(out.contains("LIVE node benchmark"), "human panel missing");
+    }
 
     #[test]
     fn create_wallet_is_valid_ed25519() {

@@ -131,10 +131,106 @@ fn closure_sidecar_for(cache_key: &str) -> PathBuf {
 
 /// Recognised emit extensions. The empty string covers static-libs / binaries
 /// that rustc emits without an extension (e.g. an `--emit=link` binary).
-// Cache T3: `.d` (dep-info) is deliberately NOT cached. It's a Makefile fragment of ABSOLUTE
-// source/dep/out paths from the producing build; restoring it into another out-dir makes cargo
-// either error or silently mark the unit dirty. rustc regenerates it for free, so we never restore it.
+// Cache T3 (revised): `.d` (dep-info) IS cached, but never raw-restored. The original T3 dropped it
+// entirely ("rustc regenerates it for free") — false on the HIT path, where rustc never runs: cargo
+// then has no dep-info to encode into .fingerprint/dep-lib-*, logs "fingerprint error", and the unit
+// goes StaleItem(MissingFile dep-lib-*) DIRTY on every subsequent build forever (measured 2026-07-21:
+// 19 permanently-dirty registry roots cascading into 166 dirty units, sigil "no-op" check = 216s).
+// The stale-absolute-path hazard T3 was guarding against is handled at restore time instead:
+// restore_dep_info() validates every dep path against THIS invocation and rewrites the volatile
+// target side; anything unverifiable is a MISS, never a guess.
 const CACHEABLE_EXTS: &[&str] = &["rmeta", "rlib"];
+
+/// Cache T3-fix: where THIS invocation's dep-info (.d) lands — `Some(path)` when `--emit` includes
+/// dep-info (every real cargo unit does). An explicit `dep-info=<path>` wins; otherwise rustc's
+/// default `<out_dir>/<crate_name><extra-filename>.d`.
+fn dep_info_dest(args: &[String]) -> Option<PathBuf> {
+    let mut emit = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--emit" && i + 1 < args.len() { emit = args[i + 1].clone(); break; }
+        if let Some(v) = args[i].strip_prefix("--emit=") { emit = v.to_string(); break; }
+        i += 1;
+    }
+    for part in emit.split(',') {
+        let mut it = part.splitn(2, '=');
+        if it.next() != Some("dep-info") { continue; }
+        if let Some(p) = it.next() { return Some(PathBuf::from(p)); }
+        let out_dir = find_out_dir(args);
+        let cn = find_crate_name(args);
+        if out_dir.is_empty() || cn.is_empty() { return None; }
+        return Some(PathBuf::from(out_dir).join(format!("{}{}.d", cn, find_extra_filename(args))));
+    }
+    None
+}
+
+/// Split the RHS of a makefile dep line on unescaped spaces (rustc escapes embedded spaces as `\ `).
+fn split_dep_paths(rhs: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut cur = String::new();
+    let mut chars = rhs.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&' ') => { cur.push(' '); chars.next(); }
+            ' ' => { if !cur.is_empty() { v.push(std::mem::take(&mut cur)); } }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() { v.push(cur); }
+    v
+}
+
+/// Cache T3-fix: validated dep-info restore. The stored .d's TARGET side embeds the PRODUCING
+/// build's out-dir (volatile) and its DEP side lists the source files the unit was compiled from.
+/// Parse the blob; REQUIRE the current positional .rs source among the deps and every dep path to
+/// exist on this filesystem (a cross-workspace path mismatch is a MISS, never a guess — the exact
+/// hazard the original T3 removal was about); then rewrite the target side to THIS invocation's
+/// out-dir and write atomically. Preserves `# env-dep:` lines verbatim (cargo fingerprints env-var
+/// deps from them).
+fn restore_dep_info(blob_dir: &Path, stored: &str, dest: &Path, rustc_args: &[String], out_dir: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(blob_dir.join(stored)) else { return false };
+    let src_file = rustc_args.iter()
+        .find(|a| a.ends_with(".rs") && !a.starts_with("--"))
+        .cloned().unwrap_or_default();
+    let mut deps: Vec<String> = Vec::new();
+    let mut env_lines: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        if line.starts_with('#') {
+            if line.starts_with("# env-dep:") { env_lines.push(line); }
+            continue;
+        }
+        let Some((_, rhs)) = line.split_once(": ") else { continue };
+        for p in split_dep_paths(rhs) {
+            if !deps.contains(&p) { deps.push(p); }
+        }
+    }
+    if deps.is_empty() { return false; }
+    if !src_file.is_empty() && !deps.iter().any(|d| d == &src_file) { return false; }
+    for d in &deps {
+        if !Path::new(d).exists() { return false; }
+    }
+    let cn = find_crate_name(rustc_args);
+    let extra = find_extra_filename(rustc_args);
+    let dep_list = deps.iter().map(|d| d.replace(' ', "\\ ")).collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for ext in CACHEABLE_EXTS {
+        let f = out_dir.join(format!("lib{}{}.{}", cn, extra, ext));
+        if f.exists() { out.push_str(&format!("{}: {}\n", f.display(), dep_list)); }
+    }
+    out.push_str(&format!("{}: {}\n", dest.display(), dep_list));
+    out.push('\n');
+    for d in &deps { out.push_str(&format!("{}:\n", d.replace(' ', "\\ "))); }
+    if !env_lines.is_empty() {
+        out.push('\n');
+        for l in env_lines { out.push_str(l); out.push('\n'); }
+    }
+    let tmp = dest.with_extension(format!("d.tmp.{}", std::process::id()));
+    if fs::write(&tmp, out).is_err() { let _ = fs::remove_file(&tmp); return false; }
+    match fs::rename(&tmp, dest) {
+        Ok(()) => true,
+        Err(_) => { let _ = fs::remove_file(&tmp); false }
+    }
+}
 
 /// Scan `out_dir` for files belonging to this crate's compilation and return
 /// the matching file names (without the directory prefix). Recognised by
@@ -256,6 +352,25 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
                     }
                 }
             }
+            // Cache T3-fix: ALSO capture the dep-info (.d) rustc just wrote. Without it a later
+            // cache HIT skips rustc, cargo never gets dep-info to encode into .fingerprint/
+            // dep-lib-*, and the unit is dirty on every subsequent build forever. Restore is
+            // validated + path-rewritten (restore_dep_info), so the original T3 stale-path
+            // hazard stays fixed.
+            if !outputs.is_empty() {
+                if let Some(d_path) = dep_info_dest(&raw_args) {
+                    if d_path.exists() {
+                        if let (Some(dir), Some(name)) = (
+                            d_path.parent(),
+                            d_path.file_name().map(|n| n.to_string_lossy().to_string()),
+                        ) {
+                            if let Some(stored) = copy_output_to_blob(dir, &blob_dir, &name) {
+                                outputs.insert("d".to_string(), stored);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -311,6 +426,12 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     for ext in required_exts(rustc_args) {
         if !entry.outputs.contains_key(ext) { return false; }
     }
+    // Cache T3-fix gate: when this invocation emits dep-info (every real cargo unit does), a hit
+    // MUST also restore a .d — a restore without one leaves the fingerprint permanently incomplete
+    // (dep-lib-* never written -> unit dirty on every future build; the sigil 216s "no-op" bug).
+    // Entries stored before this fix carry no "d" blob: MISS once, real rustc re-stores complete.
+    let dep_dest = dep_info_dest(rustc_args);
+    if dep_dest.is_some() && !entry.outputs.contains_key("d") { return false; }
     // T2c closure-consistency guard (the partial-hit ICE fix): a restored crate's rmeta embeds
     // references to the EXACT deps it was compiled against. Filename-identity keys match on a dep's
     // stable filename, but its rmeta CONTENT can still differ (rustc is non-deterministic), so a dep
@@ -352,7 +473,8 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     let blob_dir = blob_dir_for(&entry.source_hash);
     if !blob_dir.exists() { return false; }
     let out_dir_path = PathBuf::from(&out_dir);
-    for file_name in entry.outputs.values() {
+    for (ext, file_name) in &entry.outputs {
+        if ext == "d" { continue; } // dep-info is validated + rewritten below, never raw-restored
         if !restore_output_from_blob(&blob_dir, &out_dir_path, file_name) {
             return false;
         }
@@ -371,6 +493,12 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
                 return false;
             }
         }
+    }
+    // Cache T3-fix: materialize the dep-info LAST, once the hit is otherwise definitive, so cargo
+    // can encode a complete fingerprint (dep-lib-*) exactly as if rustc had run. Validation failure
+    // (foreign paths, missing sources) is a MISS — real rustc then rewrites everything it touched.
+    if let (Some(dest), Some(stored)) = (dep_dest, entry.outputs.get("d")) {
+        if !restore_dep_info(&blob_dir, stored, &dest, rustc_args, &out_dir_path) { return false; }
     }
     true
 }
@@ -481,6 +609,116 @@ mod tests {
         assert_eq!(fs::read(out_dir.join("libdemo-deadbeef.rlib")).unwrap(), rlib_content);
 
         std::env::set_current_dir(&orig_cwd).unwrap();
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    /// T3-fix: a dep-info-emitting unit round-trips its .d through the cache — collect stores it,
+    /// apply validates + rewrites it into THIS out-dir so cargo can persist a complete fingerprint.
+    #[test]
+    fn dep_info_roundtrip() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("depinfo");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"// depinfo").unwrap();
+        let src_str = src_file.to_string_lossy().to_string();
+        fs::write(out_dir.join("libdemo-d1d1d1.rmeta"), b"rm").unwrap();
+        fs::write(out_dir.join("libdemo-d1d1d1.rlib"), b"rl").unwrap();
+        // A producing-build .d: volatile target side, real dep side (+ an env-dep line).
+        fs::write(
+            out_dir.join("demo-d1d1d1.d"),
+            format!("/OLD/out/libdemo-d1d1d1.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:CARGO_PKG_NAME=demo\n"),
+        ).unwrap();
+
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(), "extra-filename=-d1d1d1".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_str.clone(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src_str), &args);
+        let entry = collect_outputs(&args, &key);
+        assert!(entry.outputs.contains_key("d"), "collect must capture the .d — got {:?}", entry.outputs);
+
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(apply_cached_outputs(&entry, &args), "hit with valid dep-info must apply");
+        let restored = fs::read_to_string(out_dir.join("demo-d1d1d1.d")).unwrap();
+        assert!(restored.contains(&src_str), "restored .d must list the real source dep");
+        assert!(restored.contains(out_dir.to_string_lossy().as_ref()), "target side must be rewritten to THIS out-dir");
+        assert!(!restored.contains("/OLD/out/"), "producing build's volatile out-dir must be gone");
+        assert!(restored.contains("# env-dep:CARGO_PKG_NAME=demo"), "env-dep lines must survive verbatim");
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    /// T3-fix healing path: a pre-fix entry (no "d" blob) served to a dep-info-emitting invocation
+    /// is a MISS — real rustc then re-stores the entry complete. Without this gate the hit would
+    /// re-poison the fingerprint (the sigil 216s no-op bug).
+    #[test]
+    fn legacy_entry_without_dep_info_is_miss() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("legacy-d");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"// legacy").unwrap();
+        let src_str = src_file.to_string_lossy().to_string();
+        fs::write(out_dir.join("libdemo-e2e2e2.rmeta"), b"rm").unwrap();
+        fs::write(out_dir.join("libdemo-e2e2e2.rlib"), b"rl").unwrap();
+        // NO .d in out_dir → collect stores a legacy-shaped entry without a "d" blob.
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(), "extra-filename=-e2e2e2".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_str.clone(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src_str), &args);
+        let entry = collect_outputs(&args, &key);
+        assert!(!entry.outputs.contains_key("d"));
+        assert!(!apply_cached_outputs(&entry, &args), "dep-info-emitting hit without a .d blob must MISS");
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    /// T3-fix fail-closed: a stored .d referencing paths that don't exist here (cross-workspace /
+    /// deleted sources) is unverifiable — MISS, never a guess. This is the exact hazard the
+    /// original T3 removal was guarding against, kept fixed.
+    #[test]
+    fn dep_info_foreign_paths_is_miss() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("foreign-d");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"// foreign").unwrap();
+        let src_str = src_file.to_string_lossy().to_string();
+        fs::write(out_dir.join("libdemo-f3f3f3.rmeta"), b"rm").unwrap();
+        fs::write(out_dir.join("libdemo-f3f3f3.rlib"), b"rl").unwrap();
+        fs::write(
+            out_dir.join("demo-f3f3f3.d"),
+            format!("/OLD/out/libdemo-f3f3f3.rmeta: {src_str} /nonexistent-flux-test/gone.rs\n"),
+        ).unwrap();
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(), "extra-filename=-f3f3f3".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_str.clone(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src_str), &args);
+        let entry = collect_outputs(&args, &key);
+        assert!(entry.outputs.contains_key("d"));
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(!apply_cached_outputs(&entry, &args), "unverifiable dep paths must MISS");
         fs::remove_dir_all(&workspace).ok();
     }
 

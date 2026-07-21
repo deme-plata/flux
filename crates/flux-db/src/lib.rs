@@ -1499,6 +1499,66 @@ impl Database {
             }
             // v0.36: the WAL is empty again — reset the auto-flush counter.
             inner.wal_bytes = 0;
+        } else if inner.wal_file.is_some() {
+            // v0.38.1 WAL REWRITE (flush-storm fix, measured live): a BACKGROUND flush
+            // racing continuous writes can never take the truncate branch above, so
+            // `wal_bytes` never reset — once past `max_wal_bytes` the auto-flush trigger
+            // stayed permanently armed and fired on EVERY batch (a storm of tiny SSTs +
+            // compactions; a real chain sync collapsed from ~10k to ~124 blk/s). The
+            // snapshot's entries are durable in the SST now; only the SURVIVING memtable
+            // entries (the writes that raced this flush — seconds' worth) still need the
+            // WAL. Rewrite it to exactly those: tmp file → fsync → atomic rename → reopen
+            // (Windows can't rename over an open handle, so the old handle drops first;
+            // on ANY failure the original WAL is still intact and gets re-opened).
+            let survivors: Vec<(Vec<u8>, Vec<u8>)> =
+                inner.memtable.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let wal_path = self.path.join("flux.wal");
+            let tmp_path = self.path.join("flux.wal.rewrite");
+            let rewritten: Result<u64, String> = (|| {
+                let mut f = fs::File::create(&tmp_path)
+                    .map_err(|e| format!("wal rewrite create: {e}"))?;
+                let mut nb = 0u64;
+                for (k, v) in &survivors {
+                    nb += write_wal_entry(Some(&mut f), k, v)?;
+                }
+                f.sync_all().map_err(|e| format!("wal rewrite fsync: {e}"))?;
+                Ok(nb)
+            })();
+            match rewritten {
+                Ok(nb) => {
+                    inner.wal_file = None; // close before rename (Windows)
+                    match fs::rename(&tmp_path, &wal_path) {
+                        Ok(()) => {
+                            match fs::OpenOptions::new().read(true).write(true).open(&wal_path) {
+                                Ok(mut f) => {
+                                    let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0));
+                                    inner.wal_file = Some(f);
+                                    inner.wal_bytes = nb;
+                                }
+                                Err(e) => return Err(format!("wal rewrite reopen: {e}")),
+                            }
+                        }
+                        Err(e) => {
+                            // rename failed — the ORIGINAL WAL is still on disk; reopen it.
+                            let _ = fs::remove_file(&tmp_path);
+                            match fs::OpenOptions::new().read(true).write(true).open(&wal_path) {
+                                Ok(mut f) => {
+                                    let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0));
+                                    inner.wal_file = Some(f);
+                                }
+                                Err(re) => return Err(format!("wal rewrite rename failed ({e}) and reopen failed ({re})")),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    // Keep the fat WAL — correctness unaffected, only the counter stays high.
+                    if std::env::var_os("FLUX_DB_QUIET").is_none() {
+                        eprintln!("[flux-db] wal rewrite skipped: {e}");
+                    }
+                }
+            }
         }
         drop(inner);
 
@@ -4273,6 +4333,46 @@ mod tests {
         let largest_le_20 = db.iter_from_back(&20u64.to_be_bytes()).next().unwrap();
         let h = u64::from_be_bytes(largest_le_20.0.as_slice().try_into().unwrap());
         assert_eq!(h, 18);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn wal_cap_background_flush_does_not_storm() {
+        // v0.38.1: under CONTINUOUS writes the background auto-flush races every write,
+        // so the old truncate-only path never reset `wal_bytes` — the trigger stayed
+        // permanently armed (flush storm; a live chain sync collapsed to ~124 blk/s).
+        // The WAL rewrite must keep the on-disk WAL bounded AND lose nothing.
+        let tmp = std::env::temp_dir().join("flux-db-test-wal-storm");
+        let _ = fs::remove_dir_all(&tmp);
+        let cap: u64 = 32 * 1024;
+        let db = Database::open(&tmp).unwrap().with_max_wal_bytes(cap);
+        let val = |i: u32| format!("storm-value-{i:08}").into_bytes();
+        let n: u32 = 20_000; // ~500 KB of WAL traffic = many cap trips
+        for i in 0..n {
+            db.put(format!("s{i:08}").as_bytes(), &val(i)).unwrap();
+        }
+        // Let any in-flight background flush finish, then check the WAL stayed bounded.
+        let t0 = std::time::Instant::now();
+        while db.flushing.load(std::sync::atomic::Ordering::SeqCst)
+            || db.compacting.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            assert!(t0.elapsed().as_secs() < 60, "background flush/compact hung");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let wal_len = tmp.join("flux.wal").metadata().map(|m| m.len()).unwrap_or(0);
+        assert!(
+            wal_len < cap.saturating_mul(8),
+            "WAL grew unbounded under continuous writes: {} bytes (cap {})",
+            wal_len, cap
+        );
+        // PRESENCE: nothing lost through the rewrites.
+        for i in 0..n {
+            assert_eq!(
+                db.get(format!("s{i:08}").as_bytes()).unwrap().as_deref(),
+                Some(val(i).as_slice()),
+                "key s{i:08} lost after WAL rewrite cycles"
+            );
+        }
         let _ = fs::remove_dir_all(&tmp);
     }
 

@@ -485,10 +485,19 @@ impl NetworkManager {
                                 if now < retry.1 {
                                     continue;
                                 }
-                                let delay_secs = match retry.0 {
-                                    0 => 3,
-                                    1 => 6,
-                                    _ => 12,
+                                // v0.31 FAST FIRST PEER: with ZERO connected peers the node is
+                                // useless — sync gated, mining blind — so recover at 1/2/4s
+                                // instead of 3/6/12s (measured: eager dial + mesh registration
+                                // lands a reachable peer in 1-4s; a missed eager dial shouldn't
+                                // triple that). With a non-empty pool the gentler 3/6/12s holds
+                                // (a missing 4th peer is not urgent; don't hammer dead hosts).
+                                let delay_secs = match (pool_empty, retry.0) {
+                                    (true, 0) => 1,
+                                    (true, 1) => 2,
+                                    (true, _) => 4,
+                                    (false, 0) => 3,
+                                    (false, 1) => 6,
+                                    (false, _) => 12,
                                 };
                                 retry.0 = retry.0.saturating_add(1);
                                 retry.1 = now + std::time::Duration::from_secs(delay_secs);

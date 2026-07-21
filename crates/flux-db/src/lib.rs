@@ -179,6 +179,9 @@ pub struct Database {
     /// synchronous-completion contract (callers assume real work happened by the
     /// time compact() returns; see test_v15_compaction_promotes_to_l1).
     compact_lock: Arc<parking_lot::Mutex<()>>,
+    /// v0.38: true while a background WAL-cap flush thread is running (single-flight).
+    /// Shared across clones. See `flush_background` / `auto_flush_if_needed`.
+    flushing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct DbInner {
@@ -425,6 +428,7 @@ impl Database {
             sst_paths: Arc::new(RwLock::new(None)),
             compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             compact_lock: Arc::new(parking_lot::Mutex::new(())),
+            flushing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -444,6 +448,7 @@ impl Database {
             sst_paths: self.sst_paths,
             compacting: self.compacting,
             compact_lock: self.compact_lock,
+            flushing: self.flushing,
         }
     }
 
@@ -523,6 +528,37 @@ impl Database {
     /// calling this under a `put()`/`batch_put()` guard would deadlock.
     /// Auto-flush failure never fails the triggering write: the data is
     /// already durable in WAL + memtable, so we log and move on.
+    /// v0.38: single-flight BACKGROUND flush. Returns true if a flush is running
+    /// (just spawned or already in flight); false if we won the flag but the OS
+    /// refused a thread (caller should flush inline). Same flush(), same durability —
+    /// only the calling thread changes; flush() already snapshots under a read lock
+    /// and writes the SST lock-free, so writers/readers proceed during it.
+    pub fn flush_background(&self) -> bool {
+        if self.flushing
+            .compare_exchange(false, true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst).is_err()
+        {
+            return true; // already in flight
+        }
+        let db = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("flux-db-flush".into())
+            .spawn(move || {
+                struct Guard(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); }
+                }
+                let _g = Guard(db.flushing.clone());
+                let _ = db.flush();
+            });
+        if spawned.is_err() {
+            self.flushing.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
     fn auto_flush_if_needed(&self) {
         let (wal_bytes, max) = {
             let inner = self.inner.read();
@@ -531,12 +567,22 @@ impl Database {
         if max == 0 || wal_bytes <= max {
             return;
         }
-        if let Err(e) = self.flush() {
-            eprintln!(
-                "flux-db: auto-flush at {} WAL bytes (threshold {}) failed: {} — \
-                 continuing; data is safe in WAL+memtable",
-                wal_bytes, max, e
-            );
+        // v0.38 ASYNC AUTO-FLUSH (measured): this flush ran INLINE inside put()/batch_put()
+        // on the writer thread — at a sustained ~10k blk/s chain sync that's a 1-4 s
+        // memtable→SST write holding the apply loop every time the WAL cap trips (the
+        // residual stall after compaction went background). Flush in the background,
+        // single-flight. BACKPRESSURE: if the WAL outruns the background flush past 4×
+        // the cap (writer faster than the disk), flush INLINE — bounded WAL growth =
+        // bounded crash-replay time; the stall is the honest cost of a saturated disk.
+        let inline = wal_bytes > max.saturating_mul(4) || !self.flush_background();
+        if inline {
+            if let Err(e) = self.flush() {
+                eprintln!(
+                    "flux-db: auto-flush at {} WAL bytes (threshold {}) failed: {} — \
+                     continuing; data is safe in WAL+memtable",
+                    wal_bytes, max, e
+                );
+            }
         }
     }
 
@@ -1141,6 +1187,7 @@ impl Clone for Database {
             sst_paths: Arc::clone(&self.sst_paths),
             compacting: Arc::clone(&self.compacting),
             compact_lock: Arc::clone(&self.compact_lock),
+            flushing: Arc::clone(&self.flushing),
         }
     }
 }
@@ -1478,55 +1525,69 @@ impl Database {
             // defer_compaction (bulk load) keeps the inline path — it wants the settle now.
             let deferring = self.inner.read().defer_compaction;
             if deferring {
-                self.compact()?;
-            } else if self.compacting
-                .compare_exchange(false, true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst).is_ok()
-            {
-                // NOTE: this flag guards ONLY the flush-spawned background compaction.
-                // The inline defer path above, compact_async, and the ingest bulk paths
-                // reach compact() without it — harmless today (fresh sequences => distinct
-                // output names, duplicate remove_file is NotFound-tolerant, both
-                // memtable-clear guards decline under a racing sequence bump), but unify
-                // all entry points under this gate before any caller toggles
-                // defer_compaction at runtime mid-ingest. (adversarial review, follow-up 2)
-                let db = self.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("flux-db-compact".into())
-                    .spawn(move || {
-                        // Drop guard resets the flag even if compact() panics.
-                        struct Guard(Database);
-                        impl Drop for Guard {
-                            fn drop(&mut self) {
-                                self.0.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
-                            }
-                        }
-                        let _g = Guard(db.clone());
-                        // v0.37: call compact_inner() (not the public compact(), which
-                        // would just re-take the same compact_lock this thread is about
-                        // to take -- fine either way, but going direct avoids one extra
-                        // layer). The lock is the REAL mutual-exclusion primitive now;
-                        // `compacting` above is only flush's own fast-path hint to skip
-                        // spawning a redundant thread.
-                        let _lock = db.compact_lock.lock();
-                        let _ = db.compact_inner();
-                    });
-                if spawned.is_err() {
-                    // thread::Builder::spawn returned Err (the OS refused a thread under
-                    // resource pressure — the epsilon overload condition). The Drop guard
-                    // lives inside the closure that never ran, so WITHOUT this reset the
-                    // flag would be stuck true forever and auto-compaction would be silently
-                    // disabled (unbounded L0 growth). Reset it and fall back to an INLINE
-                    // compaction so the store still settles. (adversarial review, follow-up 1)
-                    self.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
+                // v0.38 ASYNC-SETTLE (measured on a live ~10k blk/s SIGIL sync): the bulk/
+                // deferred path compacted INLINE at its raised threshold ("wants the settle
+                // now") — a 384 MiB L0→L1 merge froze the apply loop 9-13 s, the operator-
+                // visible periodic "rate 0". Settle in the BACKGROUND like the eager path,
+                // with RUNAWAY BACKPRESSURE: if L0 has grown past 2× the bulk threshold
+                // (ingest outpacing the running merge), fall back to the old inline settle —
+                // compact() blocks on compact_lock behind the in-flight merge, which IS the
+                // write-stall, bounded and deliberate, so reads never degrade unboundedly.
+                let runaway = sst_count > threshold.saturating_mul(2);
+                if runaway || !self.spawn_background_compact() {
                     self.compact()?;
                 }
+            } else if !self.spawn_background_compact() {
+                // We won the flag but the OS refused a thread (resource pressure — the
+                // epsilon overload condition): settle INLINE so the store still bounds L0.
+                // (An already-in-flight merge returns true above = nothing to do; this
+                // flush's L0 files are folded by the next pass.)
+                self.compact()?;
             }
-            // else: a compaction is already in flight; this flush's L0 files are
-            // merged by the next spawn once it finishes.
         }
         Ok(())
+    }
+
+    /// v0.37/v0.38: single-flight background compaction, shared by the eager and the
+    /// deferred (bulk) flush paths. Returns:
+    /// - `true`  → a merge is running (just spawned, or one was already in flight) —
+    ///             the caller has nothing to do.
+    /// - `false` → we won the `compacting` flag but the OS refused a thread; the flag
+    ///             has been reset and the CALLER must settle inline (or L0 would grow
+    ///             unbounded with auto-compaction silently disabled).
+    ///
+    /// Safety (unchanged from the v0.37 background pass): compact() releases the write
+    /// lock during its streaming disk merge; the L0 memtable-clear is guarded on
+    /// `sequence == snap+N` so puts racing the merge survive; `compact_lock` is the
+    /// real mutual exclusion across every entry point; a Drop guard resets the flag
+    /// even if compact_inner() panics.
+    fn spawn_background_compact(&self) -> bool {
+        if self.compacting
+            .compare_exchange(false, true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst).is_err()
+        {
+            return true; // already in flight
+        }
+        let db = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("flux-db-compact".into())
+            .spawn(move || {
+                struct Guard(Database);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _g = Guard(db.clone());
+                let _lock = db.compact_lock.lock();
+                let _ = db.compact_inner();
+            });
+        if spawned.is_err() {
+            self.compacting.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 
     /// Streaming iterator across everything visible: the live memtable plus
@@ -4216,6 +4277,55 @@ mod tests {
     }
 
     #[test]
+    fn background_compaction_during_writes_loses_nothing() {
+        // v0.38 ASYNC-SETTLE presence audit (the chronos-v035 lesson: never trust a
+        // storage change without asserting every byte comes BACK). Writes race a
+        // background L0 merge in BOTH flush modes (eager + deferred/bulk); afterwards
+        // every key must read back with its exact value.
+        for deferred in [false, true] {
+            let tmp = std::env::temp_dir().join(format!("flux-db-test-bg-compact-{deferred}"));
+            let _ = fs::remove_dir_all(&tmp);
+            let db = Database::open(&tmp).unwrap().with_max_wal_bytes(32 * 1024);
+            db.set_defer_compaction(deferred);
+            let val = |i: u32| format!("value-{i:08}").into_bytes();
+            let mut written = 0u32;
+            let mut saw_background = false;
+            // Enough flush rounds to trip the threshold (AUTO=4 / BULK=8×) several times.
+            for round in 0..40u32 {
+                for _ in 0..25 {
+                    db.put(format!("k{written:08}").as_bytes(), &val(written)).unwrap();
+                    written += 1;
+                }
+                db.flush().unwrap();
+                if db.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+                    saw_background = true;
+                    // keep writing WHILE the merge runs — the race under test
+                    for _ in 0..25 {
+                        db.put(format!("k{written:08}").as_bytes(), &val(written)).unwrap();
+                        written += 1;
+                    }
+                }
+                let _ = round;
+            }
+            assert!(saw_background, "vacuous test: no background compaction observed (deferred={deferred})");
+            // Wait for the in-flight merge to finish, then settle once.
+            let t0 = std::time::Instant::now();
+            while db.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+                assert!(t0.elapsed().as_secs() < 30, "background compaction hung");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            db.flush().unwrap();
+            // PRESENCE: every key readable with its exact value.
+            for i in 0..written {
+                let got = db.get(format!("k{i:08}").as_bytes()).unwrap();
+                assert_eq!(got.as_deref(), Some(val(i).as_slice()),
+                    "key k{i:08} lost/corrupt after background compaction (deferred={deferred})");
+            }
+            let _ = fs::remove_dir_all(&tmp);
+        }
+    }
+
+    #[test]
     fn test_iter_rev_honors_range_tombstones() {
         // Range tombstones must shadow keys in reverse iteration too.
         let tmp = std::env::temp_dir().join("flux-db-test-iter-rev-tomb");
@@ -4297,6 +4407,15 @@ mod tests {
         for i in 0u32..100 {
             db.put(format!("key{:04}", i).as_bytes(), &value).unwrap();
         }
+        // v0.38: the WAL-cap auto-flush is BACKGROUND now — wait for the in-flight
+        // flush, then flush once more quiescently so the truncation is observable
+        // (truncation needs a flush with no racing writes; the loop above raced them).
+        let t0 = std::time::Instant::now();
+        while db.flushing.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(t0.elapsed().as_secs() < 30, "background auto-flush hung");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        db.flush().unwrap();
         let wal_len = tmp.join("flux.wal").metadata().unwrap().len();
         assert!(
             wal_len < 4096,

@@ -89,8 +89,11 @@ impl RlweSecretKey {
         let e = params.sample_error_polynomial(rng);
 
         // Compute b = a*s + e + Δ*m
-        // where Δ = q/t is the scaling factor (here we use q/2 for binary messages)
-        let delta = params.modulus / 2;
+        // where Δ = q/t with plaintext modulus t = 16. Δ = q/2 only supports
+        // binary plaintexts mod 2, so homomorphically adding two encryptions
+        // of 1 gave 2Δ ≡ -1 (mod q), which decrypts to 0. t = 16 leaves
+        // headroom for small sums (plaintexts 0..8) while noise stays ≪ Δ.
+        let delta = params.modulus / 16;
 
         // Polynomial multiplication in ring R_q = Z_q[X]/(X^n + 1)
         let as_product = ring_mul(&a, &self.s, params.modulus, params.dimension);
@@ -121,7 +124,8 @@ impl RlweSecretKey {
         let as_product = ring_mul(&ciphertext.a, &self.s, params.modulus, params.dimension);
 
         let mut coefficients = vec![0u64; params.dimension];
-        let delta = params.modulus / 2;
+        // Must match the Δ used in encrypt (plaintext modulus t = 16).
+        let delta = params.modulus / 16;
 
         for i in 0..params.dimension {
             // Compute b[i] - (a*s)[i] mod q
@@ -208,7 +212,8 @@ impl RlwePublicKey {
 
         // c2 = b*u + e2 + Δ*m
         let bu = ring_mul(&self.b, &u, params.modulus, params.dimension);
-        let delta = params.modulus / 2;
+        // Must match the Δ used in RlweSecretKey::encrypt (t = 16).
+        let delta = params.modulus / 16;
 
         let mut c2 = vec![0u64; params.dimension];
         for i in 0..params.dimension {

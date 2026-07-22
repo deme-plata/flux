@@ -422,9 +422,20 @@ mod tests {
         let prover = ApproximateProductProver::new(params.clone());
         let verifier = ApproximateProductVerifier::new(params.clone());
 
-        // Create simple polynomials
-        let a: Vec<Scalar> = (0..params.dimension).map(|i| (i as u64) % 10).collect();
-        let b: Vec<Scalar> = (0..params.dimension).map(|i| ((i + 1) as u64) % 10).collect();
+        // Polynomials supported on the low half of the ring only, so
+        // deg(a) + deg(b) < n and the negacyclic product equals the plain
+        // polynomial product. The verifier checks c(z) ≈ a(z)·b(z), an
+        // identity that only holds without X^n+1 wrap-around — full-support
+        // inputs (the old version of this test) violate that precondition
+        // and can never verify. The SNARK itself uses constant (degree-0)
+        // polynomials, which trivially satisfy it.
+        let half = params.dimension / 2;
+        let a: Vec<Scalar> = (0..params.dimension)
+            .map(|i| if i < half { (i as u64) % 10 } else { 0 })
+            .collect();
+        let b: Vec<Scalar> = (0..params.dimension)
+            .map(|i| if i < half { ((i + 1) as u64) % 10 } else { 0 })
+            .collect();
 
         // Compute c = a * b (exact for this test)
         let ntt = NttOperator::new(&params);

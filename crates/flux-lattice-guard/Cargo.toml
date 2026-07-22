@@ -47,6 +47,7 @@ tracing = { workspace = true }
 
 # Testing
 [dev-dependencies]
+tracing-subscriber = "0.3"
 proptest = "1.4"
 
 [[bench]]

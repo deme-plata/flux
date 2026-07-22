@@ -111,6 +111,14 @@ impl LatticeGuardProver {
         let b_z = b_poly.evaluate(z, self.params.modulus);
         let c_z = c_poly.evaluate(z, self.params.modulus);
 
+        // Bind the claimed evaluations into the transcript so the final
+        // transcript_state commits to them — the verifier appends
+        // proof.evaluations at the same point and checks the final states
+        // match, so a tampered evaluation diverges the transcript.
+        transcript.append_scalar(b"eval_a", a_z);
+        transcript.append_scalar(b"eval_b", b_z);
+        transcript.append_scalar(b"eval_c", c_z);
+
         // Phase 5: Generate approximate product proofs
         debug!("Phase 5: Generating approximate product proofs");
         let mut product_proofs = Vec::new();

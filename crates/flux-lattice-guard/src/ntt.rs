@@ -29,7 +29,21 @@ impl NttOperator {
     pub fn new(params: &RlweParams) -> Self {
         let dimension = params.dimension;
         let modulus = params.modulus;
-        let root = params.ntt_root;
+
+        // params.ntt_root is a primitive 2n-th root of unity ψ, but the
+        // butterfly below implements a SIZE-n CYCLIC transform, which needs a
+        // primitive n-th root — use ω = ψ² (order exactly n). Historically
+        // the buggy root search happened to return an order-n element, which
+        // is the only reason the transform ever worked; a correct primitive
+        // 2n-th root breaks it without this squaring.
+        //
+        // NOTE: a cyclic NTT computes multiplication mod X^n - 1. Products of
+        // polynomials whose degrees sum below n are exact (this is how the
+        // SNARK uses it — constant/low-degree encodings); true negacyclic
+        // X^n + 1 arithmetic would additionally need ψ-twisting, which is not
+        // implemented.
+        let root = ((params.ntt_root as u128 * params.ntt_root as u128)
+            % modulus as u128) as Scalar;
 
         // Compute root inverse
         let root_inv = params.mod_inverse(root).expect("Root must be invertible");

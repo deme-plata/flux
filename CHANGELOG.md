@@ -1,5 +1,52 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.39.0 — The honest-tooling release: the loop stops lying (2026-07-24)
+
+Six days of hardening the trust chain between the developer and the build loop.
+The theme: every place the tooling could silently mislead — stale binaries,
+0/0-green combos, swallowed test args, incomplete cache fingerprints — now
+either works or fails loud.
+
+### The cache keeps its promises (c48e3fa9)
+- **T3-revised dep-info fix**: cache hits now store + validated-restore the
+  `.d` dep-info blob, so restored units leave COMPLETE fingerprints. This
+  closed the depinfo-poison era: no-op `check -p sigil-top` fell from
+  216–359s to **1.0s** on the 170-unit SIGIL tree; a 3-crate incremental
+  closure builds in 8.9s. Measured 2026-07-22 — the flux way now beats raw
+  cargo on the biggest workspace we have. Legacy cache entries without the
+  blob self-heal (one MISS, re-stored complete).
+
+### The combo can't lie (b5216de6, bed2ee3f, 519ba244, dcd33ebb)
+- `flux_combo` reports **UNVERIFIED** when no test suite ran — the 0/0-green
+  trap is dead.
+- Root cause of the stale-server arc fixed: `live_fluxc_path()` resolves the
+  rename-replaced "(deleted)" exe to the fresh on-disk binary; 18 bare fluxc
+  spawns + flux-rev swept onto it; `cargo_cmd()` joins the shared wrapper
+  fingerprint universe.
+
+### fluxc test tells the truth (792272ec)
+- `fluxc test -p X [FILTER] [--test TARGET] [-- --ignored …]` forwards ALL
+  args verbatim to cargo test — filters and harness tails were silently
+  dropped before (benches "ran" as "1 ignored").
+- NEW **`fluxc test-bins -p X`** (alias `tb`): prints the exact fresh test
+  executables from cargo's compiler-artifact JSON. Replaces the stale
+  `ls -t target/debug/deps` mtime hunt.
+- MCP `flux_test` gains `test_target` / `ignored` / `harness_args`.
+
+### flux-db: background settle + sharded reads (0fbf2baf, f13ebf88, 7ede6172…)
+- **v0.38 async-settle**: bulk compaction + WAL-cap auto-flush moved to
+  background; **v0.38.1 WAL rewrite** so auto-flush can no longer storm.
+- ShardedDb read/admin parity: `open_existing`, parallel `get_many` (one
+  lock + one SST walk per batch), cross-shard `scan_prefix_recent`,
+  `delete_range`, merge operator, TTL puts, cache stats.
+- SHARDED-BLOCKSTORE prereqs: `iter_unordered` + offline migration tool.
+
+### Also
+- flux-lattice-guard completeness: honest proofs verify; full suite green (d0ff4e83).
+- `flux_sigil_benchmark mode=live` — RULE-0 benchmark of the RUNNING sigil node (78c55280).
+- `fluxc prune-report` external-reachability column kills cross-workspace false positives (ed98d611).
+- flux-p2p: true Epsilon SIGIL peer-id restored + fast first-peer retry (e6f12763).
+
 ## v0.38.0 — The ladder release: everyday Rust compiles natively (2026-07-18)
 
 Three days after v0.37, the compiler ladder climbed five rungs. fluxc's

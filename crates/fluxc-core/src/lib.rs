@@ -1365,16 +1365,86 @@ pub fn run_binary(package: &str, release: bool) {
     let _ = cmd.status();
 }
 
-pub fn run_tests(package: Option<&str>) {
+/// Pure argv assembly for `cargo test`. `extra` is forwarded VERBATIM after
+/// the package selector: cargo-side flags (`--no-run`, `--test <target>`),
+/// positional filters, and the `--` harness tail (`--ignored`, `--nocapture`,
+/// filters). Nothing may be dropped here — the old run_tests silently
+/// discarded everything after the package, so `-- --ignored <filter>`
+/// reported "1 ignored" and never ran the requested test.
+pub fn build_test_args(package: Option<&str>, extra: &[String]) -> Vec<String> {
+    let mut v = vec!["test".to_string()];
+    if let Some(pkg) = package {
+        v.push("-p".to_string());
+        v.push(pkg.to_string());
+    }
+    v.extend(extra.iter().cloned());
+    v
+}
+
+pub fn run_tests(package: Option<&str>, extra: &[String]) {
     let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("test");
-    if let Some(pkg) = package { cmd.args(["-p", pkg]); }
+    cmd.args(build_test_args(package, extra));
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
     let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
     if !status.success() {
         eprintln!("Some tests failed");
         process::exit(status.code().unwrap_or(1));
+    }
+}
+
+/// `compiler-artifact` messages with a non-null `executable` and
+/// `profile.test == true` are the test binaries cargo ACTUALLY built this
+/// invocation — the authoritative answer to "which binary in target/debug/deps
+/// contains my code". Returns (target_name, executable_path) pairs.
+pub fn parse_test_executables(json_lines: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in json_lines.lines() {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if msg.get("reason").and_then(|r| r.as_str()) != Some("compiler-artifact") {
+            continue;
+        }
+        if msg.pointer("/profile/test").and_then(|t| t.as_bool()) != Some(true) {
+            continue;
+        }
+        let Some(exe) = msg.get("executable").and_then(|e| e.as_str()) else { continue };
+        let name = msg
+            .pointer("/target/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("?")
+            .to_string();
+        out.push((name, exe.to_string()));
+    }
+    out
+}
+
+/// `fluxc test-bins [-p PKG]` — build (cache-warm, no run) and print the exact
+/// test executables for the package. Kills the `ls -t target/debug/deps` mtime
+/// hunt, which hands back stale cached binaries that predate the current code.
+pub fn run_test_bins(package: Option<&str>) {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("test");
+    if let Some(pkg) = package { cmd.args(["-p", pkg]); }
+    cmd.args(["--no-run", "--message-format=json"]);
+    apply_wrapper_env(&mut cmd);
+    cmd.stdin(Stdio::null());
+    cmd.stderr(Stdio::inherit());
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => { eprintln!("cargo spawn failed: {}", e); process::exit(1); }
+    };
+    let bins = parse_test_executables(&String::from_utf8_lossy(&out.stdout));
+    if !out.status.success() {
+        eprintln!("test-bins: build failed");
+        process::exit(out.status.code().unwrap_or(1));
+    }
+    if bins.is_empty() {
+        eprintln!("test-bins: no test executables produced{}",
+            package.map(|p| format!(" for package {}", p)).unwrap_or_default());
+        process::exit(1);
+    }
+    for (name, path) in &bins {
+        println!("{}\t{}", name, path);
     }
 }
 
@@ -1398,6 +1468,10 @@ pub fn print_usage() {
     println!("  fluxc check           Cargo check (fast, no codegen)");
     println!("  fluxc run             Build + run a binary");
     println!("  fluxc test            Run tests (Rust or Frontend)");
+    println!("                        [-p PKG] [FILTER] [--test TARGET] [-- --ignored …]");
+    println!("                        — args after the package forward verbatim to cargo test");
+    println!("  fluxc test-bins       Print the EXACT fresh test executables for a package");
+    println!("                        (replaces the stale `ls -t target/debug/deps` hunt)");
     println!("  fluxc quick CRATE     Quick build + run (JIT)");
     println!("  fluxc self            Self-build: Flux builds Flux (dogfooding)");
     println!("  fluxc dev             Start dev servers (Vite HMR + fluxc watch)");
@@ -1753,6 +1827,49 @@ mod tests {
         let (config, rest) = parse_args(&raw);
         assert_eq!(config.package.as_deref(), Some("flux-p2p"));
         assert_eq!(rest, vec!["test"]);
+    }
+
+    #[test]
+    fn build_test_args_forwards_harness_tail_verbatim() {
+        // The 2026-07-23 wart: `fluxc test -p X -- --ignored bench` must reach
+        // cargo as `test -p X -- --ignored bench`, not `test -p X`.
+        let extra: Vec<String> =
+            vec!["--".into(), "--ignored".into(), "money_tps".into()];
+        assert_eq!(
+            build_test_args(Some("sigil-node"), &extra),
+            vec!["test", "-p", "sigil-node", "--", "--ignored", "money_tps"]
+        );
+    }
+
+    #[test]
+    fn build_test_args_forwards_cargo_side_flags_and_filters() {
+        let extra: Vec<String> =
+            vec!["--test".into(), "decode_verify_bench".into(), "--no-run".into()];
+        assert_eq!(
+            build_test_args(Some("sigil-state"), &extra),
+            vec!["test", "-p", "sigil-state", "--test", "decode_verify_bench", "--no-run"]
+        );
+        assert_eq!(build_test_args(None, &[]), vec!["test"]);
+    }
+
+    #[test]
+    fn parse_test_executables_picks_only_test_artifacts() {
+        let lines = concat!(
+            // a non-test artifact (the lib) — must be skipped
+            r#"{"reason":"compiler-artifact","target":{"name":"sigil-node"},"profile":{"test":false},"executable":null}"#, "\n",
+            // the real unit-test binary
+            r#"{"reason":"compiler-artifact","target":{"name":"sigil-node"},"profile":{"test":true},"executable":"/t/debug/deps/sigil_node-abc123"}"#, "\n",
+            // an integration-test binary
+            r#"{"reason":"compiler-artifact","target":{"name":"decode_verify_bench"},"profile":{"test":true},"executable":"/t/debug/deps/decode_verify_bench-def456"}"#, "\n",
+            // noise lines: build-script output + garbage
+            r#"{"reason":"build-script-executed"}"#, "\n",
+            "not json at all\n",
+        );
+        let bins = parse_test_executables(lines);
+        assert_eq!(bins, vec![
+            ("sigil-node".to_string(), "/t/debug/deps/sigil_node-abc123".to_string()),
+            ("decode_verify_bench".to_string(), "/t/debug/deps/decode_verify_bench-def456".to_string()),
+        ]);
     }
 
     #[test]

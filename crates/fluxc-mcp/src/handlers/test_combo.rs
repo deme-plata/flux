@@ -5,12 +5,15 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_test",
-            description: "Run Rust tests. Returns only failures for token efficiency. Pass --package to scope.",
+            description: "Run Rust tests. Returns only failures for token efficiency. Pass --package to scope, test_target to run ONE integration-test binary, ignored=true for #[ignore]d tests/benches.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "package": {"type": "string", "description": "Specific crate to test"},
-                    "filter": {"type": "string", "description": "Test name filter (substring match)"}
+                    "filter": {"type": "string", "description": "Test name filter (substring match)"},
+                    "test_target": {"type": "string", "description": "Run only this integration-test target (cargo --test <name>) — avoids running every test binary in the package"},
+                    "ignored": {"type": "boolean", "description": "Run #[ignore]d tests (benches, slow tests) — appends `-- --ignored`"},
+                    "harness_args": {"type": "array", "items": {"type": "string"}, "description": "Extra args after `--` for the test harness (e.g. --nocapture, --test-threads=1)"}
                 }
             }),
         },
@@ -101,12 +104,27 @@ use fluxc_core::webhook;
 fn flux_test(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str());
     let filter = args.get("filter").and_then(|v| v.as_str());
+    let test_target = args.get("test_target").and_then(|v| v.as_str());
+    let ignored = args.get("ignored").and_then(|v| v.as_bool()).unwrap_or(false);
+    let harness_args: Vec<String> = args
+        .get("harness_args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
 
     let flux_exe = fluxc_core::live_fluxc_path();
     let mut cmd = std::process::Command::new(&flux_exe);
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["--package", pkg]); }
-    if let Some(f) = filter { cmd.args(["--", f]); }
+    // Cargo-side: scope to ONE integration-test binary + name filter.
+    if let Some(t) = test_target { cmd.args(["--test", t]); }
+    if let Some(f) = filter { cmd.arg(f); }
+    // Harness tail — depends on fluxc test forwarding args verbatim.
+    if ignored || !harness_args.is_empty() {
+        cmd.arg("--");
+        if ignored { cmd.arg("--ignored"); }
+        cmd.args(&harness_args);
+    }
 
     let start = std::time::Instant::now();
     match cmd.output() {

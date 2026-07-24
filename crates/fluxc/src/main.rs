@@ -52,7 +52,7 @@ fn main() {
         if matches!(
             subcommand,
             Some("build") | Some("b") | Some("check") | Some("c") | Some("test") | Some("t")
-                | Some("combo") | Some("test-native")
+                | Some("test-bins") | Some("tb") | Some("combo") | Some("test-native")
                 | Some("clean") | Some("watch") | Some("w") | Some("dev") | Some("d")
                 | Some("self") | Some("prune-report")
         ) {
@@ -68,11 +68,32 @@ fn main() {
     match subcommand {
         Some("build") | Some("b") => fluxc_core::detect_and_build(&config, &subcommand_args[1..]),
         Some("check") | Some("c") => fluxc_core::run_cargo("check", &config, &subcommand_args[1..]),
-        Some("test") | Some("t") => fluxc_core::run_tests(
-            config
-                .package
-                .as_deref()
-                .or_else(|| subcommand_args.get(1).map(String::as_str)),
+        Some("test") | Some("t") => {
+            // `fluxc test [-p PKG | PKG] [cargo-args…] [-- harness-args…]`
+            // Everything beyond the package selector is forwarded verbatim to
+            // cargo test (filters, --no-run, --test <target>, and the `--`
+            // harness tail: --ignored, --nocapture, …). Legacy positional
+            // package (`fluxc test sigil-node`) still works, but only when -p
+            // wasn't given and the token isn't a flag or `--` — previously
+            // `fluxc test -- --ignored f` would have parsed `--` as a package.
+            let rest = &subcommand_args[1..];
+            let (pkg, extra): (Option<&str>, &[String]) =
+                match (config.package.as_deref(), rest.first()) {
+                    (Some(p), _) => (Some(p), rest),
+                    (None, Some(first)) if !first.starts_with('-') => {
+                        (Some(first.as_str()), &rest[1..])
+                    }
+                    (None, _) => (None, rest),
+                };
+            fluxc_core::run_tests(pkg, extra);
+        }
+        Some("test-bins") | Some("tb") => fluxc_core::run_test_bins(
+            config.package.as_deref().or_else(|| {
+                subcommand_args
+                    .get(1)
+                    .filter(|a| !a.starts_with('-'))
+                    .map(String::as_str)
+            }),
         ),
         Some("quick") => fluxc_core::quick_build_run(subcommand_args.get(1).map(|s|s.as_str()).unwrap_or("fluxc"), config.release),
         Some("combo") => {

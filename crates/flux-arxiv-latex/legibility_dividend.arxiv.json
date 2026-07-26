@@ -1,0 +1,212 @@
+{
+ "papers": [
+  {
+   "id": "2510.20041",
+   "title": "The Cost of Downgrading Build Systems: A Case Study of Kubernetes",
+   "authors": ["Gareema Ranjan", "Mahmoud Alfadel", "Gengyi Sun", "Shane McIntosh"],
+   "summary": "Since developers invoke the build system frequently, its performance can impact productivity. This case study analyzes the Kubernetes downgrade from Bazel to Go Build, finding Bazel faster but with a larger memory footprint and potential CI cost increases.",
+   "published": "2025-10-22",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2601.19146",
+   "title": "The Promise and Reality of Continuous Integration Caching: An Empirical Study of Travis CI Builds",
+   "authors": ["Taher A. Ghaleb", "Daniel Alencar da Costa", "Ying Zou"],
+   "summary": "Continuous Integration provides early feedback by automatically building software, but long build durations can hinder developer productivity. Analyzing 513,384 builds from 1,279 GitHub projects, we find that only 30% of projects adopt CI caching, and early adopters are typically more mature.",
+   "published": "2026-01-27",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1203.2704",
+   "title": "A model and framework for reliable build systems",
+   "authors": ["Derrick Coetzee", "Anand Bhaskar", "George Necula"],
+   "summary": "Reliable and fast builds are essential for rapid turnaround during development and testing. We explore the challenges and design space for non-distributed, incremental, parallel build systems, with a focus on dependency specification.",
+   "published": "2012-03-13",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1712.06796",
+   "title": "Built to Last or Built Too Fast? Evaluating Prediction Models for Build Times",
+   "authors": ["Ekaba Bisong", "Eric Tran", "Olga Baysal"],
+   "summary": "Automated builds are integral to Continuous Integration. However, long build times can be an issue when integrations are frequent. We propose and analyze models that can predict the build time of a job so that developers and managers can keep build wait time to an acceptable level.",
+   "published": "2017-12-19",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2402.09651",
+   "title": "Practitioners' Challenges and Perceptions of CI Build Failure Predictions at Atlassian",
+   "authors": ["Yang Hong", "Chakkrit Tantithamthavorn", "Jirat Pasuksmit", "Patanamon Thongtanunam", "Arik Friedman", "Xing Zhao", "Anton Krasikov"],
+   "summary": "Continuous Integration build failures could significantly impact the software development process and teams, such as delaying the release of new features and reducing developers' productivity. Our quantitative analysis found that the repository dimension is the key factor influencing CI build failures.",
+   "published": "2024-02-15",
+   "categories": ["cs.SE", "cs.LG"]
+  },
+  {
+   "id": "2601.08995",
+   "title": "Build Code is Still Code: Finding the Antidote for Pipeline Poisoning",
+   "authors": ["Brent Pappas", "Paul Gazzillo"],
+   "summary": "Open source C code underpins society's computing infrastructure. We introduce a development phase isolation strategy and the Foreman tool to detect poisoned build systems, demonstrating detection of the XZ Utils attack.",
+   "published": "2026-01-13",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2402.08920",
+   "title": "Quantifying and Characterizing Clones of Self-Admitted Technical Debt in Build Systems",
+   "authors": ["Tao Xiao", "Zhili Zeng", "Dong Wang", "Hideaki Hata", "Shane McIntosh", "Kenichi Matsumoto"],
+   "summary": "Self-Admitted Technical Debt annotates development decisions that intentionally exchange long-term software artifact quality for short-term goals. Examining 50,608 SATD comments across Autotools, CMake, Maven and Ant, we find that 62-95% are clones.",
+   "published": "2024-02-14",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2602.03556",
+   "title": "Flaky Tests in a Large Industrial Database Management System: An Empirical Study of Fixed Issue Reports for SAP HANA",
+   "authors": ["Alexander Berndt", "Thomas Bach", "Sebastian Baltes"],
+   "summary": "Flaky tests yield different results when executed multiple times for the same version of the source code. Thus, they provide an ambiguous signal about the quality of the code and interfere with the automated assessment of code changes.",
+   "published": "2026-02-03",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2208.14799",
+   "title": "Predicting Flaky Tests Categories using Few-Shot Learning",
+   "authors": ["Amal Akli", "Guillaume Haben", "Sarra Habchi", "Mike Papadakis", "Yves Le Traon"],
+   "summary": "Flaky tests are tests that yield different outcomes when run on the same version of a program. This non-deterministic behaviour plagues continuous integration with false signals, wasting developers' time and reducing their trust in test suites.",
+   "published": "2022-08-31",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2310.12132",
+   "title": "The Effects of Computational Resources on Flaky Tests",
+   "authors": ["Denini Silva", "Martin Gruber", "Satyajit Gokhale", "Ellen Arteca", "Alexi Turcotte", "Marcelo d'Amorim", "Wing Lam", "Stefan Winter", "Jonathan Bell"],
+   "summary": "Flaky tests are tests that nondeterministically pass and fail in unchanged code. We present the first assessment of the impact that computational resources have on flaky tests, covering 52 projects and 27 different resource configurations.",
+   "published": "2023-10-18",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2511.14002",
+   "title": "FlakyGuard: Automatically Fixing Flaky Tests at Industry Scale",
+   "authors": ["Chengpeng Li", "Farnaz Behrang", "August Shi", "Peng Liu"],
+   "summary": "Flaky tests that non-deterministically pass or fail waste developer time and slow release cycles. We present FlakyGuard, which treats code as a graph structure and uses selective graph exploration to find only the most relevant repair context.",
+   "published": "2025-11-18",
+   "categories": ["cs.SE", "cs.AI"]
+  },
+  {
+   "id": "2605.21677",
+   "title": "A Dataset of Reproducible Flaky-Test Failures",
+   "authors": ["Suzzana Rafi", "Mahbub-Ul-Hoque Sumon", "Md Erfan", "Maruf Morshed Khan", "August Shi", "Wing Lam"],
+   "summary": "Flaky tests pass and fail non-deterministically when run on the same version of code. Although many techniques have been proposed to detect, debug and repair flaky tests, reproducing their failures remains a major challenge due to their inherent nondeterminism.",
+   "published": "2026-05-20",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2506.13821",
+   "title": "Software is infrastructure: failures, successes, costs, and the case for formal verification",
+   "authors": ["Giovanni Bernardi", "Adrian Francalanza", "Marco Peressotti", "Mohammad Reza Mousavi"],
+   "summary": "In this chapter we outline the role that software has in modern society, along with the staggering costs of poor software quality. We recall the costs of major software failures of the last 40 years and argue that these costs justify researching, studying and applying formal software verification.",
+   "published": "2025-06-15",
+   "categories": ["cs.SE", "cs.CY"]
+  },
+  {
+   "id": "2502.19150",
+   "title": "Formal Verification of PLCs as a Service: A CERN-GSI Safety-Critical Case Study",
+   "authors": ["Ignacio D. Lopez-Miguel", "Borja Fernandez Adiego", "Matias Salinas", "Christine Betz"],
+   "summary": "Increased technological complexity and demand for software reliability require organizations to formally design and verify safety-critical programs. This paper introduces a formal verification service for PLC programs, offering a cost-effective solution to meet rising demands for formal verification processes.",
+   "published": "2025-02-26",
+   "categories": ["cs.SE", "cs.LO"]
+  },
+  {
+   "id": "2409.05014",
+   "title": "Analyzing Challenges in Deployment of the SLSA Framework for Software Supply Chain Security",
+   "authors": ["Mahzabin Tamanna", "Sivana Hamer", "Mindy Tran", "Sascha Fahl", "Yasemin Acar", "Laurie Williams"],
+   "summary": "In 2023, Sonatype reported a 200% increase in software supply chain attacks, including major build infrastructure attacks. Despite growing interest, the adoption of the Supply-chain Levels for Software Artifacts framework is not widespread; we study the adoption challenges.",
+   "published": "2024-09-08",
+   "categories": ["cs.CE", "cs.SE"]
+  },
+  {
+   "id": "2510.04964",
+   "title": "Why Software Signing (Still) Matters: Trust Boundaries in the Software Supply Chain",
+   "authors": ["Kelechi G. Kalu", "James C. Davis"],
+   "summary": "Software signing provides a formal mechanism for provenance by ensuring artifact integrity and verifying producer identity. It also imposes tooling and operational costs to implement in practice. We examine whether hardening registry controls obviates end-to-end artifact signing.",
+   "published": "2025-10-06",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2206.14606",
+   "title": "Building a Secure Software Supply Chain with GNU Guix",
+   "authors": ["Ludovic Courtes"],
+   "summary": "The software supply chain designates the series of steps taken to go from source code published by developers to executables running on users' computers. A security vulnerability in any of these steps puts users at risk, and evidence shows that attacks on the supply chain are becoming more common.",
+   "published": "2022-06-28",
+   "categories": ["cs.SE", "cs.PL"]
+  },
+  {
+   "id": "2106.09843",
+   "title": "Hardware-Enforced Integrity and Provenance for Distributed Code Deployments",
+   "authors": ["Marcela S. Melara", "Mic Bowman"],
+   "summary": "Deployed microservices must adhere to a multitude of application-level security requirements and regulatory constraints imposed by mutually distrusting application principals. These principals do not currently have a common way of easily identifying, expressing and automatically enforcing these requirements at deployment time.",
+   "published": "2021-06-17",
+   "categories": ["cs.CR"]
+  },
+  {
+   "id": "2502.16277",
+   "title": "Measuring the Impact of Technical Debt on Development Effort in Software Projects",
+   "authors": ["Kartik Gupta"],
+   "summary": "Technical debt refers to the trade-offs between code quality and faster delivery, impacting future development with increased complexity, bugs and costs. This study empirically analyzes the additional work effort caused by technical debt in software projects, focusing on feature implementations.",
+   "published": "2025-02-22",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1908.01347",
+   "title": "Business-Driven Technical Debt Prioritization",
+   "authors": ["Rodrigo Reboucas de Almeida"],
+   "summary": "Technical debt happens when teams take shortcuts on software development to gain short-term benefits at the cost of making future changes more expensive. Previous results show a misalignment between the prioritization done by technical professionals and the prioritization expected by business ones.",
+   "published": "2019-08-01",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2502.03153",
+   "title": "Automating Technical Debt Management: Insights from Practitioner Discussions in Stack Exchange",
+   "authors": ["Joao Paulo Biazotto", "Daniel Feitosa", "Paris Avgeriou", "Elisa Yumi Nakagawa"],
+   "summary": "Managing technical debt is essential for maintaining long-term software projects. Nonetheless, the time and cost involved in technical debt management are often high, which may lead practitioners to omit management tasks; the adoption of automated tooling remains low.",
+   "published": "2025-02-05",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2506.14683",
+   "title": "Unified Software Engineering Agent as AI Software Engineer",
+   "authors": ["Leonhard Applis", "Yuntong Zhang", "Shanchao Liang", "Nan Jiang", "Lin Tan", "Abhik Roychoudhury"],
+   "summary": "The growth of Large Language Model technology has raised expectations for automated coding. However, software engineering is more than coding and is concerned with activities including maintenance and evolution of a project. But is an LLM agent the same as an AI software engineer?",
+   "published": "2025-06-17",
+   "categories": ["cs.SE", "cs.AI"]
+  },
+  {
+   "id": "2506.18824",
+   "title": "Understanding Software Engineering Agents: A Study of Thought-Action-Result Trajectories",
+   "authors": ["Islem Bouzenia", "Michael Pradel"],
+   "summary": "LLM-based agents are increasingly employed to automate complex software engineering tasks, such as program repair and issue resolution. Despite their widespread adoption, the internal decision-making processes of these agents remain largely unexplored, limiting our understanding of their behaviour.",
+   "published": "2025-06-23",
+   "categories": ["cs.SE", "cs.AI"]
+  },
+  {
+   "id": "2510.25694",
+   "title": "Process-Level Trajectory Evaluation for Environment Configuration in Software Engineering Agents",
+   "authors": ["Jiayi Kuang", "Yinghui Li", "Xin Zhang", "Yangning Li", "Di Yin", "Xing Sun", "Ying Shen", "Philip S. Yu"],
+   "summary": "LLM-based agents show promise for software engineering, but environment configuration remains a bottleneck due to heavy manual effort and scarce large-scale, high-quality datasets. Existing benchmarks assess only end-to-end build/test success, obscuring where and why agents succeed or fail.",
+   "published": "2025-10-29",
+   "categories": ["cs.SE", "cs.AI"]
+  },
+  {
+   "id": "2504.04284",
+   "title": "Landauer-Limited Dissipation in Quantum-Flux-Parametron Logic",
+   "authors": ["Quentin Herr"],
+   "summary": "The Landauer limit is to irreversible logic what the Carnot cycle is to heat engines. This limit is approached in the adiabatic Quantum Flux Parametron by copying the inputs of standard logic gates to produce reversible logic gates, and disposing of the copies while dissipating only the thermal energy.",
+   "published": "2025-04-05",
+   "categories": ["physics.app-ph", "cond-mat.supr-con"]
+  },
+  {
+   "id": "1507.07450",
+   "title": "Reset and switch protocols at Landauer limit in a graphene buckled ribbon",
+   "authors": ["I. Neri", "M. Lopez-Suarez", "D. Chiuchiu", "L. Gammaitoni"],
+   "summary": "Heat produced during a reset operation is meant to show a fundamental bound known as the Landauer limit. However, present-day technology realizations dissipate far beyond these theoretical limits.",
+   "published": "2015-07-27",
+   "categories": ["cond-mat.mes-hall"]
+  }
+ ]
+}

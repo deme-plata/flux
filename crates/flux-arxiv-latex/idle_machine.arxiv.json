@@ -1,0 +1,252 @@
+{
+ "papers": [
+  {
+   "id": "2407.19901",
+   "title": "Carbon-Efficient Software Design and Development: A Systematic Literature Review",
+   "authors": ["Ornela Danushi", "Stefano Forti", "Jacopo Soldani"],
+   "summary": "The ICT sector, responsible for 2% of global carbon emissions, is under scrutiny calling for methodologies and tools to design and develop software in an environmentally sustainable-by-design manner. However, the software engineering solutions for designing and developing carbon-efficient software are currently scattered over multiple different pieces of literature.",
+   "published": "2024-07-29",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1307.7037",
+   "title": "Take a break: cloud scheduling optimized for real-time electricity pricing",
+   "authors": ["Drazen Lucanin", "Ivona Brandic"],
+   "summary": "Cloud computing revolutionised the industry with its elastic, on-demand approach to computational resources, but has lead to a tremendous impact on the environment. Data centers constitute 1.1-1.5% of total electricity usage in the world.",
+   "published": "2013-07-26",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2309.09241",
+   "title": "Data Center-Enabled High Altitude Platforms: A Green Computing Alternative",
+   "authors": ["Wiem Abderrahim", "Osama Amin", "Basem Shihada"],
+   "summary": "Information technology organizations and companies are seeking greener alternatives to traditional terrestrial data centers to mitigate global warming and reduce carbon emissions. Currently, terrestrial data centers consume a significant amount of energy, estimated at about 1.5% of world electricity consumption.",
+   "published": "2023-09-17",
+   "categories": ["eess.SY"]
+  },
+  {
+   "id": "2606.05420",
+   "title": "Assessing the Carbon Emissions and Energy Consumption of U.S. Hyperscale Data Centers",
+   "authors": ["Gianluca Guidi", "Francesca Dominici", "Tiziano Squartini", "Callaway Sprinkle", "Jonathan Gilmour", "Kevin Butler", "Eric Bell", "Scott Delaney", "Falco J. Bargagli-Stoffi"],
+   "summary": "The rapid proliferation of hyperscale data centers in the US, mainly driven by the adoption of artificial intelligence, has raised concerns about this industry's environmental footprint. We compiled facility-level information on 403 US hyperscale data centers.",
+   "published": "2026-06-03",
+   "categories": ["cs.AI", "stat.AP"]
+  },
+  {
+   "id": "2506.09683",
+   "title": "Calculating Software's Energy Use and Carbon Emissions: A Survey of the State of Art, Challenges, and the Way Ahead",
+   "authors": ["Priyavanshi Pathania", "Nikhil Bamby", "Rohit Mehra", "Samarth Sikand", "Vibhu Saujanya Sharma", "Vikrant Kaulgud", "Sanjay Podder", "Adam P. Burden"],
+   "summary": "The proliferation of software and AI comes with a hidden risk: its growing energy and carbon footprint. We present a state-of-the-art review of methods and tools that enable the measurement of software and AI-related energy and/or carbon emissions, introducing a taxonomy of Monitoring, Estimation and Black-Box approaches.",
+   "published": "2025-06-11",
+   "categories": ["cs.SE", "cs.CY"]
+  },
+  {
+   "id": "2407.11611",
+   "title": "Estimating the Energy Footprint of Software Systems: a Primer",
+   "authors": ["Fernando Castor"],
+   "summary": "In Green Software Development, quantifying the energy footprint of a software system is one of the most basic activities. We introduce basic concepts in the area, highlight methodological issues that must be accounted for when conducting experiments, and discuss trade-offs associated with different estimation approaches.",
+   "published": "2024-07-16",
+   "categories": ["cs.SE", "cs.PF"]
+  },
+  {
+   "id": "2410.05460",
+   "title": "It's Not Easy Being Green: On the Energy Efficiency of Programming Languages",
+   "authors": ["Nicolas van Kempen", "Hyuk-Je Kwon", "Dung Tuan Nguyen", "Emery D. Berger"],
+   "summary": "Does the choice of programming language affect energy consumption? Previous highly visible studies have established associations between certain programming languages and energy consumption. A causal misinterpretation of this work has led academics and industry leaders to use or support certain languages based on their claimed impact on energy consumption.",
+   "published": "2024-10-07",
+   "categories": ["cs.PL", "cs.PF"]
+  },
+  {
+   "id": "2411.11540",
+   "title": "The Jevons Paradox In Cloud Computing: A Thermodynamics Perspective",
+   "authors": ["Prateek Sharma"],
+   "summary": "How do we explain the simultaneous growth in energy efficiency of cloud computing and its energy consumption? The Jevons paradox provides one perspective of this phenomenon. However, it is not clear or obvious why the Jevons paradox exists, and when it is applicable.",
+   "published": "2024-11-18",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2501.16548",
+   "title": "From Efficiency Gains to Rebound Effects: The Problem of Jevons' Paradox in AI's Polarized Environmental Debate",
+   "authors": ["Alexandra Sasha Luccioni", "Emma Strubell", "Kate Crawford"],
+   "summary": "As the climate crisis deepens, artificial intelligence has emerged as a contested force: some champion its potential to advance renewable energy, materials discovery, and large-scale emissions monitoring, while others underscore its growing carbon footprint and water consumption.",
+   "published": "2025-01-27",
+   "categories": ["cs.CY"]
+  },
+  {
+   "id": "2510.09022",
+   "title": "The Environmental Impacts of Machine Learning Training Keep Rising Evidencing Rebound Effect",
+   "authors": ["Clement Morand", "Anne-Laure Ligozat", "Aurelie Neveol"],
+   "summary": "Recent Machine Learning approaches have shown increased performance on benchmarks but at the cost of escalating computational demands. Hardware, algorithmic and carbon optimizations have been proposed to curb energy consumption and environmental impacts. Can these strategies lead to absolute reductions?",
+   "published": "2025-10-10",
+   "categories": ["cs.LG"]
+  },
+  {
+   "id": "2506.14653",
+   "title": "How Viable are Energy Savings in Smart Homes? A Call to Embrace Rebound Effects in Sustainable HCI",
+   "authors": ["Christina Bremer", "Harshit Gujral", "Michelle Lin", "Lily Hinkers", "Christoph Becker", "Vlad C. Coroama"],
+   "summary": "As part of global climate action, digital technologies are seen as a key enabler of energy efficiency savings. There is a risk, however, that these efficiency gains result in rebound effects, which reduce or even overcompensate the savings.",
+   "published": "2025-06-17",
+   "categories": ["cs.HC"]
+  },
+  {
+   "id": "2507.19287",
+   "title": "The Case for Time-Shared Computing Resources",
+   "authors": ["Pierre Jacquet", "Adrien Luxey-Bitri"],
+   "summary": "The environmental impact of Information and Communication Technologies continues to grow, driven notably by increasing usage, rebound effects, and emerging demands. However, despite the virtual nature of its services, the sector remains inherently constrained by its materiality.",
+   "published": "2025-07-25",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2601.19146",
+   "title": "The Promise and Reality of Continuous Integration Caching: An Empirical Study of Travis CI Builds",
+   "authors": ["Taher A. Ghaleb", "Daniel Alencar da Costa", "Ying Zou"],
+   "summary": "Continuous Integration provides early feedback by automatically building software, but long build durations can hinder developer productivity. Analyzing 513,384 builds from 1,279 GitHub projects, we find that only 30% of projects adopt CI caching, and early adopters are typically more mature.",
+   "published": "2026-01-27",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2510.20041",
+   "title": "The Cost of Downgrading Build Systems: A Case Study of Kubernetes",
+   "authors": ["Gareema Ranjan", "Mahmoud Alfadel", "Gengyi Sun", "Shane McIntosh"],
+   "summary": "Since developers invoke the build system frequently, its performance can impact productivity. This case study analyzes the Kubernetes downgrade from Bazel to Go Build, finding Bazel faster but with a larger memory footprint and potential CI cost increases.",
+   "published": "2025-10-22",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1712.06796",
+   "title": "Built to Last or Built Too Fast? Evaluating Prediction Models for Build Times",
+   "authors": ["Ekaba Bisong", "Eric Tran", "Olga Baysal"],
+   "summary": "Automated builds are integral to Continuous Integration. However, long build times can be an issue when integrations are frequent. We propose and analyze models that can predict the build time of a job so that build wait time can be kept to an acceptable level.",
+   "published": "2017-12-19",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "1203.2704",
+   "title": "A model and framework for reliable build systems",
+   "authors": ["Derrick Coetzee", "Anand Bhaskar", "George Necula"],
+   "summary": "Reliable and fast builds are essential for rapid turnaround during development and testing. We explore the challenges and design space for non-distributed, incremental, parallel build systems, with a focus on dependency specification.",
+   "published": "2012-03-13",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2402.09651",
+   "title": "Practitioners' Challenges and Perceptions of CI Build Failure Predictions at Atlassian",
+   "authors": ["Yang Hong", "Chakkrit Tantithamthavorn", "Jirat Pasuksmit", "Patanamon Thongtanunam", "Arik Friedman", "Xing Zhao", "Anton Krasikov"],
+   "summary": "Continuous Integration build failures could significantly impact the software development process and teams, such as delaying the release of new features and reducing developers' productivity.",
+   "published": "2024-02-15",
+   "categories": ["cs.SE", "cs.LG"]
+  },
+  {
+   "id": "2506.13821",
+   "title": "Software is infrastructure: failures, successes, costs, and the case for formal verification",
+   "authors": ["Giovanni Bernardi", "Adrian Francalanza", "Marco Peressotti", "Mohammad Reza Mousavi"],
+   "summary": "In this chapter we outline the role that software has in modern society, along with the staggering costs of poor software quality. We recall the costs of major software failures of the last 40 years and argue that these costs justify researching, studying and applying formal software verification.",
+   "published": "2025-06-15",
+   "categories": ["cs.SE", "cs.CY"]
+  },
+  {
+   "id": "2602.03556",
+   "title": "Flaky Tests in a Large Industrial Database Management System: An Empirical Study of Fixed Issue Reports for SAP HANA",
+   "authors": ["Alexander Berndt", "Thomas Bach", "Sebastian Baltes"],
+   "summary": "Flaky tests yield different results when executed multiple times for the same version of the source code. Thus, they provide an ambiguous signal about the quality of the code and interfere with the automated assessment of code changes.",
+   "published": "2026-02-03",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2601.08995",
+   "title": "Build Code is Still Code: Finding the Antidote for Pipeline Poisoning",
+   "authors": ["Brent Pappas", "Paul Gazzillo"],
+   "summary": "Open source C code underpins society's computing infrastructure. We introduce a development phase isolation strategy and the Foreman tool to detect poisoned build systems, demonstrating detection of the XZ Utils attack.",
+   "published": "2026-01-13",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2409.05014",
+   "title": "Analyzing Challenges in Deployment of the SLSA Framework for Software Supply Chain Security",
+   "authors": ["Mahzabin Tamanna", "Sivana Hamer", "Mindy Tran", "Sascha Fahl", "Yasemin Acar", "Laurie Williams"],
+   "summary": "In 2023, Sonatype reported a 200% increase in software supply chain attacks, including major build infrastructure attacks. Despite growing interest, the adoption of the Supply-chain Levels for Software Artifacts framework is not widespread.",
+   "published": "2024-09-08",
+   "categories": ["cs.CE", "cs.SE"]
+  },
+  {
+   "id": "2510.04964",
+   "title": "Why Software Signing (Still) Matters: Trust Boundaries in the Software Supply Chain",
+   "authors": ["Kelechi G. Kalu", "James C. Davis"],
+   "summary": "Software signing provides a formal mechanism for provenance by ensuring artifact integrity and verifying producer identity. It also imposes tooling and operational costs to implement in practice.",
+   "published": "2025-10-06",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2206.14606",
+   "title": "Building a Secure Software Supply Chain with GNU Guix",
+   "authors": ["Ludovic Courtes"],
+   "summary": "The software supply chain designates the series of steps taken to go from source code published by developers to executables running on users' computers. A security vulnerability in any of these steps puts users at risk, and evidence shows that attacks on the supply chain are becoming more common.",
+   "published": "2022-06-28",
+   "categories": ["cs.SE", "cs.PL"]
+  },
+  {
+   "id": "2401.01782",
+   "title": "Profiling the carbon footprint of performance bugs",
+   "authors": ["Iztok Fister", "Dusan Fister", "Vili Podgorelec", "Iztok Fister Jr."],
+   "summary": "Much debate nowadays is devoted to the impacts of modern information and communication technology on global carbon emissions. Green ICT is a paradigm creating a sustainable and environmentally friendly computing field; here we undertake the problem of performance bugs.",
+   "published": "2024-01-03",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2601.09741",
+   "title": "Putting green software principles into practice",
+   "authors": ["James Uther"],
+   "summary": "The need and theoretical methods for measuring and reducing CO2 emitted by computing systems are well understood, but real-world examples are still limited. We describe a journey towards green software for a live product running on a public cloud.",
+   "published": "2026-01-09",
+   "categories": ["cs.SE", "cs.CY"]
+  },
+  {
+   "id": "2405.12582",
+   "title": "Carbon-aware Software Services",
+   "authors": ["Stefano Forti", "Jacopo Soldani", "Antonio Brogi"],
+   "summary": "The significant carbon footprint of the ICT sector calls for methodologies to contain carbon emissions of running software. This article proposes a novel framework for implementing, configuring and assessing carbon-aware interactive software services.",
+   "published": "2024-05-21",
+   "categories": ["cs.SE", "cs.DC"]
+  },
+  {
+   "id": "2506.10990",
+   "title": "On the Effectiveness of the 'Follow-the-Sun' Strategy in Mitigating the Carbon Footprint of AI in Cloud Instances",
+   "authors": ["Roberto Vergallo", "Luis Cruz", "Alessio Errico", "Luca Mainetti"],
+   "summary": "Follow-the-Sun is a theoretical computational model aimed at minimizing the carbon footprint of computer workloads. It involves dynamically moving workloads to regions with cleaner energy sources.",
+   "published": "2025-03-20",
+   "categories": ["cs.SE", "cs.AI", "cs.DC"]
+  },
+  {
+   "id": "2505.04521",
+   "title": "Comparative Analysis of Carbon Footprint in Manual vs. LLM-Assisted Code Development",
+   "authors": ["Kuen Sum Cheung", "Mayuri Kaul", "Gunel Jahangirova", "Mohammad Reza Mousavi", "Eric Zie"],
+   "summary": "Large Language Models have significantly transformed software development. However, the environmental impact of utilising these AI models is substantial, given their high energy consumption during both training and inference stages.",
+   "published": "2025-05-07",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2211.12104",
+   "title": "Energy Consumption of Automated Program Repair",
+   "authors": ["Matias Martinez", "Silverio Martinez-Fernandez", "Xavier Franch"],
+   "summary": "Automated program repair aims to automatize the process of repairing software bugs in order to reduce the cost of maintaining software programs. However, no previous work has considered the energy impact of repairing bugs automatically.",
+   "published": "2022-11-22",
+   "categories": ["cs.SE"]
+  },
+  {
+   "id": "2504.04284",
+   "title": "Landauer-Limited Dissipation in Quantum-Flux-Parametron Logic",
+   "authors": ["Quentin Herr"],
+   "summary": "The Landauer limit is to irreversible logic what the Carnot cycle is to heat engines. This limit is approached in the adiabatic Quantum Flux Parametron by copying the inputs of standard logic gates to produce reversible logic gates.",
+   "published": "2025-04-05",
+   "categories": ["physics.app-ph", "cond-mat.supr-con"]
+  },
+  {
+   "id": "1507.07450",
+   "title": "Reset and switch protocols at Landauer limit in a graphene buckled ribbon",
+   "authors": ["I. Neri", "M. Lopez-Suarez", "D. Chiuchiu", "L. Gammaitoni"],
+   "summary": "Heat produced during a reset operation is meant to show a fundamental bound known as the Landauer limit. However, present-day technology realizations dissipate far beyond these theoretical limits.",
+   "published": "2015-07-27",
+   "categories": ["cond-mat.mes-hall"]
+  }
+ ]
+}

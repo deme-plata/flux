@@ -9,3 +9,4 @@ description = "Bridge the arxiv-mcp-server (blazickjp/arxiv-mcp-server) into Flu
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+flux-science = { path = "../flux-science" }

@@ -1,0 +1,211 @@
+{
+ "papers": [
+  {
+   "id": "1905.09749",
+   "title": "How to factor 2048 bit RSA integers in 8 hours using 20 million noisy qubits",
+   "authors": [
+    "Craig Gidney",
+    "Martin Eker\u00e5"
+   ],
+   "summary": "We significantly reduce the cost of factoring integers and computing discrete logarithms in finite fields on a quantum computer by combining techniques from Shor 1994, Griffiths-Niu 1996, Zalka 2006, Fowler 2012, Eker\u00e5-H\u00e5stad 2017, Eker\u00e5 2017, Eker\u00e5 2018, Gidney-Fowler 2019, Gidney 2019. We estimate the approximate cost of our construction using plausible physical assumptions for large-scale superconducting qubit platforms: a planar grid of qubits with nearest-neighbor connectivity, a characteristic physical gate error rate of $10^{-3}$, a surface code cycle time of 1 microsecond, and a reaction time of 10 microseconds. We account for factors that are normally ignored such as noise, the need to make repeated attempts, and the spacetime layout of the computation. When factoring 2048 bit RSA integers, our construction's spacetime volume is a hundredfold less than comparable estimates from earlier works (Van Meter et al. 2009, Jones et al. 2010, Fowler et al. 2012, Gheorghiu et al. 2019). In the abstract circuit model (which ignores overheads from distillation, routing, and error correction) our construction uses $3 n + 0.002 n \\lg n$ logical qubits, $0.3 n^3 + 0.0005 n^3 \\lg n$ Toffolis, and $500 n^2 + n^2 \\lg n$ measurement depth to factor $n$-bit RSA integers. We quantify the cryptographic implications of our work, both for RSA and for schemes based on the DLP in finite fields.",
+   "published": "2019-05-23",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/1905.09749"
+  },
+  {
+   "id": "quant-ph/9508027",
+   "title": "Polynomial-Time Algorithms for Prime Factorization and Discrete Logarithms on a Quantum Computer",
+   "authors": [
+    "Peter W. Shor"
+   ],
+   "summary": "A digital computer is generally believed to be an efficient universal computing device; that is, it is believed able to simulate any physical computing device with an increase in computation time of at most a polynomial factor. This may not be true when quantum mechanics is taken into consideration. This paper considers factoring integers and finding discrete logarithms, two problems which are generally thought to be hard on a classical computer and have been used as the basis of several proposed cryptosystems. Efficient randomized algorithms are given for these two problems on a hypothetical quantum computer. These algorithms take a number of steps polynomial in the input size, e.g., the number of digits of the integer to be factored.",
+   "published": "1995-08-30",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/9508027"
+  },
+  {
+   "id": "q-bio/0411019",
+   "title": "A simple derivation of the Gompertz law for human mortality",
+   "authors": [
+    "B. I. Shklovskii"
+   ],
+   "summary": "The Gompertz law of dependence of human mortality rate on age is derived from a simple model of death as a result of the exponentially rare escape of abnormal cells from immunological response.",
+   "published": "2004-11-04",
+   "categories": [
+    "q-bio.CB",
+    "cond-mat.dis-nn",
+    "cond-mat.other",
+    "q-bio.OT"
+   ],
+   "url": "https://arxiv.org/abs/q-bio/0411019"
+  },
+  {
+   "id": "q-bio/0511048",
+   "title": "Gompertz mortality law and scaling behaviour of the Penna model",
+   "authors": [
+    "J. B. Coe",
+    "Y. Mao"
+   ],
+   "summary": "The Penna model is a model of evolutionary ageing through mutation accumulation where traditionally time and the age of an organism are treated as discrete variables and an organism's genome by a binary bit string. We reformulate the asexual Penna model and show that, a universal scale invariance emerges as we increase the number of discrete genome bits to the limit of a continuum. The continuum model, introduced by Almeida and Thomas in [Int.J.Mod.Phys.C, 11, 1209 (2000)] can be recovered from the discrete model in the limit of infinite bits coupled with a vanishing mutation rate per bit. Finally, we show that scale invariant properties may lead to the ubiquitous Gompertz Law for mortality rates for early ages, which is generally regarded as being empirical.",
+   "published": "2005-11-29",
+   "categories": [
+    "q-bio.PE"
+   ],
+   "url": "https://arxiv.org/abs/q-bio/0511048"
+  },
+  {
+   "id": "2605.15277",
+   "title": "Beyond Unitary Quantum Simulation: Open-System Approaches to Quantum Chemistry toward Quantum Advantage",
+   "authors": [
+    "Michael Marthaler",
+    "Elias Zapusek",
+    "Florentin Reiter"
+   ],
+   "summary": "Quantum simulation is widely regarded as one of the most promising routes to genuine quantum advantage, yet most existing approaches to quantum chemistry are formulated in terms of closed-system, unitary dynamics and ground-state preparation within the Born--Oppenheimer approximation. In this review, we discuss a broader perspective motivated by the observation that naturally occurring quantum systems are rarely isolated and often reach physically relevant states only through relaxation, decoherence, and thermalization. We first examine what is and is not known about exponential quantum advantage in chemistry, emphasizing that coherent Hamiltonian simulation provides the clearest formal case for speed-up, while many open questions remain for realistic problems. We then discuss how dissipation might ideally be integrated into quantum chemistry on a fault-tolerant quantum computer, using recent proposals for chemically motivated dynamical simulation as a guiding vision. More generally, we highlight the practical appeal of this approach to enhancing the robustness of quantum algorithms.",
+   "published": "2026-05-14",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/2605.15277"
+  },
+  {
+   "id": "2604.26813",
+   "title": "Classical simulation of free-fermionic dynamics and quantum chemistry with magic input",
+   "authors": [
+    "Changhun Oh",
+    "Micha\u0142 Oszmaniec",
+    "Oliver Reardon-Smith",
+    "Zolt\u00e1n Zimbor\u00e1s"
+   ],
+   "summary": "Establishing the precise computational boundary between classically tractable fermionic systems and those capable of genuine quantum advantage is a central challenge in quantum simulation. While injecting non-Gaussian ``magic\" inputs into free-fermion circuits is widely expected to generate intractable complexity, we identify a physically motivated intermediate regime. We prove that for block-product paired non-Gaussian fermionic states, essential quantum simulation primitives -- transition amplitudes, overlaps, and arbitrary-weight number correlators -- can be efficiently approximated to additive error under free-fermionic dynamics. This tractability stems from an algebraic reduction that compresses exponentially large multiparticle interference into a single coefficient of a multivariate Pfaffian polynomial. Because these classical estimators match the intrinsic $O(1/\\sqrt{K})$ statistical uncertainty of quantum hardware utilizing $K$ measurement shots, they constitute a practical benchmark. Building on this foundation, we construct an additive-error estimator for high-weight Wilson observables in the noninteracting quench of recent trapped-ion experiments, providing a rigorous classical benchmark. Extending this to quantum chemistry, we demonstrate that core overlap-based subroutines for antisymmetrized products of strongly orthogonal geminals admit efficient additive-error Pfaffian-kernel estimators. Ultimately, these results sharpen the boundary of quantum advantage, establishing that the paired-electron scaffold is dequantized and clarifying where quantum resources are indispensable.",
+   "published": "2026-04-29",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/2604.26813"
+  },
+  {
+   "id": "1202.2639",
+   "title": "Low-overhead surface code logical Hadamard",
+   "authors": [
+    "Austin G. Fowler"
+   ],
+   "summary": "We present an improved low-overhead implementation of surface code logical H. We describe in full detail logical H applied to a single distance 7 double-defect logical qubit in an otherwise idle scalable array such qubits. Our goal is to provide a clear description of logical H and to emphasize that the surface code possesses low-overhead implementations of the entire Clifford group.",
+   "published": "2012-02-13",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/1202.2639"
+  },
+  {
+   "id": "1808.06709",
+   "title": "Low overhead quantum computation using lattice surgery",
+   "authors": [
+    "Austin G. Fowler",
+    "Craig Gidney"
+   ],
+   "summary": "When calculating the overhead of a quantum algorithm made fault-tolerant using the surface code, many previous works have used defects and braids for logical qubit storage and state distillation. In this work, we show that lattice surgery reduces the storage overhead by over a factor of 4, and the distillation overhead by nearly a factor of 5, making it possible to run algorithms with $10^8$ T gates using only $3.7\\times 10^5$ physical qubits capable of executing gates with error $p\\sim 10^{-3}$. These numbers strongly suggest that defects and braids in the surface code should be deprecated in favor of lattice surgery.",
+   "published": "2018-08-20",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/1808.06709"
+  },
+  {
+   "id": "2606.23279",
+   "title": "A Nonequilibrium Internal-Time Model of Aging: Entropy-Normalized Biological Proper Time and Repair Bifurcations",
+   "authors": [
+    "Mesfin Taye"
+   ],
+   "summary": "Chronological age is an incomplete coordinate for aging. Individuals and species sharing the same calendar time can differ substantially in physiological reserve, molecular damage, mortality hazard, and remaining lifespan. The Principle of Biological Time Equivalence (PBTE) offers a thermodynamic reformulation: biological aging is governed by the accumulation of \\emph{internal} physiological time rather than chronological time alone. Building on prior PBTE work, this paper defines the internal-time coordinate $\u03b8(t)=\\int_0^t f(s)\\dd s$, where $t$ is chronological time and $f(s)$ is an instantaneous physiological frequency (for example heart rate or respiratory rate), so that $\u03b8$ is the accumulated count of physiological cycles. Its entropy-normalized extension is $\\Tsig(t)=\\int_0^t[\\sigz(s)/\\sref]f(s)\\dd s$, where $\\sigz(s)=\\dd\u03a3/\\dd\u03b8$ is the entropy produced per physiological cycle (the entropy cost per biological tick), $\u03a3$ is cumulative entropy production, and $\\sref$ is a fixed reference entropy cost per cycle used as a normalizing unit. The normalized PBTE age $\\APBTE(t)=\\Tsig(t)/\\Nref$ measures the fraction of a reference entropy--cycle budget consumed, where $\\Nref$ is the reference number of entropy-weighted cycles available over a lifetime. The manuscript is explicitly theoretical: no empirical cohort is analyzed, and the numerical demonstrations are synthetic stress tests rather than validation.",
+   "published": "2026-06-22",
+   "categories": [
+    "physics.bio-ph"
+   ],
+   "url": "https://arxiv.org/abs/2606.23279"
+  },
+  {
+   "id": "2607.04849",
+   "title": "Relativistic PBTE:Biological Proper Time Along the Worldline",
+   "authors": [
+    "Mesfin Asfaw Taye"
+   ],
+   "summary": "Biological aging is conventionally indexed by chronological time, yet every organism is a physical system tracing a worldline through spacetime, so the time available to its metabolism is not coordinate time $t$ but relativistic proper time $\u03c4$. Building on the established Principle of Biological Time Equivalence (PBTE), whose thermodynamic foundation and aging dynamics are taken here as prior results \\citep{TayeBook2026,TayeAging2026,TayeCardiac2026}, we ask how internal physiological time relates to the proper time of physics. The central result is that biological age is an entropy-production functional evaluated along the proper-time worldline, \\begin{equation*} A_{\\rm PBTE}=\\frac{1}{\u03a3_{\\rm ref}}\\int_{\u03c4_0}^{\u03c4_1}\\dot\u03a3_p(\u03c4)\\,d\u03c4, \\qquad \\frac{dA_{\\rm PBTE}}{dt}=\\frac{\\dot\u03a3_p}{\u03b3\\,\u03a3_{\\rm ref}}, \\end{equation*} where $\\dot\u03a3_p$ is entropy production per unit proper time in the local rest frame and $\u03b3$ the Lorentz factor.",
+   "published": "2026-07-06",
+   "categories": [
+    "physics.bio-ph"
+   ],
+   "url": "https://arxiv.org/abs/2607.04849"
+  },
+  {
+   "id": "2001.09580",
+   "title": "Improved quantum circuits for elliptic curve discrete logarithms",
+   "authors": [
+    "Thomas H\u00e4ner",
+    "Samuel Jaques",
+    "Michael Naehrig",
+    "Martin Roetteler",
+    "Mathias Soeken"
+   ],
+   "summary": "We present improved quantum circuits for elliptic curve scalar multiplication, the most costly component in Shor's algorithm to compute discrete logarithms in elliptic curve groups. We optimize low-level components such as reversible integer and modular arithmetic through windowing techniques and more adaptive placement of uncomputing steps, and improve over previous quantum circuits for modular inversion by reformulating the binary Euclidean algorithm. Overall, we obtain an affine Weierstrass point addition circuit that has lower depth and uses fewer $T$ gates than previous circuits. While previous work mostly focuses on minimizing the total number of qubits, we present various trade-offs between different cost metrics including the number of qubits, circuit depth and $T$-gate count. Finally, we provide a full implementation of point addition in the Q# quantum programming language that allows unit tests and automatic quantum resource estimation for all components.",
+   "published": "2020-01-27",
+   "categories": [
+    "quant-ph",
+    "cs.ET"
+   ],
+   "url": "https://arxiv.org/abs/2001.09580"
+  },
+  {
+   "id": "1706.06752",
+   "title": "Quantum resource estimates for computing elliptic curve discrete logarithms",
+   "authors": [
+    "Martin Roetteler",
+    "Michael Naehrig",
+    "Krysta M. Svore",
+    "Kristin Lauter"
+   ],
+   "summary": "We give precise quantum resource estimates for Shor's algorithm to compute discrete logarithms on elliptic curves over prime fields. The estimates are derived from a simulation of a Toffoli gate network for controlled elliptic curve point addition, implemented within the framework of the quantum computing software tool suite LIQ$Ui|\\rangle$. We determine circuit implementations for reversible modular arithmetic, including modular addition, multiplication and inversion, as well as reversible elliptic curve point addition. We conclude that elliptic curve discrete logarithms on an elliptic curve defined over an $n$-bit prime field can be computed on a quantum computer with at most $9n + 2\\lceil\\log_2(n)\\rceil+10$ qubits using a quantum circuit of at most $448 n^3 \\log_2(n) + 4090 n^3$ Toffoli gates. We are able to classically simulate the Toffoli networks corresponding to the controlled elliptic curve point addition as the core piece of Shor's algorithm for the NIST standard curves P-192, P-224, P-256, P-384 and P-521. Our approach allows gate-level comparisons to recent resource estimates for Shor's factoring algorithm. The results also support estimates given earlier by Proos and Zalka and indicate that, for current parameters at comparable classical security levels, the number of qubits required to tackle elliptic curves is less than for attacking RSA, suggesting that indeed ECC is an easier target than RSA.",
+   "published": "2017-06-21",
+   "categories": [
+    "quant-ph",
+    "cs.ET"
+   ],
+   "url": "https://arxiv.org/abs/1706.06752"
+  },
+  {
+   "id": "2007.11680",
+   "title": "Nonlinear redistribution of wealth from a stochastic approach",
+   "authors": [
+    "Hugo Lima",
+    "Allan R. Vieira",
+    "Celia Anteneodo"
+   ],
+   "summary": "We investigate the effect of applying nonlinear redistributive taxes to the yard-sale dynamics of assets. An amount of money is collected from each individual (tax) and distributed back equally. We consider (i) a piecewise linear tax, exempting those with wealth below a threshold $w_0$, and taxing the excess wealth otherwise, and (ii) a power-law tax with exponent $\u03b1>0$, which allows embracing regressive, proportional and progressive rules. The distribution of wealth obtained from numerical simulations of the agent-based dynamics is compared with the solution of its associated Fokker-Planck equation for the probability density function $P(w,t)$ of wealth $w$ at time $t$, in good agreement. Based on these solutions, we analyze how the different rules modify the distribution of wealth across the population, quantifying the level of inequality through the Gini coefficient. We note that the introduction of an exemption threshold does not always diminish inequality, depending on the implementation details. Moreover, nonlinearity brings new stylized facts in the distribution of wealth compared to the linear case, e.g., negative skewness, bimodality, indicating stratification, or a flat shape meaning equality populated wealth layers.",
+   "published": "2020-07-22",
+   "categories": [
+    "physics.soc-ph"
+   ],
+   "url": "https://arxiv.org/abs/2007.11680"
+  },
+  {
+   "id": "1011.5187",
+   "title": "Transition from Exponential to Power Law Distributions in a Chaotic Market",
+   "authors": [
+    "Carmen Pellicer-Lostao",
+    "Ricardo Lopez-Ruiz"
+   ],
+   "summary": "Economy is demanding new models, able to understand and predict the evolution of markets. To this respect, Econophysics offers models of markets as complex systems, that try to comprehend macro-, system-wide states of the economy from the interaction of many agents at micro-level. One of these models is the gas-like model for trading markets. This tries to predict money distributions in closed economies and quite simply, obtains the ones observed in real economies. However, it reveals technical hitches to explain the power law distribution, observed in individuals with high incomes. In this work, non linear dynamics is introduced in the gas-like model in way that an effort to overcome these flaws. A particular chaotic dynamics is used to break the pairing symmetry of agents $(i,j)\\Leftrightarrow(j,i)$. The results demonstrate that a \"chaotic gas-like model\" can reproduce the Exponential and Power law distributions observed in real economies. Moreover, it controls the transition between them. This may give some insight of the micro-level causes that originate unfair distributions of money in a global society. Ultimately, the chaotic model makes obvious the inherent instability of asymmetric scenarios, where sinks of wealth appear and doom the market to extreme inequality.",
+   "published": "2010-11-23",
+   "categories": [
+    "q-fin.TR",
+    "nlin.CD",
+    "q-fin.ST"
+   ],
+   "url": "https://arxiv.org/abs/1011.5187"
+  }
+ ]
+}

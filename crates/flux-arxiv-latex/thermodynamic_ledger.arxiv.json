@@ -1,0 +1,167 @@
+{
+ "papers": [
+  {
+   "id": "hep-th/0203101",
+   "title": "The holographic principle",
+   "authors": [
+    "Raphael Bousso"
+   ],
+   "summary": "There is strong evidence that the area of any surface limits the information content of adjacent spacetime regions, at 10^(69) bits per square meter. We review the developments that have led to the recognition of this entropy bound, placing special emphasis on the quantum properties of black holes. The construction of light-sheets, which associate relevant spacetime regions to any given surface, is discussed in detail. We explain how the bound is tested and demonstrate its validity in a wide range of examples. A universal relation between geometry and information is thus uncovered. It has yet to be explained. The holographic principle asserts that its origin must lie in the number of fundamental degrees of freedom involved in a unified description of spacetime and matter. It must be manifest in an underlying quantum theory of gravity. We survey some successes and challenges in implementing the holographic principle.",
+   "published": "2002-03-12",
+   "categories": [
+    "hep-th",
+    "astro-ph",
+    "gr-qc",
+    "hep-ph",
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/hep-th/0203101"
+  },
+  {
+   "id": "quant-ph/9908043",
+   "title": "Ultimate physical limits to computation",
+   "authors": [
+    "Seth Lloyd"
+   ],
+   "summary": "Computers are physical systems: what they can and cannot do is dictated by the laws of physics. In particular, the speed with which a physical device can process information is limited by its energy and the amount of information that it can process is limited by the number of degrees of freedom it possesses. This paper explores the physical limits of computation as determined by the speed of light $c$, the quantum scale $\\hbar$ and the gravitational constant $G$. As an example, quantitative bounds are put to the computational power of an `ultimate laptop' with a mass of one kilogram confined to a volume of one liter.",
+   "published": "1999-08-13",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/9908043"
+  },
+  {
+   "id": "quant-ph/9710043",
+   "title": "The maximum speed of dynamical evolution",
+   "authors": [
+    "Norman Margolus",
+    "Lev B. Levitin"
+   ],
+   "summary": "We discuss the problem of counting the maximum number of distinct states that an isolated physical system can pass through in a given period of time---its maximum speed of dynamical evolution. Previous analyses have given bounds in terms of the standard deviation of the energy of the system; here we give a strict bound that depends only on E-E0, the system's average energy minus its ground state energy. We also discuss bounds on information processing rates implied by our bound on the speed of dynamical evolution. For example, adding one Joule of energy to a given computer can never increase its processing rate by more than about 3x10^33 operations per second.",
+   "published": "1997-10-17",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/9710043"
+  },
+  {
+   "id": "2411.07897",
+   "title": "Modified Landauer principle according to Tsallis entropy",
+   "authors": [
+    "L. Herrera"
+   ],
+   "summary": "The Landauer principle establishes a lower bound in the amount of energy that should be dissipated in the erasure of one bit of information. The specific value of this dissipated energy is tightly related to the definition of entropy. In this article, we present a generalization of the Landauer principle based on the Tsallis entropy. Some consequences resulting from such a generalization are discussed. These consequences include the modification to the mass ascribed to one bit of information, the generalization of the Landauer principle to the case when the system is embedded in a gravitational field, and the number of bits radiated in the emission of gravitational waves.",
+   "published": "2024-11-12",
+   "categories": [
+    "gr-qc",
+    "physics.class-ph"
+   ],
+   "url": "https://arxiv.org/abs/2411.07897"
+  },
+  {
+   "id": "1411.6730",
+   "title": "Experimental verification of Landauer's principle in erasure of nanomagnetic memory bits",
+   "authors": [
+    "J. Hong",
+    "B. Lambson",
+    "S. Dhuey",
+    "J. Bokor"
+   ],
+   "summary": "In 1961, R. Landauer proposed the principle that logical irreversibility is associated with physical irreversibility and further theorized that the erasure of information is fundamentally a dissipative process. Landauer posited that a fundamental energy cost is incurred by the erasure of information contained in the memory of a computation device. His theory states that to erase one binary bit of information from a physical memory element in contact with a heat bath at a given temperature, at least kT ln(2) of heat must be dissipated from the memory into the environment, where k is the Boltzmann constant and T is the temperature. Although this connection between information theory and thermodynamics has proven to be very useful for establishing boundary limits for physical processes, Landauer principle has been a subject of some debate. Despite the theoretical controversy and fundamental importance of Landauer erasure in information technology, this phenomenon has not been experimentally explored using any practical physical implementation for digital information. Here, we report an investigation of the thermodynamic limits of the memory erasure process using nanoscale magnetic memory bits, by far the most ubiquitous digital storage technology today. Through sensitive, temperature dependent magnetometry measurements, we observed that the amount of dissipated energy is consistent with the Landauer limit during an adiabatic erasure process in nanoscale, single domain magnetic thin film islands. This result confirms the connection between information thermodynamics and physical systems and also provides a foundation for the development of practical information processing technologies that approach the fundamental limit of energy dissipation.",
+   "published": "2014-11-25",
+   "categories": [
+    "cond-mat.mes-hall"
+   ],
+   "url": "https://arxiv.org/abs/1411.6730"
+  },
+  {
+   "id": "2607.16183",
+   "title": "A Blueprint for Equilibrium-Based Differentiable Continuous-Variable Thermodynamic Computing",
+   "authors": [
+    "Owen Lockwood",
+    "J\u00e9r\u00e9my B\u00e9janin",
+    "Joost Bus",
+    "Christopher Chamberland",
+    "Patrick Huembeli",
+    "Frank Sch\u00e4fer",
+    "Guillaume Verdon"
+   ],
+   "summary": "To address the escalating energy and latency demands of machine-learning workloads, we introduce a blueprint for an energy-efficient and fast thermodynamic computing stack that leverages stochastic analog processes in physical hardware. In this work, we focus on energy-based thermodynamic computing where the stochastic process is well described by Langevin dynamics with tunable energy potentials. The implementation of such potentials in physical hardware enables us to generate and sample from basic parameterized energy-based models. We demonstrate how to construct and train popular classes of machine learning models based on these hardware-native energy-based models, using the framework of probabilistic graphical models. We analyze the runtime and energy consumption of different models in this thermodynamic paradigm based on theoretical considerations and numerical studies. As a preliminary experimental realization of such hardware, we present our stochastic analog superconducting circuits driven by thermal noise. Together, these results outline a path toward energy-efficient thermodynamic hardware for probabilistic machine learning.",
+   "published": "2026-07-17",
+   "categories": [
+    "cs.LG",
+    "cs.ET",
+    "physics.app-ph"
+   ],
+   "url": "https://arxiv.org/abs/2607.16183"
+  },
+  {
+   "id": "2607.14520",
+   "title": "Moment-Resolved Readout and Reservoir Diversity in Nonequilibrium Langevin Computing",
+   "authors": [
+    "JiZheng Duan",
+    "MingYang Zhao",
+    "YanWei Chen",
+    "Lei Yang"
+   ],
+   "summary": "Nonlinear thermodynamic computers based on Langevin dynamics exploit thermal fluctuations as a physical substrate for computation. Recent work has shown that quartic-confined fluctuating degrees of freedom can act as thermodynamic neurons capable of nonlinear function approximation at finite observation times. Here we extend this paradigm from mean-only readout to moment-resolved readout. Instead of representing each driven reservoir solely by its first moment, we construct a response vector from the elementwise raw polynomial moments \\(\\mathbb{E}[\\bm{x}]\\), \\(\\mathbb{E}[\\bm{x}^{\\odot 2}]\\), and \\(\\mathbb{E}[\\bm{x}^{\\odot 4}]\\). These observables combine displacement and central-shape contributions and are naturally aligned with the linear, quadratic, and quartic terms of the local driven dynamics. We further introduce a heterogeneous multi-reservoir architecture in which three reservoirs with distinct initialization and training histories form a joint \\(2304\\)-dimensional response representation. Under the fixed MNIST \\(60000/10000\\) reproduction protocol, feature-level fusion achieves the best observed accuracy of \\(9695/10000=96.95\\%\\), compared with \\(9682/10000=96.82\\%\\) for the strongest single-reservoir model and \\(9684/10000=96.84\\%\\) for equal-weight logit averaging. An exact paired McNemar test does not establish a statistically significant improvement over the strongest single reservoir, but the ablation and wrong-set overlap results provide suggestive evidence of complementary classification errors. These results motivate higher-order polynomial-moment readout and reservoir heterogeneity as candidate design principles for finite-time Langevin computing.",
+   "published": "2026-07-16",
+   "categories": [
+    "cond-mat.stat-mech",
+    "cs.NE"
+   ],
+   "url": "https://arxiv.org/abs/2607.14520"
+  },
+  {
+   "id": "2607.00170",
+   "title": "Scaling Up Thermodynamic AI Models",
+   "authors": [
+    "Andrew G. Moore"
+   ],
+   "summary": "Thermodynamic computing devices based on the Ising model show great promise for low-power AI inference and edge computing, but scalable methods for training large models for such hardware remain limited. Prior theory shows that the time-averaged behavior of high-temperature Gibbs-sampled Ising systems can implement feed-forward neural inference. We turn this theoretical correspondence into a scalable and purely backpropagation-based algorithm for training deep convolutional networks for thermodynamic inference on Ising machine hardware. Our image classification models achieve accuracies of 94.9% on CIFAR-10 and 76.0% on CIFAR-100 under binary Gibbs sampling. We then develop and experimentally validate a mathematical theory relating inference cost to accuracy and controlling autocorrelation times. Subsequently, we calculate asymptotic results showing that inference cost is bounded by a well-controlled tradeoff with performance and exhibit algorithms for computing optimal inference schedules. Finally, we discuss implications for hardware development and the future of high-temperature thermodynamic AI models.",
+   "published": "2026-06-30",
+   "categories": [
+    "cs.LG",
+    "cond-mat.dis-nn",
+    "cs.AI"
+   ],
+   "url": "https://arxiv.org/abs/2607.00170"
+  },
+  {
+   "id": "2509.00573",
+   "title": "On the Statistical Physics of Wealth Distribution",
+   "authors": [
+    "Joel Wagner",
+    "Siew Ann Cheong",
+    "Viola Priesemann"
+   ],
+   "summary": "Asset exchange models (AEMs) provide a physics-inspired framework for studying wealth formation. These models capture wealth distribution dynamics via pairwise money exchanges, yielding steady-state distributions from exponential to heavy-tailed power laws. However, empirical validation remains limited due to scarce real-world transaction data. Here, we bridge this gap by analyzing spectral properties of Markov transition matrices from both AEMs and Ethereum blockchain data, enabling quantitative comparison of model and empirical exchange dynamics. We assess thermodynamic equilibrium in exchange processes - specifically, detailed balance - and derive steady-state wealth distributions from transition matrices. We find that equilibrium systems' spectra contain only real eigenvalues and link Ethereum price changes to spectral shifts. We also investigate external factors (e.g., taxes), showing that advantages for richer individuals make wealth evolution path-dependent on initial distributions. Our work establishes a quantitative framework for validating AEMs with real data, advancing economic modeling and understanding of wealth formation.",
+   "published": "2025-08-30",
+   "categories": [
+    "physics.soc-ph"
+   ],
+   "url": "https://arxiv.org/abs/2509.00573"
+  },
+  {
+   "id": "2605.23162",
+   "title": "SolarChain: Bridging Physical Law, Verifiable Trust, and Sustainable Markets for Urban Energy Resilience",
+   "authors": [
+    "Shilin Ou",
+    "Yifan Xu",
+    "Zhenshan Zhang",
+    "Luyao Zhang",
+    "Ming-Chun Huang"
+   ],
+   "summary": "Urban decarbonization requires scaling rooftop solar across millions of fragmented producers, yet cities face a fundamental tension: energy data is easily manipulated, and economic incentives often reward speculation rather than actual infrastructure deployment. We present SolarChain, a platform that resolves both problems by anchoring digital accountability to the thermodynamic limits of solar energy conversion. Using real-time meteorological data, geospatial coordinates, and first-principles calculations of solar yield, the system establishes a hard physical boundary for every panel's maximum possible output; any reported generation exceeding this limit is automatically rejected before entering the shared ledger. This trustless verification enables a peer-to-peer marketplace with programmatic reward structures that continuously reinvest value into equipment maintenance and market liquidity, preventing the speculative hoarding that typically destabilizes blockchain-based marketplaces. When electricity is consumed, the corresponding digital credits are permanently retired in direct proportion to physical energy dissipation, creating an auditable one-to-one mapping between urban consumption and carbon accounting. Deployed across heterogeneous city nodes, the prototype demonstrates resilience against data injection attacks while lowering capital barriers for community-level solar expansion. Beyond energy, the framework offers a general model for coordinating economic activity with physical law in any domain where distributed infrastructure demands both data integrity and sustainable investment. We release the data and code as open-access on GitHub.",
+   "published": "2026-05-22",
+   "categories": [
+    "cs.CY",
+    "cs.CR",
+    "cs.DC",
+    "cs.ET",
+    "econ.GN"
+   ],
+   "url": "https://arxiv.org/abs/2605.23162"
+  }
+ ]
+}

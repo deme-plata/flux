@@ -8,8 +8,10 @@
 //!   FLUX_MOE_OLLAMA=http://<ip>:<port> flux-moe-drive [model]   (default qwen3.6)
 
 fn main() {
-    let endpoint = std::env::var("FLUX_MOE_OLLAMA")
-        .unwrap_or_else(|_| "http://202.122.49.242:22938".into());
+    let endpoint = match flux_moe::ollama_endpoint() {
+        Ok(e) => e,
+        Err(e) => { eprintln!("flux-moe-drive: {e}"); std::process::exit(2); }
+    };
     // Model precedence: FLUX_MOE_MODEL env > argv[1] > default. route() always picks the
     // first expert per task, so the strong-but-slow experts (deepseek-r1:70b) never get
     // chosen naturally — this override forces ANY expert so we can drive + prove them.

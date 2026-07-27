@@ -365,7 +365,7 @@ pub fn to_example(goal: &str, call: &ToolCall) -> ToolExample {
 
 /// Real sibling-agent + operator addresses (from CLAUDE.md) + tokens/pools.
 const ADDRS: &[(&str, &str)] = &[
-    ("Rocky", "qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb"),
+    ("Rocky", "qnk4973498a9865b291636faef205f728a49d98890f001e9e806479043f038ebf6c"),
     ("Adrian", "qnk1f97ff0b330c7790e8c82a57579052851d2c15239c78b6124fee6a74e4026d67"),
     ("Codex", "qnka3a92bba1f96"),
     ("Viktor", "qnkefca1e8c0723"),

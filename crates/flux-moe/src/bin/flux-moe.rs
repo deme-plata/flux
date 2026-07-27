@@ -130,7 +130,7 @@ fn main() {
     // `flux-moe build [--pkg P] "<goal>"` — qwen3.6 (or FLUX_MOE_MODEL) writes compile-ready Rust
     // for the goal, THROUGH flux-moe's router/generate path. This is "the model helps build".
     if args.first().map(|s| s.as_str()) == Some("build") {
-        let endpoint = std::env::var("FLUX_MOE_OLLAMA").unwrap_or_else(|_| "http://5.79.79.158:11434".into());
+        let endpoint = flux_moe::ollama_endpoint().unwrap_or_else(|e| { eprintln!("flux-moe: {e}"); std::process::exit(2) });
         let model = std::env::var("FLUX_MOE_MODEL").unwrap_or_else(|_| "qwen3.6:latest".into());
         let rest = &args[1..];
         let mut pkg = "flux".to_string();
@@ -154,7 +154,7 @@ fn main() {
     }
     let ensemble = args.iter().any(|a| a == "--ensemble");
     let prompt: String = args.iter().filter(|a| !a.starts_with("--")).cloned().collect::<Vec<_>>().join(" ");
-    let endpoint = std::env::var("FLUX_MOE_OLLAMA").unwrap_or_else(|_| "http://5.79.79.158:11434".into());
+    let endpoint = flux_moe::ollama_endpoint().unwrap_or_else(|e| { eprintln!("flux-moe: {e}"); std::process::exit(2) });
 
     if prompt.trim().is_empty() {
         println!("flux-moe — Flux hybrid LLM (mixture-of-models router over Qwen + Gemma)\n");

@@ -74,6 +74,96 @@ impl Expert {
 }
 
 /// The expert pool — Qwen family + Gemma, each owning the tasks it's best at.
+/// Resolve the inference endpoint, safely.
+///
+/// SECURITY (2026-07-27 audit finding, HIGH). Three call sites used to default to
+/// `http://202.122.49.242:22938` — a *specific rented Vast.ai A100*, in cleartext
+/// HTTP, hardcoded as the fallback. That instance no longer exists (the Vast
+/// account reports none), so the IP has been reassigned: every prompt sent by a
+/// caller that had not set `FLUX_MOE_OLLAMA` would go, unencrypted, to a machine
+/// belonging to a stranger. Prompts here routinely carry source code and
+/// operational context.
+///
+/// Now: default is loopback, and cleartext egress to a *public* address is
+/// refused unless explicitly acknowledged.
+///
+/// * default — `http://localhost:11434` (standard Ollama port, same default
+///   `flux-context::dispatch` already used).
+/// * `FLUX_MOE_OLLAMA` — override. Loopback and RFC1918/private hosts are fine in
+///   cleartext (the WireGuard mesh is private); `https://` anywhere is fine.
+/// * a **public** host over plain `http://` returns `Err` unless
+///   `FLUX_ALLOW_CLEARTEXT_LLM=1` is set, so the unsafe case is opt-in and loud
+///   rather than the silent default.
+pub fn ollama_endpoint() -> Result<String, String> {
+    let ep = std::env::var("FLUX_MOE_OLLAMA")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    if !ep.starts_with("http://") {
+        return Ok(ep); // https (or a non-http scheme) — not our problem to police
+    }
+    let host = ep
+        .trim_start_matches("http://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if is_private_host(&host) {
+        return Ok(ep);
+    }
+    if std::env::var("FLUX_ALLOW_CLEARTEXT_LLM").as_deref() == Ok("1") {
+        eprintln!(
+            "⚠ flux-moe: sending prompts in CLEARTEXT to public host {host} \
+             (FLUX_ALLOW_CLEARTEXT_LLM=1 acknowledged)"
+        );
+        return Ok(ep);
+    }
+    Err(format!(
+        "refusing cleartext http:// to public host {host} — prompts would travel unencrypted \
+         to a machine you may not control. Use https://, a private/loopback address, or set \
+         FLUX_ALLOW_CLEARTEXT_LLM=1 to override."
+    ))
+}
+
+/// Loopback or RFC1918/CGNAT/link-local — i.e. reachable only from a network the
+/// operator controls, so cleartext is acceptable there.
+fn is_private_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let o = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (o[0] == 100 && (64..128).contains(&o[1])) // 100.64/10 CGNAT
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA
+        }
+        Err(_) => false, // a public DNS name
+    }
+}
+
+#[cfg(test)]
+mod endpoint_guard_tests {
+    use super::*;
+
+    #[test]
+    fn private_and_loopback_hosts_are_allowed_in_cleartext() {
+        for h in ["localhost", "127.0.0.1", "10.77.0.3", "192.168.1.9", "172.16.4.2", "box.local"] {
+            assert!(is_private_host(h), "{h} should count as private");
+        }
+    }
+
+    #[test]
+    fn public_hosts_are_not_private() {
+        // the exact address this audit removed, plus a public DNS name
+        for h in ["202.122.49.242", "8.8.8.8", "api.deepseek.com"] {
+            assert!(!is_private_host(h), "{h} must NOT count as private");
+        }
+    }
+}
+
 pub fn registry() -> Vec<Expert> {
     vec![
         //              name           model               handles                            ttft  cap  cost
@@ -81,8 +171,11 @@ pub fn registry() -> Vec<Expert> {
         Expert::new("qwen-trade",   "qwen3:8b",         &[Task::Trading, Task::Sentiment],   350, 0.80, 0.25),
         Expert::new("qwen-general", "qwen3:4b",         &[Task::General],                    200, 0.60, 0.10),
         Expert::new("gemma",        "gemma3:4b",        &[Task::General, Task::Sentiment],   180, 0.55, 0.08),
-        // live on the public A100 (202.122.49.242:22938) — strong but slower/pricier, so the scorer
-        // only picks them when the task needs the capability, not for the cheap/simple 80%.
+        // served by whatever `FLUX_MOE_OLLAMA` points at (see `ollama_endpoint`) — strong but
+        // slower/pricier, so the scorer only picks them when the task needs the capability, not
+        // for the cheap/simple 80%. NOTE: this used to name a specific public A100 by IP; that
+        // rented box is gone (2026-07-27 audit: the Vast account reports no instances), so no
+        // address is hardcoded here any more.
         Expert::new("qwen3.6",      "qwen3.6:latest",   &[Task::General, Task::Code, Task::Trading], 400, 0.92, 0.40),
         Expert::new("deepseek-r1",  "deepseek-r1:70b",  &[Task::General, Task::Trading],     1500, 0.95, 0.60),
     ]

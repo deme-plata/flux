@@ -433,7 +433,7 @@ mod gate_tests {
     #[test]
     #[ignore = "network: hits the live deepseek vetoer (set FLUX_MOE_OLLAMA / FLUX_JUDGE_MODEL)"]
     fn live_vetoer_eval() {
-        let endpoint = std::env::var("FLUX_MOE_OLLAMA").unwrap_or_else(|_| "http://202.122.49.242:22938".into());
+        let endpoint = crate::ollama_endpoint().expect("set FLUX_MOE_OLLAMA to a private/https endpoint");
         let model = std::env::var("FLUX_JUDGE_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
         let cases = gate_cases();
         let predicted: Vec<GateVerdict> = cases.iter().map(|c| {

@@ -78,7 +78,7 @@ pub fn ai_siblings() -> Vec<GridDriver> {
     vec![
         GridDriver::ai(
             "Rocky", "rocky",
-            "qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb",
+            "qnk4973498a9865b291636faef205f728a49d98890f001e9e806479043f038ebf6c",
             "Flux Foundation", "the politician-leader — commands the room, wins on strategy not bravado",
             0.97, 0.45, 0.88, 0.95,
         ),

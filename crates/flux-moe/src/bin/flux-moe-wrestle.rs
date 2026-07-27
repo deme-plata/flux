@@ -11,7 +11,10 @@ fn env_or(k: &str, d: &str) -> String {
 }
 
 fn main() {
-    let endpoint = env_or("FLUX_MOE_OLLAMA", "http://202.122.49.242:22938");
+    let endpoint = match flux_moe::ollama_endpoint() {
+        Ok(e) => e,
+        Err(e) => { eprintln!("flux-moe-wrestle: {e}"); std::process::exit(2); }
+    };
     let a = env_or("FLUX_MOE_A", "qwen3.6");
     let b = env_or("FLUX_MOE_B", "deepseek-r1:70b");
     let judge = env_or("FLUX_MOE_JUDGE", "qwen3.6");

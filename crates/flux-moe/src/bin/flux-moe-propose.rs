@@ -18,7 +18,10 @@ WHY: <one line>\n\
 TEST: <one assertion that would pass>";
 
 fn main() {
-    let ep = env::var("FLUX_MOE_OLLAMA").unwrap_or_else(|_| "http://202.122.49.242:22938".into());
+    let ep = match flux_moe::ollama_endpoint() {
+        Ok(e) => e,
+        Err(e) => { eprintln!("flux-moe-propose: {e}"); std::process::exit(2); }
+    };
     let model = env::args().nth(1).unwrap_or_else(|| "deepseek-r1:70b".into());
     let prompt = env::args().nth(2).unwrap_or_else(|| DEFAULT_PROMPT.into());
 

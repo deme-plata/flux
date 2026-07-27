@@ -8,7 +8,10 @@ fn main() {
     // Two-box shape: set FLUX_MOE_PROPOSER_EP (qwen box) + FLUX_MOE_VETOER_EP (deepseek box) to run
     // each model on its OWN GPU — no unload, no churn. If they're equal (or only FLUX_MOE_OLLAMA is
     // set), it falls back to the single-box flow (with the unload-between step).
-    let base = std::env::var("FLUX_MOE_OLLAMA").unwrap_or_else(|_| "http://202.122.49.242:22938".into());
+    let base = match flux_moe::ollama_endpoint() {
+        Ok(e) => e,
+        Err(e) => { eprintln!("flux-twomind: {e}"); std::process::exit(2); }
+    };
     let prop_ep = std::env::var("FLUX_MOE_PROPOSER_EP").unwrap_or_else(|_| base.clone());
     let veto_ep = std::env::var("FLUX_MOE_VETOER_EP").unwrap_or_else(|_| base.clone());
     let proposer = std::env::var("FLUX_TWOMIND_PROPOSER").unwrap_or_else(|_| "qwen3.6:latest".into());

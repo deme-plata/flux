@@ -1,6 +1,7 @@
 // fluxc — CLI entry point for the Flux build orchestrator
 
 mod prune;
+mod webcam_cli;
 
 use std::env;
 
@@ -447,6 +448,17 @@ fn main() {
         }
         Some("release-audit") | Some("rel-audit") => fluxc_core::release_audit::print_release_audit(),
         Some("mcp") => fluxc_mcp::run_mcp_server(),
+        // Operator-only consent control for flux-webcam.
+        //
+        // This lives ONLY here, on the CLI, and deliberately has no MCP
+        // equivalent for `grant`. An agent can observe consent and give it up
+        // (flux_webcam_status / _revoke / _panic_stop), but the act of granting
+        // permission to look through a camera requires a human at a shell on
+        // this box. That is the whole point — see handlers/webcam.rs.
+        Some("webcam") => {
+            let rc = webcam_cli::run(&subcommand_args[1..]);
+            std::process::exit(rc);
+        }
         Some("prune-report") => {
             // v0.36 SDE (semantic dependency elimination, report-only): walk the
             // workspace dep graph from the default-members roots and write

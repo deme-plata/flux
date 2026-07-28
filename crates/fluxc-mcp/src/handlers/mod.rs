@@ -318,5 +318,6 @@ pub mod fleet;
 pub mod compile_error;
 pub mod flux_legacy;
 pub mod cortex;
+pub mod webcam;
 pub mod swarm_compile;
 pub mod supersonic;

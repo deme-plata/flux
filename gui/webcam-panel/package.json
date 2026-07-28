@@ -1,0 +1,15 @@
+{
+  "name": "flux-webcam-panel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vite panel for flux-webcam — renders measured capture telemetry, the SAP breakdown and the p2p relay ledger. Built via `fluxc build` (frontend autodetect), never raw npm.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  }
+}

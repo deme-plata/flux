@@ -47,6 +47,7 @@ fn build_registry() -> ToolRegistry {
     handlers::fleet::register(&mut registry);
     handlers::compile_error::register(&mut registry);
     handlers::cortex::register(&mut registry);
+    handlers::webcam::register(&mut registry);
     handlers::swarm_compile::register(&mut registry);
     registry
 }

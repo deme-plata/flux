@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>flux-webcam — capture &amp; SAP panel</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body class="hypr-root">
+    <div id="app">
+      <header class="head">
+        <div class="brand-cube">F</div>
+        <div>
+          <h1>flux-webcam <span class="chip" id="chip-version">v0.39.0</span></h1>
+          <p class="sub">on-demand frame capture · measured SAP · p2p relay ledger</p>
+        </div>
+      </header>
+
+      <div class="cap-strip" id="cap-strip"></div>
+
+      <section class="grid">
+        <div class="panel span2">
+          <h2 class="sec sec--cyan">SAP score</h2>
+          <div class="sap-wrap">
+            <div class="sap-dial">
+              <div class="sap-total" id="sap-total">—</div>
+              <div class="sap-label">SAP total</div>
+              <div class="sap-agent" id="sap-agent"></div>
+            </div>
+            <div class="bars" id="sap-bars"></div>
+          </div>
+          <p class="note" id="sap-formula"></p>
+        </div>
+
+        <div class="panel">
+          <h2 class="sec sec--mauve">Last frame</h2>
+          <div class="frame-box">
+            <img id="frame-img" alt="last captured frame" />
+            <div class="frame-missing" id="frame-missing">no frame emitted</div>
+          </div>
+          <dl class="kv" id="frame-kv"></dl>
+        </div>
+
+        <div class="panel">
+          <h2 class="sec sec--green">Capture telemetry</h2>
+          <dl class="kv" id="cap-kv"></dl>
+        </div>
+
+        <div class="panel">
+          <h2 class="sec sec--orange">p2p relay ledger</h2>
+          <dl class="kv" id="relay-kv"></dl>
+          <table class="providers" id="providers"></table>
+        </div>
+
+        <div class="panel span2">
+          <h2 class="sec sec--gold">Crates in this surface</h2>
+          <div class="crates" id="crates"></div>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <span id="foot-src">loading…</span>
+        <span class="dot">·</span>
+        <span>built with <strong>fluxc</strong> + vite — never raw npm</span>
+      </footer>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+[package]
+name = "flux-webcam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-webcam — on-demand frame capture for the Flux agent surface. Pluggable FrameSource (synthetic test-pattern / file drop / external capture command), a dependency-free PNG encoder, measured capture telemetry mapped into the DAGKnight SAP ScoreTable via flux-sap-feed, and a flux-p2p frame-announce relay so a camera attached to ANY box in the mesh can serve frames to an agent on another. Capture is explicit and one-shot by design: nothing streams, nothing runs on a timer."
+
+[dependencies]
+# flux-p2p arrives transitively via flux-sap-feed; named explicitly because the
+# relay uses its SAP ScoreTable + PeerId types directly (Viktor's ask: wire p2p in).
+flux-p2p = { path = "../flux-p2p" }
+flux-sap-feed = { path = "../flux-sap-feed" }
+# Fisher information: models decay of confidence that a consent grant still
+# reflects the operator's current intent. Tightens the gate over time; never
+# extends it.
+flux-science = { path = "../flux-science" }
+blake3 = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

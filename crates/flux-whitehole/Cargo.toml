@@ -1,0 +1,10 @@
+[package]
+name = "flux-whitehole"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Measured black-hole -> white-hole timescale module: Hawking evaporation in closed form AND by numerical integration (cross-checked), the M^2 bounce / M^3 evaporation / M^5 remnant hierarchy from the LQG black-to-white literature, and a parameter flood that finds where the scenario stops being observable."
+
+[dependencies]
+
+[dev-dependencies]

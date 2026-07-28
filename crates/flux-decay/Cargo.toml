@@ -1,0 +1,8 @@
+[package]
+name = "flux-decay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded standing for polities whose members do not die. Executable form of the entrenchment theorem from 'The Arithmetic of Long Life': standing compounding at rate r and decaying at rate lambda is bounded IFF lambda > r. Integer fixed-point decay (deterministic, consensus-safe) plus an f64 design calculator (off-chain only). Answers the SIGIL citizenship v0.2 score-decay question with a number: half-life < 17.3 yr at r=4%."
+
+[dependencies]

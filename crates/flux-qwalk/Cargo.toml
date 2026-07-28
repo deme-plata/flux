@@ -1,0 +1,15 @@
+[package]
+name = "flux-qwalk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Independent, measured replication of the CLASSICAL Markov-chain baseline in arXiv:2607.22818 (fully-quantum walks): exact spectral gaps of Metropolis chains on Sherrington-Kirkpatrick instances, and the 2^(-nu*n) gap-decay fit the paper's speedup claim rests on."
+
+[dependencies]
+# Battle-tested symmetric eigensolver. Deliberately NOT hand-rolled: the whole
+# point of this crate is to be an independent instrument, and an instrument
+# whose numerics I wrote myself the same afternoon is not independent of me.
+nalgebra = "0.32"
+
+[dev-dependencies]
+approx = "0.5"

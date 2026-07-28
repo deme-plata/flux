@@ -26,6 +26,7 @@ pub mod quantum;
 pub mod blackhole;
 pub mod inflation;
 pub mod holographic;
+pub mod fisher;
 
 // Re-exports
 pub use constants::*;
@@ -34,6 +35,7 @@ pub use quantum::QuantumGravityCorrections;
 pub use blackhole::BlackHoleEvolution;
 pub use inflation::CosmologicalInflation;
 pub use holographic::HolographicTheory;
+pub use fisher::{fuse, ArrivalModel, FusedEstimate, StaleObservation};
 
 /// How DAGKnight zero-message voting works with Merkle trees in self-hosting:
 ///

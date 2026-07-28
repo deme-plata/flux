@@ -1,0 +1,12 @@
+[package]
+name = "flux-md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Molecular dynamics that actually computes, and proves it. Real Lennard-Jones force field, velocity-Verlet integrator, periodic minimum-image boundaries, and observables (T, g(r), MSD -> self-diffusion) graded against PUBLISHED experimental values for liquid argon (Rahman 1964). The missing backend for q-bio-dsl, whose synthesis layer currently sleeps instead of computing. Zero dependencies; deterministic from a seed."
+
+[dependencies]
+
+[[bin]]
+name = "flux-md"
+path = "src/bin/flux-md.rs"

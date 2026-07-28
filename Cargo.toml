@@ -52,6 +52,8 @@ default-members = [
     "crates/flux-recursive-proofs",
     "crates/flux-refactor",
     "crates/flux-rev",
+    "crates/flux-decay",
+    "crates/flux-md",
     "crates/flux-science",
     "crates/flux-search",
     "crates/flux-self-heal",

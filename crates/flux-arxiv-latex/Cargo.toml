@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 flux-science = { path = "../flux-science" }
 flux-whitehole = { path = "../flux-whitehole" }
+flux-qwalk = { path = "../flux-qwalk" }

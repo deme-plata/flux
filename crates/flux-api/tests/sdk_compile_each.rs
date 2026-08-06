@@ -43,6 +43,82 @@ fn tool_present(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve a language toolchain binary, preferring an explicit env override.
+///
+/// Boxes like Epsilon deliberately keep `node`/`tsc` off the global PATH (Flux
+/// dogfooding), so a bare `which tsc` reports "missing" even when a perfectly
+/// good compiler is installed — and the compile check silently degrades to a
+/// string assertion. The env hook (`FLUX_TSC`, `FLUX_GO`, `FLUX_KOTLINC`) lets
+/// CI and local runs point at the real binary and get genuine validation.
+fn resolve_tool(bin: &str, env_var: &str) -> Option<String> {
+    if let Ok(p) = std::env::var(env_var) {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    tool_present(bin).then(|| bin.to_string())
+}
+
+/// An endpoint carrying whatever middleware the caller wants to exercise.
+fn mw_endpoint(path: &str, op: &str, mw: flux_api::MiddlewareSpec) -> flux_api::ApiEndpoint {
+    flux_api::ApiEndpoint {
+        crate_name: "demo".into(),
+        method: flux_api::HttpMethod::GET,
+        path: path.into(),
+        operation_id: op.into(),
+        summary: "demo".into(),
+        parameters: vec![],
+        request_body: None,
+        responses: vec![flux_api::ApiResponse {
+            status: 200,
+            description: String::new(),
+            schema: None,
+        }],
+        tags: vec!["demo".into()],
+        middleware: Some(mw),
+    }
+}
+
+/// The three pagination styles + SSE, all on one client — the surface added in
+/// v0.15-B. Used by the per-language compile checks so generated paginators
+/// and stream readers are validated by a real compiler, not just by
+/// string-contains assertions in the generator's own unit tests.
+fn middleware_endpoints() -> Vec<flux_api::ApiEndpoint> {
+    use flux_api::{MiddlewareSpec, PaginationStyle, RetryPolicy, StreamKind};
+    vec![
+        mw_endpoint(
+            "/cursor",
+            "list_cursor",
+            MiddlewareSpec::bearer_auth()
+                .with_retry(RetryPolicy::standard())
+                .with_pagination(PaginationStyle::Cursor {
+                    cursor_param: "after".into(),
+                    response_field: "next_cursor".into(),
+                }),
+        ),
+        mw_endpoint(
+            "/paged",
+            "list_paged",
+            MiddlewareSpec::default()
+                .with_pagination(PaginationStyle::Page { page_param: "page".into() })
+                .with_items_field("results"),
+        ),
+        mw_endpoint(
+            "/offset",
+            "list_offset",
+            MiddlewareSpec::default().with_pagination(PaginationStyle::Offset {
+                offset_param: "offset".into(),
+                limit_param: "limit".into(),
+            }),
+        ),
+        mw_endpoint(
+            "/events",
+            "watch_events",
+            MiddlewareSpec::default().with_streaming(StreamKind::Sse),
+        ),
+    ]
+}
+
 fn write_temp(prefix: &str, ext: &str, body: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
@@ -102,21 +178,57 @@ fn typed_python_sdk_parses_with_py_compile() {
 
 #[test]
 fn typescript_sdk_parses_with_tsc_if_available() {
-    if !tool_present("tsc") {
-        println!("[skip] tsc not installed — skipping TS compile check (generated source still validated by generator unit tests)");
+    let Some(tsc) = resolve_tool("tsc", "FLUX_TSC") else {
+        println!("[skip] tsc not installed — skipping TS compile check (set FLUX_TSC=/path/to/tsc to enable)");
         // Still sanity-check the generator produces a non-empty string.
         let eps = discover_endpoints(&ws(&["wickes-cms"]));
         let sdk = generate_typescript_sdk(&eps, "http://localhost:8080");
         assert!(!sdk.is_empty() && sdk.contains("export class"));
         return;
-    }
+    };
     let eps = discover_endpoints(&ws(&["wickes-cms", "flux-ue-bridge"]));
     let sdk = generate_typescript_sdk(&eps, "http://localhost:8080");
     let path = write_temp("ts", ".ts", &sdk);
-    let mut cmd = Command::new("tsc");
+    let mut cmd = Command::new(&tsc);
     cmd.args(["--noEmit", "--target", "ES2020", "--strict", "false"])
         .arg(&path);
     run_check(&mut cmd, "tsc");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn typescript_middleware_sdk_compiles_with_tsc_if_available() {
+    // v0.15-B: the paginators emit async generators and the SSE reader drives a
+    // ReadableStream — both are far more likely to be malformed than the plain
+    // fetch client, so they get their own compiler pass.
+    let Some(tsc) = resolve_tool("tsc", "FLUX_TSC") else {
+        println!("[skip] tsc not installed — set FLUX_TSC=/path/to/tsc to compile-check paginators");
+        let sdk = generate_typescript_sdk(&middleware_endpoints(), "http://localhost:8080");
+        assert!(sdk.contains("IterPages") && sdk.contains("Stream("));
+        return;
+    };
+    let sdk = generate_typescript_sdk(&middleware_endpoints(), "http://localhost:8080");
+    let path = write_temp("ts_mw", ".ts", &sdk);
+    let mut cmd = Command::new(&tsc);
+    cmd.args(["--noEmit", "--target", "ES2020", "--strict", "false"])
+        .arg(&path);
+    run_check(&mut cmd, "tsc (middleware)");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn python_middleware_sdk_parses_with_py_compile() {
+    // Same reasoning as the TS middleware check: generated `yield`-based
+    // paginators and the SSE reader are the parts most likely to be malformed.
+    if !tool_present("python3") {
+        println!("[skip] python3 not installed");
+        return;
+    }
+    let sdk = generate_python_sdk(&middleware_endpoints(), "http://localhost:8080");
+    let path = write_temp("py_mw", ".py", &sdk);
+    let mut cmd = Command::new("python3");
+    cmd.arg("-m").arg("py_compile").arg(&path);
+    run_check(&mut cmd, "python (middleware)");
     let _ = std::fs::remove_file(&path);
 }
 

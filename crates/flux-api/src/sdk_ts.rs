@@ -13,7 +13,7 @@ use crate::codegen::{
     as_object, body_type_name, has_body, path_params, prim_of, query_params, render_path,
     SchemaDefs,
 };
-use crate::middleware::{AuthKind, MiddlewareSpec};
+use crate::middleware::{AuthKind, MiddlewareSpec, PaginationStyle, DEFAULT_PAGE_SIZE};
 use crate::schema::{ApiEndpoint, ApiSchema, PrimType};
 use std::collections::BTreeMap;
 
@@ -168,6 +168,142 @@ fn emit_ts_method(s: &mut String, ep: &ApiEndpoint, callee: &str, defs: &SchemaD
     ));
 }
 
+/// Shared prelude for the paginator/stream emitters: the positional path-param
+/// argument list and the `${...}`-interpolated path template. Both extras take
+/// the same path args as the plain method so callers don't have to rebuild a
+/// URL by hand.
+fn ts_path_args(ep: &ApiEndpoint) -> (Vec<String>, String) {
+    let args = path_params(ep)
+        .iter()
+        .map(|p| format!("{}: {}", camel_case(&p.name), ts_type(&p.schema)))
+        .collect();
+    let tmpl = render_path(&ep.path, |n| format!("${{{}}}", camel_case(n)));
+    (args, tmpl)
+}
+
+/// Emit the two auto-pagination generators for one endpoint:
+/// `<m>IterPages` yields whole page objects, `<m>IterItems` flattens them into
+/// individual records. Items-on-top-of-pages so the two can never disagree
+/// about traversal, and callers who need page metadata (totals, cursors) still
+/// have a surface that exposes it.
+fn emit_ts_paginator(s: &mut String, ep: &ApiEndpoint, mw: &MiddlewareSpec) {
+    let mn = camel_case(&ep.operation_id);
+    let (mut args, tmpl) = ts_path_args(ep);
+    let call_args: Vec<String> = path_params(ep)
+        .iter()
+        .map(|p| camel_case(&p.name))
+        .collect();
+    args.push("query?: Record<string, string | number | boolean>".into());
+    let items = mw.items_key();
+    let sig = args.join(", ");
+
+    s.push_str(&format!(
+        "  async *{mn}IterPages({sig}): AsyncGenerator<any, void, unknown> {{\n"
+    ));
+    s.push_str("    const base: Record<string, any> = { ...(query ?? {}) };\n");
+
+    match &mw.pagination {
+        PaginationStyle::Cursor { cursor_param, response_field } => {
+            s.push_str("    let cursor: string | null = null;\n    while (true) {\n");
+            s.push_str("      const q = { ...base };\n");
+            s.push_str(&format!(
+                "      if (cursor !== null) q[\"{cursor_param}\"] = cursor;\n"
+            ));
+            s.push_str(&ts_page_fetch(&tmpl));
+            s.push_str("      yield page;\n");
+            s.push_str(&format!("      const next = page[\"{response_field}\"];\n"));
+            s.push_str("      if (next === undefined || next === null || next === \"\") return;\n");
+            s.push_str("      cursor = String(next);\n    }\n");
+        }
+        PaginationStyle::Page { page_param } => {
+            s.push_str("    let pageNo = 1;\n    while (true) {\n");
+            s.push_str("      const q = { ...base };\n");
+            s.push_str(&format!("      q[\"{page_param}\"] = pageNo;\n"));
+            s.push_str(&ts_page_fetch(&tmpl));
+            // An empty page is the only reliable terminator for page-number
+            // pagination — there is no next-cursor to test.
+            s.push_str(&format!(
+                "      const items = page[\"{items}\"] ?? [];\n      if (items.length === 0) return;\n"
+            ));
+            s.push_str("      yield page;\n      pageNo++;\n    }\n");
+        }
+        PaginationStyle::Offset { offset_param, limit_param } => {
+            let size = DEFAULT_PAGE_SIZE;
+            s.push_str(&format!("    let offset = 0;\n    const limit = {size};\n    while (true) {{\n"));
+            s.push_str("      const q = { ...base };\n");
+            s.push_str(&format!(
+                "      q[\"{offset_param}\"] = offset;\n      q[\"{limit_param}\"] = limit;\n"
+            ));
+            s.push_str(&ts_page_fetch(&tmpl));
+            s.push_str(&format!(
+                "      const items = page[\"{items}\"] ?? [];\n      if (items.length === 0) return;\n"
+            ));
+            s.push_str("      yield page;\n");
+            // A short page means the server ran out — stop without paying for
+            // one more round-trip that would return nothing.
+            s.push_str("      if (items.length < limit) return;\n      offset += items.length;\n    }\n");
+        }
+        PaginationStyle::None => unreachable!("paginator emitted for non-paginated endpoint"),
+    }
+    s.push_str("  }\n");
+
+    // Item-level view, delegating traversal to the page generator above.
+    let mut iter_args = call_args.clone();
+    iter_args.push("query".into());
+    s.push_str(&format!(
+        "  async *{mn}IterItems({sig}): AsyncGenerator<any, void, unknown> {{\n\
+         \x20   for await (const page of this.{mn}IterPages({})) {{\n\
+         \x20     for (const item of (page[\"{items}\"] ?? [])) yield item;\n\
+         \x20   }}\n  }}\n",
+        iter_args.join(", ")
+    ));
+}
+
+/// The fetch+decode lines shared by all three pagination styles.
+fn ts_page_fetch(tmpl: &str) -> String {
+    format!(
+        "      const qs = \"?\" + new URLSearchParams(q as Record<string, any>).toString();\n\
+         \x20     const r = await this._fetch(`${{this.baseUrl}}{tmpl}${{qs}}`, {{ method: \"GET\" }});\n\
+         \x20     const page = await r.json();\n"
+    )
+}
+
+/// Emit an SSE consumer: `<m>Stream(...)` is an async generator that yields one
+/// decoded JSON object per `data:` frame. Buffers across chunk boundaries —
+/// a naive per-chunk parse drops events whenever a frame straddles two reads.
+fn emit_ts_stream(s: &mut String, ep: &ApiEndpoint) {
+    let mn = camel_case(&ep.operation_id);
+    let (mut args, tmpl) = ts_path_args(ep);
+    args.push("query?: Record<string, string | number | boolean>".into());
+    let sig = args.join(", ");
+
+    s.push_str(&format!(
+        "  async *{mn}Stream({sig}): AsyncGenerator<any, void, unknown> {{\n"
+    ));
+    s.push_str("    const qs = query ? \"?\" + new URLSearchParams(query as Record<string, any>).toString() : \"\";\n");
+    s.push_str(&format!(
+        "    const r = await this._fetch(`${{this.baseUrl}}{tmpl}${{qs}}`, {{ method: \"GET\", headers: {{ \"Accept\": \"text/event-stream\" }} }});\n"
+    ));
+    s.push_str("    if (!r.body) return;\n");
+    s.push_str("    const reader = r.body.getReader();\n");
+    s.push_str("    const decoder = new TextDecoder();\n");
+    s.push_str("    let buf = \"\";\n");
+    s.push_str("    while (true) {\n");
+    s.push_str("      const { done, value } = await reader.read();\n");
+    s.push_str("      if (done) break;\n");
+    s.push_str("      buf += decoder.decode(value, { stream: true });\n");
+    // Frames are separated by a blank line; keep the trailing partial in `buf`.
+    s.push_str("      const frames = buf.split(\"\\n\\n\");\n");
+    s.push_str("      buf = frames.pop() ?? \"\";\n");
+    s.push_str("      for (const frame of frames) {\n");
+    s.push_str("        for (const line of frame.split(\"\\n\")) {\n");
+    s.push_str("          if (!line.startsWith(\"data:\")) continue;\n");
+    s.push_str("          const payload = line.slice(5).trim();\n");
+    s.push_str("          if (payload === \"\" || payload === \"[DONE]\") continue;\n");
+    s.push_str("          try { yield JSON.parse(payload); } catch { yield payload; }\n");
+    s.push_str("        }\n      }\n    }\n  }\n");
+}
+
 fn emit_basic_client(s: &mut String, cn: &str, base_url: &str, eps: &[&ApiEndpoint], defs: &SchemaDefs) {
     s.push_str(&format!(
         "export class {cn}Client {{\n  private baseUrl: string;\n  constructor(b: string = \"{base_url}\") {{ this.baseUrl = b; }}\n"
@@ -242,6 +378,23 @@ fn emit_middleware_client(
     // Methods — route through _fetch (same param-binding as the basic client).
     for ep in eps {
         emit_ts_method(s, ep, "this._fetch", defs);
+    }
+
+    // Middleware extras. Resolved per-endpoint (falling back to the tag's
+    // effective spec) so a tag that mixes a paginated list with a plain GET
+    // only grows a paginator on the endpoint that actually pages.
+    for ep in eps {
+        let spec = ep
+            .middleware
+            .as_ref()
+            .filter(|m| m.is_active())
+            .unwrap_or(mw);
+        if spec.pagination.is_active() {
+            emit_ts_paginator(s, ep, spec);
+        }
+        if spec.streaming.is_sse() {
+            emit_ts_stream(s, ep);
+        }
     }
     s.push_str("}\n\n");
 }
@@ -326,6 +479,123 @@ mod tests {
         let sdk = generate_typescript_sdk(&eps, "http://api");
         assert!(sdk.contains("this._fetch"));
         assert!(!sdk.contains("await fetch(`")); // direct fetch must not appear in methods
+    }
+
+    // ---- v0.15-B pagination + streaming ------------------------------------
+
+    use crate::middleware::{PaginationStyle, StreamKind};
+
+    fn cursor_mw() -> MiddlewareSpec {
+        MiddlewareSpec::default().with_pagination(PaginationStyle::Cursor {
+            cursor_param: "after".into(),
+            response_field: "next_cursor".into(),
+        })
+    }
+
+    #[test]
+    fn cursor_pagination_emits_both_generators() {
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/things", cursor_mw())], "http://api");
+        assert!(sdk.contains("async *demoEndpointIterPages("), "no page generator:\n{sdk}");
+        assert!(sdk.contains("async *demoEndpointIterItems("), "no item generator:\n{sdk}");
+        // Cursor is sent under the configured param and read back from the
+        // configured response field.
+        assert!(sdk.contains("q[\"after\"] = cursor"), "cursor param wrong:\n{sdk}");
+        assert!(sdk.contains("page[\"next_cursor\"]"), "next-cursor field wrong:\n{sdk}");
+        // Termination must cover all three empty-ish shapes, not just null.
+        assert!(sdk.contains("next === undefined || next === null || next === \"\""));
+        // Items view delegates to the page view — never a second traversal.
+        assert!(sdk.contains("for await (const page of this.demoEndpointIterPages(query))"));
+    }
+
+    #[test]
+    fn items_field_defaults_to_data_and_is_overridable() {
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/things", cursor_mw())], "http://api");
+        assert!(sdk.contains("page[\"data\"] ?? []"), "default items key:\n{sdk}");
+
+        let custom = cursor_mw().with_items_field("results");
+        let sdk2 = generate_typescript_sdk(&[ep_with_mw("/things", custom)], "http://api");
+        assert!(sdk2.contains("page[\"results\"] ?? []"), "override ignored:\n{sdk2}");
+        assert!(!sdk2.contains("page[\"data\"]"));
+    }
+
+    #[test]
+    fn page_number_pagination_terminates_on_empty_page() {
+        let mw = MiddlewareSpec::default()
+            .with_pagination(PaginationStyle::Page { page_param: "page".into() });
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/things", mw)], "http://api");
+        assert!(sdk.contains("let pageNo = 1"));
+        assert!(sdk.contains("q[\"page\"] = pageNo"));
+        assert!(sdk.contains("if (items.length === 0) return;"));
+        assert!(sdk.contains("pageNo++"));
+    }
+
+    #[test]
+    fn offset_pagination_advances_and_stops_on_short_page() {
+        let mw = MiddlewareSpec::default().with_pagination(PaginationStyle::Offset {
+            offset_param: "offset".into(),
+            limit_param: "limit".into(),
+        });
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/things", mw)], "http://api");
+        assert!(sdk.contains("const limit = 100"));
+        assert!(sdk.contains("q[\"offset\"] = offset"));
+        assert!(sdk.contains("q[\"limit\"] = limit"));
+        // Short page ends traversal without a wasted final round-trip.
+        assert!(sdk.contains("if (items.length < limit) return;"));
+        assert!(sdk.contains("offset += items.length"));
+    }
+
+    #[test]
+    fn sse_emits_buffering_stream_generator() {
+        let mw = MiddlewareSpec::default().with_streaming(StreamKind::Sse);
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/events", mw)], "http://api");
+        assert!(sdk.contains("async *demoEndpointStream("), "no stream method:\n{sdk}");
+        assert!(sdk.contains("\"Accept\": \"text/event-stream\""));
+        assert!(sdk.contains("getReader()"));
+        // The buffer-across-chunks behaviour is the whole point — a per-chunk
+        // parse silently drops frames that straddle a read boundary.
+        assert!(sdk.contains("buf += decoder.decode(value, { stream: true })"));
+        assert!(sdk.contains("buf = frames.pop() ?? \"\""));
+        assert!(sdk.contains("payload === \"[DONE]\""));
+    }
+
+    #[test]
+    fn websocket_streaming_does_not_emit_an_sse_reader() {
+        // WebSocket surfaces belong to event_types; the REST emitter must stay
+        // out of the way rather than emit a bogus SSE reader.
+        let mw = MiddlewareSpec::default().with_streaming(StreamKind::WebSocket);
+        let sdk = generate_typescript_sdk(&[ep_with_mw("/ws", mw)], "http://api");
+        assert!(!sdk.contains("Stream("), "emitted SSE reader for WebSocket:\n{sdk}");
+    }
+
+    #[test]
+    fn inactive_pagination_emits_no_paginator() {
+        // Back-compat: bearer-only middleware keeps the v0.15-A emission.
+        let sdk = generate_typescript_sdk(
+            &[ep_with_mw("/me", MiddlewareSpec::bearer_auth())],
+            "http://api",
+        );
+        assert!(!sdk.contains("IterPages"));
+        assert!(!sdk.contains("IterItems"));
+        assert!(!sdk.contains("Stream("));
+    }
+
+    #[test]
+    fn paginator_threads_path_params_through_to_the_page_generator() {
+        // A paginated sub-resource (/orgs/{id}/things) must take `id` on BOTH
+        // generators and forward it — dropping it would silently page the
+        // wrong URL.
+        let mut ep = ep_with_mw("/orgs/{id}/things", cursor_mw());
+        ep.parameters = vec![crate::schema::ApiParameter {
+            name: "id".into(),
+            location: crate::schema::ParamLocation::Path,
+            required: true,
+            description: String::new(),
+            schema: ApiSchema::Primitive { ty: PrimType::String, format: None },
+        }];
+        let sdk = generate_typescript_sdk(&[ep], "http://api");
+        assert!(sdk.contains("async *demoEndpointIterPages(id: string, query?"), "sig:\n{sdk}");
+        assert!(sdk.contains("this.demoEndpointIterPages(id, query)"), "forwarding:\n{sdk}");
+        assert!(sdk.contains("/orgs/${id}/things"), "path interpolation:\n{sdk}");
     }
 
     #[test]

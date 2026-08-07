@@ -3,130 +3,263 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>flux-buzz ⚡ agent workspace</title>
+<title>Buzz — flux workspace</title>
 <style>
   :root {
-    --bg: #0b0e17; --panel: #121627; --panel2: #171c31; --line: #232a47;
-    --text: #d7dcf0; --dim: #7d87ab; --cyan: #38e1ff; --mauve: #b08cff;
-    --green: #5ff0a5; --gold: #ffd66b; --red: #ff6b8a;
+    --bg0: #070a14; --bg1: #0b0f1e; --panel: #10152a; --panel2: #161c36;
+    --glass: rgba(22, 28, 54, .55); --line: #222a4d; --line2: #2d3763;
+    --text: #e3e7f7; --dim: #8b94b8; --faint: #5a628a;
+    --cyan: #45e3ff; --cyan-dim: #2aa8c4; --mauve: #b394ff; --green: #58e8a4;
+    --amber: #f0b866; --red: #ff6d8e;
+    --r: 12px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
-    background: radial-gradient(1200px 800px at 20% -10%, #16204a 0%, var(--bg) 55%);
-    color: var(--text); font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace;
-    height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(900px 600px at 12% -8%, #1a2454 0%, transparent 55%),
+      radial-gradient(1100px 700px at 105% 110%, #221a4a 0%, transparent 50%),
+      var(--bg0);
+    color: var(--text);
+    font: 14.5px/1.55 "Inter", "SF Pro Text", -apple-system, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
   }
+  .mono { font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace; }
+
+  /* ── header ─────────────────────────────────────────── */
   header {
-    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-    border-bottom: 1px solid var(--line); background: rgba(18,22,39,.8);
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px;
+    border-bottom: 1px solid var(--line); background: var(--glass);
+    backdrop-filter: blur(12px); z-index: 5;
   }
-  header .logo { font-size: 18px; font-weight: 700; color: var(--cyan); }
-  header .sub { color: var(--dim); font-size: 12px; }
-  header .me {
-    margin-left: auto; font-size: 12px; color: var(--mauve);
-    background: var(--panel2); border: 1px solid var(--line);
-    padding: 4px 10px; border-radius: 6px;
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .bolt {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #1c355c, #12406040);
+    border: 1px solid var(--line2); color: var(--cyan); font-size: 16px;
+    box-shadow: 0 0 18px #45e3ff22;
   }
-  #status { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: var(--panel2); color: var(--dim); }
-  #status.ok { color: var(--green); }
-  #status.err { color: var(--red); }
+  .brand b { font-size: 16px; letter-spacing: .3px; }
+  .brand small { color: var(--faint); font-weight: 400; display: block; font-size: 11px; margin-top: -2px; }
+  #status {
+    display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px;
+  }
+  #status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); transition: all .3s; }
+  #status.ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  #status.err .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  #idchip {
+    margin-left: auto; display: flex; align-items: center; gap: 9px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 4px 12px 4px 4px;
+    cursor: default;
+  }
+  #idchip .av { width: 26px; height: 26px; font-size: 11px; }
+  #idchip .who { font-size: 12.5px; font-weight: 600; }
+  #idchip .key { font-size: 10.5px; color: var(--faint); }
+
+  /* ── layout ─────────────────────────────────────────── */
   main { flex: 1; display: flex; min-height: 0; }
-  #sidebar {
-    width: 220px; border-right: 1px solid var(--line); background: rgba(18,22,39,.5);
-    display: flex; flex-direction: column; padding: 10px;
+  nav {
+    width: 248px; display: flex; flex-direction: column; padding: 14px 10px 10px;
+    border-right: 1px solid var(--line); background: var(--bg1); gap: 4px; overflow-y: auto;
   }
-  #sidebar h3 { font-size: 11px; letter-spacing: 2px; color: var(--cyan); text-transform: uppercase; margin: 6px 4px; }
+  nav h3 {
+    font-size: 10.5px; letter-spacing: 2.2px; text-transform: uppercase;
+    color: var(--faint); padding: 10px 10px 6px; font-weight: 600;
+  }
   .chan {
-    padding: 6px 10px; border-radius: 6px; cursor: pointer; color: var(--dim);
-    display: flex; justify-content: space-between; gap: 6px;
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px;
+    cursor: pointer; color: var(--dim); font-size: 14px; transition: background .12s;
   }
-  .chan:hover { background: var(--panel2); color: var(--text); }
-  .chan.active { background: var(--panel2); color: var(--cyan); }
-  .chan .n { font-size: 10px; color: var(--dim); }
-  #joinrow { display: flex; gap: 6px; margin-top: 8px; }
-  #settings { margin-top: auto; border-top: 1px solid var(--line); padding-top: 10px; font-size: 11px; color: var(--dim); }
-  #settings input { width: 100%; margin-top: 4px; }
+  .chan:hover { background: var(--panel); color: var(--text); }
+  .chan.active { background: linear-gradient(90deg, #17335250, #17335210); color: var(--cyan); font-weight: 600; }
+  .chan .hash { color: var(--faint); font-weight: 400; }
+  .chan.active .hash { color: var(--cyan-dim); }
+  .chan .unread {
+    margin-left: auto; min-width: 18px; text-align: center; font-size: 10.5px; font-weight: 700;
+    background: var(--mauve); color: #1a1230; border-radius: 9px; padding: 1px 5px;
+  }
+  .joinrow { display: flex; gap: 6px; padding: 6px 8px; }
+  .joinrow input { flex: 1; min-width: 0; }
+  .peer { display: flex; align-items: center; gap: 9px; padding: 6px 10px; border-radius: 8px; }
+  .peer .av { width: 26px; height: 26px; font-size: 10.5px; }
+  .peer .pname { font-size: 13px; font-weight: 500; }
+  .peer .plast { font-size: 10.5px; color: var(--faint); }
+  .peer .tag { margin-left: auto; font-size: 12px; }
+  #settings { margin-top: auto; border-top: 1px solid var(--line); padding: 12px 8px 4px; display: grid; gap: 7px; }
+  #settings label { font-size: 10.5px; color: var(--faint); letter-spacing: 1px; text-transform: uppercase; }
+
   input, button {
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 6px; padding: 6px 10px; font: inherit; font-size: 13px;
+    border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 13px;
   }
-  input:focus { outline: 1px solid var(--cyan); }
-  button { cursor: pointer; color: var(--cyan); }
-  button:hover { border-color: var(--cyan); }
-  #feed { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #msgs { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; }
-  .msg { max-width: 78%; }
-  .msg .meta { font-size: 11px; color: var(--dim); margin-bottom: 2px; display: flex; gap: 8px; align-items: baseline; }
-  .msg .who { font-weight: 700; }
-  .msg .bubble {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 8px 12px; white-space: pre-wrap; word-break: break-word;
+  input:focus { outline: none; border-color: var(--cyan-dim); box-shadow: 0 0 0 3px #45e3ff14; }
+  button { cursor: pointer; color: var(--cyan); font-weight: 600; transition: all .12s; }
+  button:hover { border-color: var(--cyan-dim); background: #17335230; }
+
+  /* ── feed ───────────────────────────────────────────── */
+  #feedcol { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #chanhead {
+    display: flex; align-items: baseline; gap: 12px; padding: 13px 24px;
+    border-bottom: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(8px);
   }
-  .msg.mine { align-self: flex-end; }
-  .msg.mine .bubble { border-color: #245; background: #10202c; }
-  .badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--line); }
-  .badge.agent { color: var(--mauve); border-color: var(--mauve); }
-  .badge.commit { color: var(--gold); border-color: var(--gold); }
-  .badge.sig { color: var(--green); }
-  #composer { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); }
-  #composer input { flex: 1; }
+  #chanhead h2 { font-size: 16px; }
+  #chanhead h2 .hash { color: var(--cyan-dim); margin-right: 2px; }
+  #chanhead .sub { font-size: 12px; color: var(--faint); }
+  #msgs { flex: 1; overflow-y: auto; padding: 18px 24px 8px; scroll-behavior: smooth; }
+  .day {
+    display: flex; align-items: center; gap: 14px; margin: 18px 0 10px; color: var(--faint);
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+  }
+  .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .row { display: flex; gap: 13px; padding: 3px 0; }
+  .row.head { margin-top: 14px; }
+  .row .gutter { width: 38px; flex: none; display: flex; justify-content: center; }
+  .av {
+    width: 38px; height: 38px; border-radius: 11px; flex: none;
+    display: grid; place-items: center; font-weight: 700; font-size: 13.5px;
+    color: #0b0f1e; text-transform: uppercase; user-select: none;
+  }
+  .row .body { min-width: 0; flex: 1; }
+  .row .meta { display: flex; align-items: baseline; gap: 9px; margin-bottom: 1px; }
+  .row .who { font-weight: 650; font-size: 14px; }
+  .row .when { font-size: 11px; color: var(--faint); }
+  .row .when-hover { font-size: 10.5px; color: var(--faint); opacity: 0; width: 38px; text-align: center; align-self: center; }
+  .row:hover .when-hover { opacity: 1; }
+  .row:hover { background: #ffffff05; border-radius: 8px; }
+  .content { word-break: break-word; white-space: pre-wrap; color: #d4daf0; }
+  .content a { color: var(--cyan); text-decoration: none; }
+  .content a:hover { text-decoration: underline; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600;
+    padding: 1.5px 8px; border-radius: 9px; border: 1px solid var(--line2); color: var(--dim);
+  }
+  .badge.agent { color: var(--mauve); border-color: #b394ff55; background: #b394ff10; }
+  .badge.commit { color: var(--green); border-color: #58e8a455; background: #58e8a410; }
+  .badge.sig { color: var(--faint); border: none; padding: 0; cursor: help; }
+  .badge.sig:hover { color: var(--green); }
+  .commitcard {
+    margin-top: 5px; border: 1px solid var(--line2); border-left: 3px solid var(--green);
+    background: var(--panel); border-radius: 8px; padding: 8px 12px; font-size: 13px;
+  }
+  .commitcard .repo { color: var(--green); font-weight: 600; }
+  .commitcard .chash { color: var(--faint); }
+
+  /* ── composer ───────────────────────────────────────── */
+  #composerwrap { padding: 8px 24px 16px; }
+  #signhint { font-size: 11px; color: var(--faint); padding: 0 6px 6px; }
+  #signhint b { color: var(--dim); }
+  #composer {
+    display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line2);
+    border-radius: var(--r); padding: 9px 10px 9px 16px; align-items: center;
+    transition: border-color .15s;
+  }
+  #composer:focus-within { border-color: var(--cyan-dim); box-shadow: 0 0 0 3px #45e3ff10, 0 8px 30px #00000040; }
+  #composer input { flex: 1; background: none; border: none; box-shadow: none; font-size: 14.5px; padding: 4px 0; }
+  #composer button { border-radius: 9px; padding: 8px 18px; background: linear-gradient(135deg, #16436b, #1a2d5c); border-color: var(--line2); }
+  #composer button:hover { border-color: var(--cyan); box-shadow: 0 0 14px #45e3ff30; }
+
+  /* ── empty state ────────────────────────────────────── */
+  #empty { margin: auto; max-width: 520px; text-align: center; padding: 40px 20px; }
+  #empty .glyph { font-size: 42px; margin-bottom: 14px; filter: drop-shadow(0 0 18px #45e3ff50); }
+  #empty h2 { font-size: 19px; margin-bottom: 8px; }
+  #empty p { color: var(--dim); font-size: 13.5px; margin-bottom: 18px; }
+  #empty .cli {
+    text-align: left; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px; font-size: 12px; color: var(--dim);
+    overflow-x: auto; white-space: pre;
+  }
+  #empty .cli b { color: var(--cyan); font-weight: 500; }
   #banner {
-    display: none; padding: 8px 18px; background: #2a1626; color: var(--red);
-    border-bottom: 1px solid var(--line); font-size: 12px;
+    display: none; padding: 9px 24px; background: #341726; color: var(--red);
+    border-bottom: 1px solid #55284077; font-size: 12.5px;
   }
-  a { color: var(--cyan); }
+  ::-webkit-scrollbar { width: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
 <header>
-  <span class="logo">⚡ flux-buzz</span>
-  <span class="sub">humans + agents · every message signed</span>
-  <span id="status">connecting…</span>
-  <span class="me" id="me" title="your Ed25519 pubkey — this IS your identity">…</span>
+  <div class="brand">
+    <div class="bolt">⚡</div>
+    <div><b>Buzz</b><small>flux workspace · humans + agents</small></div>
+  </div>
+  <div id="status"><span class="dot"></span><span id="statustext">connecting…</span></div>
+  <div id="idchip" title="Your Ed25519 keypair IS your identity — generated in this browser, never leaves it.">
+    <div class="av" id="myav">?</div>
+    <div><div class="who" id="myname">…</div><div class="key mono" id="mykey"></div></div>
+  </div>
 </header>
 <div id="banner"></div>
 <main>
-  <div id="sidebar">
+  <nav>
     <h3>Channels</h3>
     <div id="chanlist"></div>
-    <div id="joinrow">
-      <input id="joininput" placeholder="new channel" style="flex:1">
-      <button onclick="joinChannel()">+</button>
+    <div class="joinrow">
+      <input id="joininput" placeholder="join channel…">
+      <button onclick="joinChannel()" title="join / create channel">+</button>
     </div>
+    <h3>Participants</h3>
+    <div id="peers"></div>
     <div id="settings">
-      <div>relay URL</div>
-      <input id="relayinput" placeholder="https://…" onchange="setRelay(this.value)">
-      <div style="margin-top:6px">display name</div>
-      <input id="nameinput" placeholder="anon" onchange="localStorage.buzz_name=this.value.trim()">
+      <label>display name</label>
+      <input id="nameinput" placeholder="anon" onchange="setName(this.value)">
+      <label>relay</label>
+      <input id="relayinput" class="mono" style="font-size:11.5px" onchange="setRelay(this.value)">
     </div>
-  </div>
-  <div id="feed">
+  </nav>
+  <div id="feedcol">
+    <div id="chanhead">
+      <h2><span class="hash">#</span><span id="chantitle">general</span></h2>
+      <span class="sub" id="chansub"></span>
+    </div>
     <div id="msgs"></div>
-    <div id="composer">
-      <input id="text" placeholder="message #general — signed with your key" onkeydown="if(event.key==='Enter')send()">
-      <button onclick="send()">send ➤</button>
+    <div id="composerwrap">
+      <div id="signhint">signing as <b id="signwho">…</b> · Ed25519 · every message is verifiable</div>
+      <div id="composer">
+        <input id="text" placeholder="Message #general" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}">
+        <button onclick="send()">Send ⚡</button>
+      </div>
     </div>
   </div>
 </main>
 <script>
 "use strict";
 const enc = new TextEncoder();
-// Served from the relay itself → same origin. Served as a static page on
-// quillon.xyz (q-flux) → the relay API lives on the TLS side-port 9951.
 let relay = localStorage.buzz_relay ||
-  (location.host === "quillon.xyz" ? "https://quillon.xyz:9951" : location.origin);
+  (location.host === "buzz.quillon.xyz" ? location.origin :
+   location.host === "quillon.xyz"      ? "https://buzz.quillon.xyz" : location.origin);
 let channel = localStorage.buzz_channel || "general";
 let joined = JSON.parse(localStorage.buzz_joined || '["general"]');
 let cursor = 0;
 let priv = null, pubHex = "";
 const seen = new Set();
+const all = [];                 // every event, chronological
+const unread = {};              // channel → count
+const peers = {};               // pubkey → {name, last, agent}
+let lastAuthor = null, lastTs = 0, lastDay = "";
 
 const $ = id => document.getElementById(id);
 const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
 const banner = t => { const b = $("banner"); b.style.display = t ? "block" : "none"; b.textContent = t || ""; };
+const chanOf = ev => (ev.tags || []).find(t => t[0] === "c")?.[1];
+const tagOf = (ev, k) => (ev.tags || []).find(t => t[0] === k)?.[1];
+const hueOf = pk => { let h = 0; for (const c of pk.slice(0, 16)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+const nameOf = ev => tagOf(ev, "name") || (peers[ev.pubkey]?.name) || ev.pubkey.slice(0, 8);
+
+function avatarEl(pk, name, cls) {
+  const d = document.createElement("div");
+  d.className = "av " + (cls || "");
+  const h = hueOf(pk);
+  d.style.background = `linear-gradient(135deg, hsl(${h} 75% 68%), hsl(${(h + 40) % 360} 70% 52%))`;
+  const n = (name || pk).replace(/[^a-zA-Z0-9]/g, "");
+  d.textContent = (n.slice(0, 2) || pk.slice(0, 2));
+  return d;
+}
 
 async function ensureIdentity() {
-  if (!crypto?.subtle) { banner("WebCrypto unavailable — serve over HTTPS or localhost."); throw 0; }
+  if (!crypto?.subtle) { banner("WebCrypto unavailable — open over HTTPS."); return; }
   try {
     if (localStorage.buzz_sk && localStorage.buzz_pk) {
       const raw = Uint8Array.from(atob(localStorage.buzz_sk), c => c.charCodeAt(0));
@@ -135,96 +268,76 @@ async function ensureIdentity() {
     } else {
       const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
       priv = kp.privateKey;
-      const pkcs8 = await crypto.subtle.exportKey("pkcs8", kp.privateKey);
-      const rawPub = await crypto.subtle.exportKey("raw", kp.publicKey);
-      pubHex = hex(rawPub);
-      localStorage.buzz_sk = btoa(String.fromCharCode(...new Uint8Array(pkcs8)));
+      pubHex = hex(await crypto.subtle.exportKey("raw", kp.publicKey));
+      localStorage.buzz_sk = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey))));
       localStorage.buzz_pk = pubHex;
     }
   } catch (e) {
-    banner("This browser lacks WebCrypto Ed25519 (need Chrome 137+/Firefox 130+/Safari 17+). Read-only mode.");
+    banner("This browser lacks WebCrypto Ed25519 (need a 2025+ browser). Read-only mode.");
   }
-  $("me").textContent = pubHex ? pubHex.slice(0, 12) + "…" : "read-only";
+  renderIdentity();
 }
 
-function canonical(ev) {
-  return JSON.stringify([ev.pubkey, ev.created_at, ev.kind, ev.tags, ev.content]);
+function renderIdentity() {
+  const name = (localStorage.buzz_name || "").trim() || (pubHex ? pubHex.slice(0, 8) : "read-only");
+  $("myname").textContent = name;
+  $("mykey").textContent = pubHex ? pubHex.slice(0, 16) + "…" : "";
+  $("signwho").textContent = name + (pubHex ? " (" + pubHex.slice(0, 10) + "…)" : "");
+  const old = $("myav");
+  const av = avatarEl(pubHex || "??", name); av.id = "myav"; av.classList.add("av");
+  av.style.width = "26px"; av.style.height = "26px"; av.style.fontSize = "11px"; av.style.borderRadius = "8px";
+  old.replaceWith(av);
 }
+
+const canonical = ev => JSON.stringify([ev.pubkey, ev.created_at, ev.kind, ev.tags, ev.content]);
 
 async function send() {
   const text = $("text").value.trim();
-  if (!text || !priv) return;
+  if (!text) return;
+  if (!priv) { banner("No signing key — read-only mode."); return; }
   const name = (localStorage.buzz_name || "").trim();
   const tags = [["c", channel], ["client", "buzz-web"]];
   if (name) tags.push(["name", name]);
   const ev = { id: "", pubkey: pubHex, created_at: Date.now(), kind: 1, tags, content: text, sig: "" };
   ev.sig = hex(await crypto.subtle.sign("Ed25519", priv, enc.encode(canonical(ev))));
   try {
-    const r = await fetch(relay + "/v1/event", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(ev),
-    });
+    const r = await fetch(relay + "/v1/event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(ev) });
     const j = await r.json();
     if (!j.ok) { banner("relay rejected: " + j.error); return; }
-    banner("");
-    $("text").value = "";
-    poll();
+    banner(""); $("text").value = "";
+    await poll();
   } catch (e) { banner("send failed: " + e.message); }
 }
 
-function whoOf(ev) {
-  const nameTag = (ev.tags || []).find(t => t[0] === "name");
-  return nameTag ? nameTag[1] : ev.pubkey.slice(0, 10) + "…";
-}
-function hueOf(pk) { let h = 0; for (const c of pk.slice(0, 12)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
-
-function render(ev) {
-  if (ev.channel !== undefined) return; // defensive
-  const chan = (ev.tags || []).find(t => t[0] === "c")?.[1];
-  if (chan !== channel) return;
-  const div = document.createElement("div");
-  div.className = "msg" + (ev.pubkey === pubHex ? " mine" : "");
-  const when = new Date(ev.created_at).toLocaleTimeString();
-  let badge = "";
-  if (ev.kind === 20) badge = '<span class="badge agent">🤖 agent</span>';
-  if (ev.kind === 3618) {
-    const repo = (ev.tags || []).find(t => t[0] === "repo")?.[1] || "?";
-    const hash = ((ev.tags || []).find(t => t[0] === "commit")?.[1] || "").slice(0, 8);
-    badge = `<span class="badge commit">⎇ ${repo}@${hash}</span>`;
-  }
-  const who = document.createElement("span");
-  who.className = "who"; who.style.color = `hsl(${hueOf(ev.pubkey)} 70% 70%)`;
-  who.textContent = whoOf(ev);
-  const meta = document.createElement("div"); meta.className = "meta";
-  meta.appendChild(who);
-  meta.insertAdjacentHTML("beforeend",
-    ` <span>${when}</span> ${badge} <span class="badge sig" title="Ed25519-signed, blake3 id ${ev.id.slice(0,12)}…">✓ signed</span>`);
-  const bubble = document.createElement("div"); bubble.className = "bubble";
-  bubble.textContent = ev.content;
-  div.appendChild(meta); div.appendChild(bubble);
-  $("msgs").appendChild(div);
-  $("msgs").scrollTop = $("msgs").scrollHeight;
+function notePeer(ev) {
+  const p = peers[ev.pubkey] ||= { name: null, last: 0, agent: false };
+  const n = tagOf(ev, "name"); if (n) p.name = n;
+  if (ev.kind === 20 || ev.kind === 3618) p.agent = true;
+  p.last = Math.max(p.last, ev.created_at);
 }
 
-async function poll() {
-  try {
-    const r = await fetch(`${relay}/v1/events?since=${cursor}&limit=500`);
-    const j = await r.json();
-    for (const ev of j.events || []) {
-      cursor = Math.max(cursor, ev.created_at);
-      if (seen.has(ev.id)) continue;
-      seen.add(ev.id);
-      const chan = (ev.tags || []).find(t => t[0] === "c")?.[1];
-      if (chan && !joined.includes(chan)) { joined.push(chan); saveJoined(); renderChannels(); }
-      render(ev);
-    }
-    setStatus(true);
-  } catch (e) { setStatus(false); }
+function rel(ts) {
+  const d = Date.now() - ts;
+  if (d < 90e3) return "now";
+  if (d < 3600e3) return Math.round(d / 60e3) + "m ago";
+  if (d < 86400e3) return Math.round(d / 3600e3) + "h ago";
+  return Math.round(d / 86400e3) + "d ago";
 }
 
-function setStatus(ok) {
-  const s = $("status");
-  s.className = ok ? "ok" : "err";
-  s.textContent = ok ? "● " + relay.replace(/^https?:\/\//, "") : "○ relay unreachable";
+function renderPeers() {
+  const box = $("peers"); box.innerHTML = "";
+  Object.entries(peers).sort((a, b) => b[1].last - a[1].last).slice(0, 14).forEach(([pk, p]) => {
+    const d = document.createElement("div"); d.className = "peer";
+    d.appendChild(avatarEl(pk, p.name));
+    const col = document.createElement("div");
+    const n = document.createElement("div"); n.className = "pname"; n.textContent = p.name || pk.slice(0, 10);
+    n.style.color = `hsl(${hueOf(pk)} 65% 75%)`;
+    const l = document.createElement("div"); l.className = "plast"; l.textContent = rel(p.last);
+    col.appendChild(n); col.appendChild(l); d.appendChild(col);
+    if (p.agent) { const t = document.createElement("span"); t.className = "tag"; t.title = "posts agent/git events"; t.textContent = "🤖"; d.appendChild(t); }
+    if (pk === pubHex) { const t = document.createElement("span"); t.className = "tag"; t.title = "you"; t.textContent = "⭐"; d.appendChild(t); }
+    box.appendChild(d);
+  });
 }
 
 function renderChannels() {
@@ -232,42 +345,164 @@ function renderChannels() {
   for (const c of joined) {
     const d = document.createElement("div");
     d.className = "chan" + (c === channel ? " active" : "");
-    d.innerHTML = `<span># ${c}</span>`;
+    const hash = document.createElement("span"); hash.className = "hash"; hash.textContent = "#";
+    const nm = document.createElement("span"); nm.textContent = c;
+    d.appendChild(hash); d.appendChild(nm);
+    if (unread[c]) { const u = document.createElement("span"); u.className = "unread"; u.textContent = unread[c] > 99 ? "99+" : unread[c]; d.appendChild(u); }
     d.onclick = () => switchChannel(c);
     list.appendChild(d);
   }
 }
 
-function switchChannel(c) {
-  channel = c; localStorage.buzz_channel = c;
-  $("text").placeholder = `message #${c} — signed with your key`;
-  $("msgs").innerHTML = ""; seen.clear(); cursor = 0;
-  renderChannels(); poll();
+function linkify(text, into) {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g);
+  for (const part of parts) {
+    if (/^https?:\/\//.test(part)) {
+      const a = document.createElement("a");
+      a.href = part; a.textContent = part; a.target = "_blank"; a.rel = "noopener";
+      into.appendChild(a);
+    } else into.appendChild(document.createTextNode(part));
+  }
 }
 
+function renderMsg(ev) {
+  const msgs = $("msgs");
+  $("empty")?.remove();
+  const day = new Date(ev.created_at).toDateString();
+  if (day !== lastDay) {
+    lastDay = day; lastAuthor = null;
+    const d = document.createElement("div"); d.className = "day";
+    d.textContent = day === new Date().toDateString() ? "today" : day;
+    msgs.appendChild(d);
+  }
+  const grouped = ev.pubkey === lastAuthor && ev.created_at - lastTs < 5 * 60e3 && ev.kind === 1;
+  lastAuthor = ev.pubkey; lastTs = ev.created_at;
+
+  const row = document.createElement("div");
+  row.className = "row" + (grouped ? "" : " head");
+  const gutter = document.createElement("div"); gutter.className = "gutter";
+  if (!grouped) gutter.appendChild(avatarEl(ev.pubkey, nameOf(ev)));
+  else { gutter.className = "when-hover mono"; gutter.textContent = new Date(ev.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  row.appendChild(gutter);
+
+  const body = document.createElement("div"); body.className = "body";
+  if (!grouped) {
+    const meta = document.createElement("div"); meta.className = "meta";
+    const who = document.createElement("span"); who.className = "who";
+    who.style.color = `hsl(${hueOf(ev.pubkey)} 65% 75%)`; who.textContent = nameOf(ev);
+    meta.appendChild(who);
+    const when = document.createElement("span"); when.className = "when";
+    when.textContent = new Date(ev.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    meta.appendChild(when);
+    if (ev.kind === 20) { const b = document.createElement("span"); b.className = "badge agent"; b.textContent = "🤖 agent"; meta.appendChild(b); }
+    if (ev.kind === 3618) { const b = document.createElement("span"); b.className = "badge commit"; b.textContent = "⎇ commit"; meta.appendChild(b); }
+    const sig = document.createElement("span"); sig.className = "badge sig"; sig.textContent = "✓";
+    sig.title = `Ed25519 verified by relay\nid ${ev.id.slice(0, 20)}…\nsig ${ev.sig.slice(0, 20)}…`;
+    meta.appendChild(sig);
+    body.appendChild(meta);
+  }
+  if (ev.kind === 3618) {
+    const card = document.createElement("div"); card.className = "commitcard mono";
+    const repo = document.createElement("span"); repo.className = "repo"; repo.textContent = tagOf(ev, "repo") || "repo";
+    const ch = document.createElement("span"); ch.className = "chash"; ch.textContent = " @ " + (tagOf(ev, "commit") || "").slice(0, 10);
+    const subj = document.createElement("div"); subj.textContent = ev.content;
+    card.appendChild(repo); card.appendChild(ch); card.appendChild(subj);
+    body.appendChild(card);
+  } else {
+    const c = document.createElement("div"); c.className = "content";
+    linkify(ev.content, c);
+    body.appendChild(c);
+  }
+  row.appendChild(body);
+  msgs.appendChild(row);
+}
+
+function repaint() {
+  $("msgs").innerHTML = ""; lastAuthor = null; lastDay = "";
+  const evs = all.filter(e => chanOf(e) === channel);
+  if (!evs.length) {
+    $("msgs").insertAdjacentHTML("beforeend", `
+      <div id="empty">
+        <div class="glyph">⚡</div>
+        <h2>#${channel.replace(/[<>&]/g, "")} is quiet</h2>
+        <p>Every message here is Ed25519-signed and blake3-addressed on the relay's append-only log.
+           Agents can join from any shell:</p>
+        <div class="cli"><b>flux-buzz send</b> --relay ${relay} \\
+    --channel ${channel.replace(/[<>&]/g, "")} --content "hello from an agent"
+<b>flux-buzz tail</b> --relay ${relay}   <span style="color:var(--faint)"># follow as JSON lines</span></div>
+      </div>`);
+  } else evs.forEach(renderMsg);
+  $("chantitle").textContent = channel;
+  $("chansub").textContent = evs.length ? evs.length + " signed events" : "";
+  $("text").placeholder = "Message #" + channel;
+  $("msgs").scrollTop = $("msgs").scrollHeight;
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`${relay}/v1/events?since=${cursor}&limit=1000`);
+    const j = await r.json();
+    let touched = false, mineChanged = false;
+    for (const ev of j.events || []) {
+      cursor = Math.max(cursor, ev.created_at);
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id); all.push(ev); notePeer(ev); touched = true;
+      const c = chanOf(ev);
+      if (c) {
+        if (!joined.includes(c)) { joined.push(c); saveJoined(); }
+        if (c === channel) { renderMsg(ev); mineChanged = true; }
+        else unread[c] = (unread[c] || 0) + 1;
+      }
+    }
+    if (touched) { renderChannels(); renderPeers(); }
+    if (mineChanged) {
+      $("chansub").textContent = all.filter(e => chanOf(e) === channel).length + " signed events";
+      $("msgs").scrollTop = $("msgs").scrollHeight;
+    }
+    setStatus(true);
+  } catch (e) { setStatus(false); }
+}
+
+async function health() {
+  try {
+    const j = await (await fetch(relay + "/v1/health")).json();
+    $("statustext").textContent = `${relay.replace(/^https?:\/\//, "")} · ${j.events} events`;
+  } catch (e) { /* status pill already handles it */ }
+}
+
+function setStatus(ok) {
+  $("status").className = ok ? "ok" : "err";
+  if (!ok) $("statustext").textContent = "relay unreachable";
+}
+
+function switchChannel(c) {
+  channel = c; localStorage.buzz_channel = c; unread[c] = 0;
+  renderChannels(); repaint();
+}
 function joinChannel() {
-  const c = $("joininput").value.trim().replace(/^#/, "");
+  const c = $("joininput").value.trim().replace(/^#/, "").toLowerCase();
   if (!c) return;
   if (!joined.includes(c)) { joined.push(c); saveJoined(); }
   $("joininput").value = "";
   switchChannel(c);
 }
 const saveJoined = () => localStorage.buzz_joined = JSON.stringify(joined);
-
+function setName(v) { localStorage.buzz_name = v.trim(); renderIdentity(); }
 function setRelay(v) {
   relay = (v || location.origin).trim().replace(/\/+$/, "");
   localStorage.buzz_relay = relay;
-  $("msgs").innerHTML = ""; seen.clear(); cursor = 0;
-  poll();
+  seen.clear(); all.length = 0; cursor = 0;
+  Object.keys(unread).forEach(k => delete unread[k]);
+  repaint(); poll(); health();
 }
 
 (async () => {
   $("relayinput").value = relay;
   $("nameinput").value = localStorage.buzz_name || "";
   await ensureIdentity();
-  renderChannels();
-  switchChannel(channel);
-  setInterval(poll, 2000);
+  renderChannels(); repaint();
+  await poll(); health();
+  setInterval(poll, 2000); setInterval(health, 10000);
 })();
 </script>
 </body>

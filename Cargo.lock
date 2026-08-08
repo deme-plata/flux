@@ -2353,6 +2353,16 @@ name = "flux-boilerplate"
 version = "0.40.0"
 
 [[package]]
+name = "flux-btc"
+version = "0.40.0"
+dependencies = [
+ "flux-market",
+ "flux-trade",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-burst"
 version = "0.40.0"
 dependencies = [
@@ -3750,6 +3760,7 @@ dependencies = [
  "flux-archive",
  "flux-bank-mcp",
  "flux-bench",
+ "flux-btc",
  "flux-chronos",
  "flux-context",
  "flux-cortex",
@@ -3758,6 +3769,7 @@ dependencies = [
  "flux-gpu-market",
  "flux-graph",
  "flux-legacy",
+ "flux-market",
  "flux-moe",
  "flux-optimize",
  "flux-p2p",
@@ -3767,6 +3779,7 @@ dependencies = [
  "flux-sniff",
  "flux-sqisign",
  "flux-swarm-tools",
+ "flux-trade",
  "flux-webcam",
  "flux-zk",
  "fluxc-analytics",

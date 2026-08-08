@@ -1,0 +1,12 @@
+[package]
+name = "flux-btc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bitcoin accumulation brain — composes flux-trade (9 SIMD indicators + Kelly) and flux-market (fear/greed + DCA + governor) into one propose-only 'how strong is this dip, and how much should I DCA' decision. The Carl-Runefelt playbook in code: buy the dip, never sell the core stack, NEVER auto-spend real BTC."
+
+[dependencies]
+flux-trade = { path = "../flux-trade" }
+flux-market = { path = "../flux-market" }
+serde = { workspace = true }
+serde_json = { workspace = true }

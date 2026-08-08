@@ -26,6 +26,7 @@ pub mod cortex;
 pub mod self_heal;
 pub mod benchmark;
 pub mod heatmap;
+pub mod doctor;
 pub mod version;
 pub mod phase3;
 pub mod distributed;

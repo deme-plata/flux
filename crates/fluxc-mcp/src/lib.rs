@@ -19,6 +19,7 @@ use fluxc_core::serve_events::push_feed_event;
 fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     handlers::build::register(&mut registry);
+    handlers::buzz::register(&mut registry);
     handlers::test_combo::register(&mut registry);
     handlers::supersonic::register(&mut registry);
     handlers::stats::register(&mut registry);

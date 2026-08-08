@@ -459,6 +459,9 @@ fn main() {
             let rc = webcam_cli::run(&subcommand_args[1..]);
             std::process::exit(rc);
         }
+        Some("doctor") => {
+            fluxc_core::doctor::run();
+        }
         Some("prune-report") => {
             // v0.36 SDE (semantic dependency elimination, report-only): walk the
             // workspace dep graph from the default-members roots and write

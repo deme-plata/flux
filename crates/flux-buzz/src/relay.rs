@@ -307,10 +307,23 @@ fn accept_fluxc_hook(state: &Arc<RelayState>, payload: &serde_json::Value) -> bo
     }
     let Some(package) = data["package"].as_str().map(String::from) else { return false };
     let passed = data["tests_passed"].as_u64().unwrap_or(0);
+    // v0.40: the builder stamps its own tree and ships the content-address in
+    // the webhook (data.rev). Prefer it — verdict and stamp then come from the
+    // same process. Relay-side snapshot remains the fallback for old fluxc.
+    let builder_rev = data["rev"]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(String::from);
     let state = state.clone();
     tokio::task::spawn_blocking(move || {
-        let dir = state.workspace_root.join("crates").join(&package);
-        let stamp = if dir.is_dir() { crate::rev::flux_rev_snapshot(&dir).ok() } else { None };
+        let (stamp, stamped_by) = match builder_rev {
+            Some(s) => (Some(s), "builder"),
+            None => {
+                let dir = state.workspace_root.join("crates").join(&package);
+                let local = if dir.is_dir() { crate::rev::flux_rev_snapshot(&dir).ok() } else { None };
+                (local, "relay")
+            }
+        };
         let signer = state.signer.as_ref().expect("checked above");
         let mut tags = vec![
             vec!["c".to_string(), "builds".to_string()],
@@ -321,6 +334,7 @@ fn accept_fluxc_hook(state: &Arc<RelayState>, payload: &serde_json::Value) -> bo
             Some(s) => {
                 tags.push(vec!["rev".to_string(), s.clone()]);
                 tags.push(vec!["dir".to_string(), format!("crates/{package}")]);
+                tags.push(vec!["src".to_string(), stamped_by.to_string()]);
                 (
                     crate::event::KIND_PROVENANCE,
                     format!("✅ flux_combo green: {package} · {passed} tests passed — full:{}", &s[..16]),
@@ -705,6 +719,44 @@ mod tests {
             "posted stamp must be the flux-rev output"
         );
         ev.verify().expect("auto-posted event must be validly signed");
+
+        // v0.40 builder-stamped path: the webhook carries data.rev, so the
+        // relay must use it verbatim and never invoke flux-rev locally — the
+        // package's tree doesn't even exist here.
+        let builder_stamp = "b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6b7b8b9b0b1b2";
+        let green2 = serde_json::json!({
+            "event": "combo_complete", "timestamp": 0, "source": "fluxc test",
+            "data": {"package": "no-such-crate", "verdict": "green",
+                     "tests_passed": 3, "tests_failed": 0, "rev": builder_stamp}
+        });
+        let r: serde_json::Value = client
+            .post(format!("http://{addr}/v1/hooks/fluxc?token=sekret"))
+            .json(&green2)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(r["accepted"], true);
+        let mut posted2 = Vec::new();
+        for _ in 0..50 {
+            posted2 = state.store.lock().unwrap().query(Some("builds"), 0, None, 10);
+            if posted2.len() >= 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(posted2.len(), 2, "builder-stamped green must post too");
+        let ev2 = posted2.last().unwrap();
+        assert_eq!(ev2.kind, crate::event::KIND_PROVENANCE);
+        assert_eq!(
+            ev2.tags.iter().find(|t| t[0] == "rev").map(|t| t[1].as_str()),
+            Some(builder_stamp),
+            "relay must carry the builder's stamp verbatim"
+        );
+        assert_eq!(
+            ev2.tags.iter().find(|t| t[0] == "src").map(|t| t[1].as_str()),
+            Some("builder")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

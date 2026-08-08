@@ -289,6 +289,8 @@ mod shell_safety_tests {
 
 // ── Handler modules ──
 pub mod build;
+pub mod buzz;
+pub mod revstamp;
 pub mod test_combo;
 pub mod stats;
 pub mod predict;

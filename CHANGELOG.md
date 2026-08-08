@@ -1,5 +1,50 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.40.0 — Receipts everywhere: builds prove themselves (2026-08-08)
+
+The theme: a green build is no longer a claim, it's a receipt. The builder
+stamps its own tree, the workspace chat carries the proof, and a doctor
+diagnoses the build loop's known lies in one command.
+
+### flux-buzz — the human+agent workspace (new crate, 43845a5e…ef609a86)
+- Buzz-style relay live at **buzz.quillon.xyz**: Ed25519-signed, blake3-addressed
+  events in an append-only log; channels, web UI (dark), CLI (keygen/send/tail/
+  git-post/rev-post), plain+TLS listeners, token-gated fluxc build-hook.
+- q-flux vhost + TLS-ALPN-01 cert automation (seedhost blocks :80 at the edge;
+  zero-downtime nginx ssl_preread splitter window under acme.sh cron).
+
+### Self-stamped build receipts (revstamp.rs)
+- Green `flux_combo` now computes the flux-rev content-address of the crate it
+  proved — via the flux-rev LIBRARY, auto-genesis on first green,
+  `snapshot_if_changed` so unchanged trees reuse HEAD — and ships it as
+  `data.rev` in the `combo_complete` webhook. Verdict + content-address from
+  one process; the Buzz relay posts it to #builds tagged `src=builder`.
+
+### flux_buzz_* MCP tools (handlers/buzz.rs)
+- `flux_buzz_post` / `flux_buzz_read` / `flux_buzz_channels`: every
+  MCP-connected agent gets a persistent per-agent Ed25519 identity
+  (`~/.flux-buzz/identity-<agent>.json`) and a native posting surface.
+
+### The UNVERIFIED-combos mystery, solved (6c7692f7 + anchored_fluxc_cmd)
+- Combo/test/quickcast/ult spawned `fluxc test|check` with the MCP server's
+  INHERITED cwd; sessions launched outside the flux tree died in ~25ms
+  ("could not find Cargo.toml") → 0 suites → UNVERIFIED for every crate.
+  All spawns now route through `anchored_fluxc_cmd()` (workspace-anchored),
+  with a regression test asserting the anchor.
+
+### `fluxc doctor` (fluxc-core/src/doctor.rs)
+- One-command triage for every banked slow-build incident: wrapper-path drift
+  (fingerprint-universe split), dangling cache symlink + hit-rate counters,
+  poisoned `.rustc_info.json`, MCP servers holding DELETED binaries, missing
+  fast-linker config, workspace resolution. First run immediately caught two
+  real stale-binary servers.
+
+### Notes
+- mold has been the workspace default linker since v0.28 (`.cargo/config.toml`)
+  — the v0.40 plan's "linker switch" was already shipped; doctor now guards it.
+- fluxc webhook SSRF guard refuses loopback receivers by design: point local
+  receivers at their public vhost (e.g. https://buzz.quillon.xyz) instead.
+
 ## v0.39.0 — The honest-tooling release: the loop stops lying (2026-07-24)
 
 Six days of hardening the trust chain between the developer and the build loop.

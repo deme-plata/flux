@@ -112,13 +112,7 @@ fn flux_test(args: &Value) -> String {
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
-    let flux_exe = fluxc_core::live_fluxc_path();
-    let mut cmd = std::process::Command::new(&flux_exe);
-    // Anchor at the workspace root — cargo resolves the workspace from CWD,
-    // and an MCP server inherits the parent shell's cwd (often NOT the flux
-    // tree, e.g. /home/storage/claude-code), which made every spawn die in
-    // ~25ms with "could not find Cargo.toml" → 0 suites → UNVERIFIED.
-    cmd.current_dir(super::ws());
+    let mut cmd = anchored_fluxc_cmd();
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["--package", pkg]); }
     // Cargo-side: scope to ONE integration-test binary + name filter.
@@ -206,26 +200,19 @@ fn flux_combo(args: &Value) -> String {
         }
     }
 
-    let flux_exe = fluxc_core::live_fluxc_path();
-
     // NOTE: no per-call tune spawn (per swarm feedback to avoid latency). Assume SPEED_BOOTS or set at boot.
     // Dogfood: use fluxc test (which already does the type-check, no redundant check thread to avoid lock contention).
 
     let test_handle = std::thread::spawn({
         let pkg2 = pkg2.clone();
-        let exe = flux_exe.clone();
         // Returns (passed, failed, suites_seen, run_ok). `suites_seen == 0`
         // means no test harness printed a summary — the "0/0 green" lie this
         // handler used to tell; `run_ok == false` means the subcommand itself
         // failed to spawn or exited non-zero without any suite output.
         move || {
-            // current_dir: same cwd trap as the flux_test handler above —
-            // without the workspace anchor this dies instantly when the MCP
-            // server was launched outside the flux tree.
-            let raw = std::process::Command::new(&exe)
-                .args(["test", "-p", &pkg2])
-                .current_dir(crate::handlers::ws())
-                .output();
+            let mut cmd = anchored_fluxc_cmd();
+            cmd.args(["test", "-p", &pkg2]);
+            let raw = cmd.output();
             match raw {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
@@ -266,11 +253,20 @@ fn flux_combo(args: &Value) -> String {
         "RED"
     };
 
+    // Self-stamped build receipt: on a green run the BUILDER computes the
+    // flux-rev content-address of the crate tree it just proved, so receivers
+    // (Buzz #builds etc.) get verdict + content-address from one process.
+    let rev_stamp = if !unverified && test_failed == 0 && test_passed > 0 {
+        crate::handlers::revstamp::stamp_crate(&pkg)
+    } else {
+        None
+    };
     webhook::auto_dispatch("combo_complete", serde_json::json!({
         "package": pkg, "compile_ms": total_ms,
         "tests_passed": test_passed, "tests_failed": test_failed,
         "suites_seen": suites_seen, "verdict": verdict,
-        "predicted_ms": pred.predicted_ms
+        "predicted_ms": pred.predicted_ms,
+        "rev": rev_stamp
     }));
 
     let total = test_passed + test_failed;
@@ -373,6 +369,32 @@ fn dashboard(title: &str, rows: &[String]) -> String {
 }
 
 /// How many registered webhook endpoints would fire for `event` (real count).
+/// EVERY `fluxc`/`cargo` subprocess in this module MUST come from here.
+/// Cargo resolves the workspace from CWD, and an MCP server inherits its
+/// parent's cwd (often NOT the flux tree — e.g. /home/storage/claude-code).
+/// Raw `Command::new` spawns without the anchor die in ~25ms with "could not
+/// find Cargo.toml" → 0 suites → every combo UNVERIFIED, and the failure
+/// tracks WHERE the agent session was launched (the 2026-08 mystery).
+pub(crate) fn anchored_fluxc_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new(fluxc_core::live_fluxc_path());
+    cmd.current_dir(crate::handlers::ws());
+    cmd
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    #[test]
+    fn spawns_are_workspace_anchored() {
+        let cmd = super::anchored_fluxc_cmd();
+        let cwd = cmd.get_current_dir().expect("combo spawns must set current_dir");
+        assert!(
+            cwd.join("Cargo.toml").exists(),
+            "anchor {} must be a cargo workspace",
+            cwd.display()
+        );
+    }
+}
+
 fn webhook_fired(event: &str) -> usize {
     fluxc_core::webhook::count_listeners(event)
 }
@@ -386,12 +408,11 @@ fn flux_quickcast(args: &Value) -> String {
         .map(|(t, _)| t)
         .unwrap_or_else(|_| tune::load_tune());
 
-    // Check via fluxc (dogfood, no raw cargo)
-    let flux_exe = fluxc_core::live_fluxc_path();
-    let _ = std::process::Command::new(&flux_exe)
+    // Check via fluxc (dogfood, no raw cargo; workspace-anchored — cwd trap)
+    let _ = anchored_fluxc_cmd()
         .args(["tune", "--preset", "speed-boots"])
         .status();
-    let check_ok = std::process::Command::new(&flux_exe)
+    let check_ok = anchored_fluxc_cmd()
         .args(["check", "-p", package])
         .status()
         .map(|s| s.success())
@@ -418,15 +439,13 @@ fn flux_ult(args: &Value) -> String {
 
     // Parallel: check + heatmap + predict (dogfood via fluxc + speed tune)
     let pkg = package.to_string();
-    let flux_exe = fluxc_core::live_fluxc_path();
-    let _ = std::process::Command::new(&flux_exe)
+    let _ = anchored_fluxc_cmd()
         .args(["tune", "--preset", "speed-boots"])
         .status();
     let check_handle = std::thread::spawn({
         let p = pkg.clone();
-        let exe = flux_exe.clone();
         move || {
-            std::process::Command::new(&exe)
+            anchored_fluxc_cmd()
                 .args(["check", "-p", &p])
                 .status()
                 .map(|s| s.success())

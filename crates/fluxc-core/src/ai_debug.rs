@@ -67,10 +67,15 @@ pub fn ai_log_flush(path: &str) {
 mod tests {
     use super::*;
 
+    // AI_LOG is one shared static and tests run in PARALLEL threads — a
+    // dump(1) only sees the LAST entry, so whichever test logged second made
+    // the other flake (caught live 2026-08-08: green run, RED 60s later).
+    // Dump a window and look for our own entry instead of asserting "last".
+
     #[test]
     fn test_ai_log() {
         ai_log("test_event", &[("key", "val")], "deepseek");
-        let dump = ai_log_dump(1);
+        let dump = ai_log_dump(100);
         assert!(dump.contains("test_event"));
         assert!(dump.contains("deepseek"));
     }
@@ -78,7 +83,7 @@ mod tests {
     #[test]
     fn test_ai_build_event() {
         ai_build_event("fluxmux", true, 450, "deepseek");
-        let dump = ai_log_dump(1);
+        let dump = ai_log_dump(100);
         assert!(dump.contains("fluxmux"));
         assert!(dump.contains("true"));
     }

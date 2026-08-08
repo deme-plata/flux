@@ -147,7 +147,7 @@ fn flux_bifrost_run(args: &Value) -> String {
 
     let mut lines = vec!["=== flux_bifrost_run (alle lanes) ===".into()];
     if exec {
-        match fluxc_core::goals::post_goal(agent, goal, priority, ttl) {
+        match fluxc_serve::goals::post_goal(agent, goal, priority, ttl) {
             Ok(g) => lines.push(format!(
                 "goal_posted: id={} priority={} ttl={}",
                 g.id, g.priority, g.ttl_secs
@@ -155,7 +155,7 @@ fn flux_bifrost_run(args: &Value) -> String {
             Err(e) => lines.push(format!("goal_post_error: {e}")),
         }
     }
-    if let Ok(Some(g)) = fluxc_core::goals::consensus_goal() {
+    if let Ok(Some(g)) = fluxc_serve::goals::consensus_goal() {
         lines.push(format!("consensus: [{}] {} — {}", g.agent, g.id, g.text));
     }
 

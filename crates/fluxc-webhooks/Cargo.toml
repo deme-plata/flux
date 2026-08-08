@@ -1,0 +1,20 @@
+[package]
+name = "fluxc-webhooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "fluxc webhook layer — HMAC-signed outbound dispatch, inbound receiver, SSRF policy, swarm bus glue (v0.41 god-crate split)."
+
+[dependencies]
+flux-swarm-store = { path = "../flux-swarm-store" }
+toml = "0.8"
+flux-swarm-tools = { path = "../flux-swarm-tools" }
+blake3 = { workspace = true }
+parking_lot = "0.12"
+lazy_static = { workspace = true }
+fluxc-util = { path = "../fluxc-util" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+hmac = "0.12"
+hex = { workspace = true }

@@ -102,7 +102,9 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
-use fluxc_core::{webhook, quantum_architect, predict, tune};
+use fluxc_webhooks::webhook;
+use fluxc_core::quantum_architect;
+use fluxc_analytics::{predict, tune};
 
 fn flux_stats(_args: &Value) -> String {
     let hits = fluxc_core::CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed);

@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "f1-pitlane"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "flux-0x"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-api",
  "reqwest 0.12.28",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "flux-advisor"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "flux-aether"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "flux-agent-trade"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-0x",
  "flux-trade",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "flux-agora-stargate"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "fluxc-core",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "flux-agora-stargate-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-agora-stargate",
  "serde_json",
@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai-bench"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "flux-akeeba"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-api-macros",
  "flux-graph",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api-macros"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "flux-architect"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "flux-archive"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "flux-qwalk",
@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "flux-backend"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-api"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-bank-core",
  "serde",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-bridge"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-core",
@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-core"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-bridge",
@@ -2284,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bank-sdk"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-bank-api",
  "flux-bank-bridge",
@@ -2296,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bbq"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bench"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "flux-biosim"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "flux-bluetooth"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2350,11 +2350,11 @@ dependencies = [
 
 [[package]]
 name = "flux-boilerplate"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-burst"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-chronos",
@@ -2364,7 +2364,7 @@ dependencies = [
 
 [[package]]
 name = "flux-buzz"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cache"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -2400,14 +2400,14 @@ dependencies = [
 
 [[package]]
 name = "flux-cashewswap"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "flux-chronos"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -2424,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cmc"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-api",
  "reqwest 0.12.28",
@@ -2434,7 +2434,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cockpit"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "flux-consensus"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "flux-context"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "flux-moe",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cortex"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-architect",
  "flux-graph",
@@ -2485,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cowsim"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2506,11 +2506,11 @@ dependencies = [
 
 [[package]]
 name = "flux-decay"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-dns"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -2525,14 +2525,14 @@ dependencies = [
 
 [[package]]
 name = "flux-driver"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-cache",
 ]
 
 [[package]]
 name = "flux-email"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "lettre",
  "serde",
@@ -2542,11 +2542,11 @@ dependencies = [
 
 [[package]]
 name = "flux-extension"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-fcx"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fcx-logic"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "rquickjs",
@@ -2563,14 +2563,14 @@ dependencies = [
 
 [[package]]
 name = "flux-fcx-wasm"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-fcx",
 ]
 
 [[package]]
 name = "flux-filecoin"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fleet"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "flux-frontend"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-cache",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "flux-game-log"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "flux-glossary"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2646,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "flux-gpu"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "num_cpus",
@@ -2655,11 +2655,11 @@ dependencies = [
 
 [[package]]
 name = "flux-gpu-market"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-graph"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "flux-groot"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2682,14 +2682,14 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "flux-history"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -2701,11 +2701,11 @@ dependencies = [
 
 [[package]]
 name = "flux-hotswap"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-ivc"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "ark-bls12-381",
@@ -2734,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ivc-verifier-wasm"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode",
  "flux-ivc",
@@ -2751,18 +2751,18 @@ dependencies = [
 
 [[package]]
 name = "flux-keel"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-kv"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-db",
 ]
 
 [[package]]
 name = "flux-kyberkem"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "rand 0.8.6",
  "serde",
@@ -2771,11 +2771,11 @@ dependencies = [
 
 [[package]]
 name = "flux-lab"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2798,7 +2798,7 @@ dependencies = [
 
 [[package]]
 name = "flux-legacy"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-context",
  "flux-refactor",
@@ -2810,14 +2810,14 @@ dependencies = [
 
 [[package]]
 name = "flux-legacy2"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
 ]
 
 [[package]]
 name = "flux-legacy3"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "flux-legacy",
@@ -2826,11 +2826,11 @@ dependencies = [
 
 [[package]]
 name = "flux-macros"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-market"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2839,11 +2839,11 @@ dependencies = [
 
 [[package]]
 name = "flux-md"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-mempool"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2872,9 +2872,11 @@ dependencies = [
 
 [[package]]
 name = "flux-moe"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
+ "fluxc-analytics",
  "fluxc-core",
+ "fluxc-serve",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2882,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "flux-narwhal-core"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "rayon",
@@ -2892,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "flux-nations"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-email",
@@ -2902,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "flux-net"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2913,11 +2915,11 @@ dependencies = [
 
 [[package]]
 name = "flux-node-stability"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-oauth2"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "base64 0.21.7",
  "hex",
@@ -2931,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2940,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "flux-orchestrator"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2948,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2971,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "flux-policy"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2980,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "flux-promote-gate"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2988,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "flux-quantum-architect"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2996,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qug"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "hex",
@@ -3006,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "flux-quic"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3022,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "flux-quorum"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -3032,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qwalk"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "approx",
  "nalgebra 0.32.6",
@@ -3040,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qwen-batch"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3048,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "flux-record"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3059,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "flux-recursive-proofs"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "ark-ff 0.4.2",
@@ -3095,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "flux-redis"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3109,16 +3111,18 @@ dependencies = [
 
 [[package]]
 name = "flux-refactor"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
+ "fluxc-analytics",
  "fluxc-core",
+ "fluxc-serve",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "flux-render"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3126,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "flux-report"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "chrono",
  "flux-ai",
@@ -3139,7 +3143,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -3152,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rocksdb"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3165,14 +3169,14 @@ dependencies = [
 
 [[package]]
 name = "flux-rsync"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "flux-sap-feed"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-ai-bench",
@@ -3184,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "flux-science"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "approx",
  "blake3",
@@ -3198,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "flux-scoreboard"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3207,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -3219,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search-aggregate"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3227,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "flux-self-heal"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-hotswap",
  "flux-p2p",
@@ -3241,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3250,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil-dashboard"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3259,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sigil-releases"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3268,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sniff"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "serde",
@@ -3277,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -3290,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-secret"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -3309,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-store"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-db",
  "serde",
@@ -3319,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-tools"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3328,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sync"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -3340,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "flux-tip-proof-stir"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3354,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "flux-tor"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3377,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "flux-torrent"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-aether",
@@ -3386,7 +3390,7 @@ dependencies = [
 
 [[package]]
 name = "flux-trade"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3396,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ue-bridge"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3415,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-vdf"
@@ -3430,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "flux-visor"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-cortex",
  "flux-p2p",
@@ -3441,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vite-engine"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3454,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "flux-webcam"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -3466,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "flux-webhook-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3499,11 +3503,11 @@ dependencies = [
 
 [[package]]
 name = "flux-whitehole"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-wireguard"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3526,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-lattice-guard",
@@ -3543,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-p2p"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "ark-bn254",
@@ -3567,7 +3571,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-snark"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "ark-bls12-381",
@@ -3605,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3628,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-types"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "serde",
@@ -3637,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zstd"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3650,21 +3654,36 @@ dependencies = [
 
 [[package]]
 name = "fluxc"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "flux-sigil-releases",
  "flux-webcam",
+ "fluxc-analytics",
  "fluxc-core",
  "fluxc-mcp",
+ "fluxc-serve",
+ "fluxc-util",
+ "fluxc-webhooks",
  "libc",
  "serde_json",
  "toml",
 ]
 
 [[package]]
+name = "fluxc-analytics"
+version = "0.40.0"
+dependencies = [
+ "blake3",
+ "flux-graph",
+ "fluxc-util",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fluxc-core"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -3689,6 +3708,7 @@ dependencies = [
  "flux-sqisign",
  "flux-swarm-store",
  "flux-swarm-tools",
+ "fluxc-util",
  "hex",
  "hmac",
  "lazy_static",
@@ -3708,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "fluxc-gemma"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3717,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "fluxc-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "base64 0.21.7",
  "blake3",
@@ -3749,7 +3769,11 @@ dependencies = [
  "flux-swarm-tools",
  "flux-webcam",
  "flux-zk",
+ "fluxc-analytics",
  "fluxc-core",
+ "fluxc-serve",
+ "fluxc-util",
+ "fluxc-webhooks",
  "hex",
  "lazy_static",
  "rand 0.8.6",
@@ -3762,8 +3786,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxc-serve"
+version = "0.40.0"
+dependencies = [
+ "blake3",
+ "flux-swarm-tools",
+ "fluxc-analytics",
+ "fluxc-util",
+ "hex",
+ "lazy_static",
+ "parking_lot 0.12.5",
+ "rustls 0.23.40",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fluxc-util"
+version = "0.40.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fluxc-webhooks"
+version = "0.40.0"
+dependencies = [
+ "blake3",
+ "flux-swarm-store",
+ "flux-swarm-tools",
+ "fluxc-util",
+ "hex",
+ "hmac",
+ "lazy_static",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "fluxmux"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "crossterm",
  "flux-macros",
@@ -6831,7 +6898,7 @@ dependencies = [
 
 [[package]]
 name = "quillon-gpu-miner"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-gpu",
@@ -6841,34 +6908,34 @@ dependencies = [
 
 [[package]]
 name = "quillonos-claude"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quillonos-coreutils"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quillonos-init"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quillonos-q-miner"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "quillonos-readfile"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quillonos-sh"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quillonos-uname"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "quinn"
@@ -7791,7 +7858,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sigil-ashwalker"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "sigil-bank"
@@ -7803,7 +7870,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-cosmos-core"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-nations",
@@ -7814,7 +7881,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-cosmos-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde_json",
  "sigil-cosmos-core",
@@ -7846,7 +7913,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dao-bridge-mcp"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "hex",
  "serde_json",
@@ -7934,7 +8001,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-rpc-wasm"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "sigil-dex",
  "sigil-rpc",
@@ -7969,7 +8036,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tip-wasm"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde_json",
  "sigil-tip-proof",

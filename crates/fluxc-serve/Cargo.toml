@@ -1,0 +1,19 @@
+[package]
+name = "fluxc-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "fluxc serve layer — the compiler-is-the-web-server HTTP surface, router, stats, goals, portal (v0.41 god-crate split)."
+
+[dependencies]
+rustls = { version = "0.23", features = ["ring"] }
+flux-swarm-tools = { path = "../flux-swarm-tools" }
+rustls-pemfile = "2"
+blake3 = { workspace = true }
+parking_lot = "0.12"
+hex = { workspace = true }
+lazy_static = { workspace = true }
+fluxc-util = { path = "../fluxc-util" }
+fluxc-analytics = { path = "../fluxc-analytics" }
+serde = { workspace = true }
+serde_json = { workspace = true }

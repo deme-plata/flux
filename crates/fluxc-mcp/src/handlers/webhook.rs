@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use crate::handlers::{ToolDef, ToolRegistry};
-use fluxc_core::webhook;
+use fluxc_webhooks::webhook;
 
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(

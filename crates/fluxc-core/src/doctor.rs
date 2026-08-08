@@ -37,7 +37,7 @@ impl Report {
 pub fn run() {
     println!("🩺 fluxc doctor — build-health triage\n");
     let mut r = Report { ok: 0, warn: 0, fail: 0 };
-    let ws = crate::version::workspace_root();
+    let ws = fluxc_util::version::workspace_root();
 
     // 1. Workspace resolution.
     if ws.join("Cargo.toml").exists() {

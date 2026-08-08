@@ -77,7 +77,8 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(ToolDef { name: "flux_moe_goal_route", description: "Route flux-moe expert + skill from goal text or flux_goal consensus. Bifrost inference planner.", input_schema: serde_json::json!({"type":"object","properties":{"goal":{"type":"string"},"use_consensus":{"type":"boolean","default":true}}}) }, flux_moe_goal_route);
 }
 
-use fluxc_core::{webhook, predict, tune, heatmap};
+use fluxc_webhooks::webhook;
+use fluxc_analytics::{predict, tune, heatmap};
 
 // ── flux_gpu ──
 fn flux_gpu(args: &Value) -> String {
@@ -1176,8 +1177,8 @@ fn flux_swarm_register(args: &Value) -> String {
         Ok(g) => g,
         Err(e) => return e,
     };
-    fluxc_core::swarm::force_reload();
-    let agent = fluxc_core::swarm::register_agent(id, wallet);
+    fluxc_webhooks::swarm::force_reload();
+    let agent = fluxc_webhooks::swarm::register_agent(id, wallet);
     log_swarm(id, flux_swarm_tools::ActivityKind::Registered, wallet);
     format!("Agent {} registered with {}", agent.id, agent.wallet_address)
 }
@@ -1198,8 +1199,8 @@ fn flux_swarm_claim(args: &Value) -> String {
         Ok(g) => g,
         Err(e) => return e,
     };
-    fluxc_core::swarm::force_reload();
-    match fluxc_core::swarm::claim_work(id, &crates, prio) {
+    fluxc_webhooks::swarm::force_reload();
+    match fluxc_webhooks::swarm::claim_work(id, &crates, prio) {
         Ok(c) => {
             log_swarm(
                 id,
@@ -1236,8 +1237,8 @@ fn flux_swarm_status(_args: &Value) -> String {
         Ok(g) => g,
         Err(e) => return e,
     };
-    fluxc_core::swarm::force_reload();
-    fluxc_core::swarm::swarm_status().summary()
+    fluxc_webhooks::swarm::force_reload();
+    fluxc_webhooks::swarm::swarm_status().summary()
 }
 
 fn flux_swarm_complete(args: &Value) -> String {
@@ -1248,8 +1249,8 @@ fn flux_swarm_complete(args: &Value) -> String {
         Ok(g) => g,
         Err(e) => return e,
     };
-    fluxc_core::swarm::force_reload();
-    match fluxc_core::swarm::complete_work(id, tid, ok) {
+    fluxc_webhooks::swarm::force_reload();
+    match fluxc_webhooks::swarm::complete_work(id, tid, ok) {
         Some(t) => {
             log_swarm(
                 id,
@@ -1283,8 +1284,8 @@ fn flux_swarm_release(args: &Value) -> String {
         Ok(g) => g,
         Err(e) => return e,
     };
-    fluxc_core::swarm::force_reload();
-    if fluxc_core::swarm::release_claim(id, tid) {
+    fluxc_webhooks::swarm::force_reload();
+    if fluxc_webhooks::swarm::release_claim(id, tid) {
         log_swarm(id, flux_swarm_tools::ActivityKind::Released, tid.to_string());
         // FIP-0003: a released claim is a settled-without-delivery task — Red.
         fluxc_core::tdg::record_swarm_task(
@@ -1470,7 +1471,7 @@ fn flux_goal_post(args: &Value) -> String {
     if agent.is_empty() || text.is_empty() {
         return "Error: agent_id and text required".into();
     }
-    match fluxc_core::goals::post_goal(&agent, &text, priority, ttl) {
+    match fluxc_serve::goals::post_goal(&agent, &text, priority, ttl) {
         Ok(g) => {
             let action = g.meta.get("action").and_then(|v| v.as_str()).unwrap_or("free");
             let targets = g.meta.get("targets").map(|v| v.to_string()).unwrap_or_default();
@@ -1485,7 +1486,7 @@ fn flux_goal_post(args: &Value) -> String {
 }
 
 fn flux_goal_list(_args: &Value) -> String {
-    match fluxc_core::goals::list_goals() {
+    match fluxc_serve::goals::list_goals() {
         Ok(gs) if gs.is_empty() => "🎯 No active goals — player idles".into(),
         Ok(gs) => {
             let mut out = format!("🎯 {} active goal(s) — top first:\n", gs.len());
@@ -1504,7 +1505,7 @@ fn flux_goal_list(_args: &Value) -> String {
 }
 
 fn flux_goal_consensus(_args: &Value) -> String {
-    match fluxc_core::goals::consensus_goal() {
+    match fluxc_serve::goals::consensus_goal() {
         Ok(Some(g)) => {
             let action = g.meta.get("action").and_then(|v| v.as_str()).unwrap_or("free");
             format!(
@@ -1518,7 +1519,7 @@ fn flux_goal_consensus(_args: &Value) -> String {
 }
 
 fn flux_goal_clear(_args: &Value) -> String {
-    match fluxc_core::goals::clear_goals() {
+    match fluxc_serve::goals::clear_goals() {
         Ok(n) => format!("🧹 Cleared {} goal(s) from the stack", n),
         Err(e) => format!("goal_clear error: {}", e),
     }

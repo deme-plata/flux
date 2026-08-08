@@ -18,7 +18,8 @@
 //! Rust-real implementation.
 
 use crate::handlers::{ToolDef, ToolRegistry};
-use fluxc_core::{combo_v2, webhook};
+use fluxc_core::combo_v2;
+use fluxc_webhooks::webhook;
 use serde_json::{json, Value};
 
 pub fn register(registry: &mut ToolRegistry) {

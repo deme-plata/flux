@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+fluxc-util = { path = "../fluxc-util" }
 flux-quantum-architect = { path = "../flux-quantum-architect" }
 flux-net = { path = "../flux-net" }
 flux-cache = { path = "../flux-cache" }

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+fluxc-serve = { path = "../fluxc-serve" }
+fluxc-webhooks = { path = "../fluxc-webhooks" }
+fluxc-analytics = { path = "../fluxc-analytics" }
+fluxc-util = { path = "../fluxc-util" }
 fluxc-core = { path = "../fluxc-core" }
 flux-context = { path = "../flux-context" }
 flux-legacy = { path = "../flux-legacy" }

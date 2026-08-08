@@ -13,7 +13,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use handlers::ToolRegistry;
 
-use fluxc_core::serve_events::push_feed_event;
+use fluxc_util::serve_events::push_feed_event;
 
 /// Build the complete tool registry with all 46 tools.
 fn build_registry() -> ToolRegistry {
@@ -55,6 +55,16 @@ fn build_registry() -> ToolRegistry {
 
 /// Run the MCP stdio server loop.
 pub fn run_mcp_server() {
+    // v0.41 split: wire the webhook sink for lower layers (phase3 et al).
+    fluxc_util::hooks::set_webhook_sink(fluxc_webhooks::webhook::auto_dispatch);
+    fluxc_util::hooks::set_predictor(|p, r| {
+        let x = fluxc_analytics::predict::predict_build(p, r, &[]);
+        fluxc_util::hooks::BuildPrediction {
+            predicted_ms: x.predicted_ms as u64,
+            predicted_cache_rate: x.predicted_cache_rate as f64,
+            confidence: x.confidence as f64,
+        }
+    });
     let registry = build_registry();
     // Hydrate the in-memory stats atomics from the disk-backed store at boot. Without
     // this the MCP server always started at 0, so flux_stats / flux_health_report read

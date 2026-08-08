@@ -550,7 +550,7 @@ pub fn auto_dispatch(event: &str, data: serde_json::Value) {
 
     // Push AI feed event so the dashboard shows webhook activity live
     if fired_count > 0 {
-        crate::serve_events::push_feed_event(
+        fluxc_util::serve_events::push_feed_event(
             "Webhook",
             &format!("{} → {} endpoint(s) fired", event, fired_count),
             "webhook",
@@ -669,7 +669,7 @@ mod tests {
     // ~/.flux/webhooks.json (with its real registrations) is never touched. Uses the
     // crate-shared helper so the one process-wide lock also serializes against the
     // other modules' HOME-swapping persistence tests (predict/benchmark/tune).
-    use crate::test_home::with_temp_home;
+    use fluxc_util::test_home::with_temp_home;
 
     #[test]
     fn test_quarantine_after_threshold() {

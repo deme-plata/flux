@@ -2,7 +2,7 @@
 
 use crate::handlers::{fluxc_cmd, ws, ToolDef, ToolRegistry};
 use crate::handlers::platform_webhook;
-use fluxc_core::webhook;
+use fluxc_webhooks::webhook;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

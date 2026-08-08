@@ -160,7 +160,7 @@ fn flux_fleet_search(args: &Value) -> String {
         });
 
 
-    fluxc_core::webhook::auto_dispatch("fleet_search", payload.clone());
+    fluxc_webhooks::webhook::auto_dispatch("fleet_search", payload.clone());
 
 
     crate::handlers::platform_webhook::dispatch("flux_fleet_search", "fleet_search", payload);

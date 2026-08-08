@@ -906,7 +906,7 @@ mod tests {
     fn test_history_persistence_roundtrip() {
         // Isolate HOME (benchmarks.json lives under $HOME/.flux): otherwise a parallel
         // module's HOME swap reads the wrong store mid-test. Shared lock = deterministic.
-        crate::test_home::with_temp_home("bench_roundtrip", || {
+        fluxc_util::test_home::with_temp_home("bench_roundtrip", || {
             let mut history = BenchmarkHistory::default();
             let report = BenchmarkReport {
                 timestamp_secs: 1,

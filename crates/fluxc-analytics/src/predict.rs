@@ -415,7 +415,7 @@ mod tests {
     // $HOME/.flux/predictions.json. The shared test_home helper gives each test a
     // fresh, empty HOME under one process-wide lock so the global HOME swap can't
     // interleave with the other modules' persistence tests.
-    use crate::test_home::with_temp_home;
+    use fluxc_util::test_home::with_temp_home;
 
     #[test]
     fn test_predict_no_changes() {

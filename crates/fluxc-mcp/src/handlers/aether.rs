@@ -209,7 +209,7 @@ fn flux_aether_ingest(args: &Value) -> String {
                     "path": path.display().to_string(),
                 });
 
-            fluxc_core::webhook::auto_dispatch("aether_ingest", payload.clone());
+            fluxc_webhooks::webhook::auto_dispatch("aether_ingest", payload.clone());
 
             crate::handlers::platform_webhook::dispatch("flux_aether_ingest", "aether_ingest", payload);
             format!(
@@ -249,7 +249,7 @@ fn flux_aether_retrieve(args: &Value) -> String {
                     "verified": true,
                 });
 
-            fluxc_core::webhook::auto_dispatch("aether_retrieve", payload.clone());
+            fluxc_webhooks::webhook::auto_dispatch("aether_retrieve", payload.clone());
 
             crate::handlers::platform_webhook::dispatch("flux_aether_retrieve", "aether_retrieve", payload);
             format!(
@@ -336,7 +336,7 @@ fn flux_aether_sync(args: &Value) -> String {
         });
 
 
-    fluxc_core::webhook::auto_dispatch("aether_sync", payload.clone());
+    fluxc_webhooks::webhook::auto_dispatch("aether_sync", payload.clone());
 
 
     crate::handlers::platform_webhook::dispatch("flux_aether_sync", "aether_sync", payload);

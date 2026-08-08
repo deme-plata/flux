@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use crate::handlers::{ToolDef, ToolRegistry};
-use fluxc_core::{webhook, predict};
+use fluxc_webhooks::webhook;
+use fluxc_analytics::predict;
 
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
@@ -172,7 +173,7 @@ fn flux_feedback(args: &Value) -> String {
     }
 }
 
-use fluxc_core::qspec;
+use fluxc_analytics::qspec;
 
 fn flux_qspec(args: &Value) -> String {
     let error = args.get("error").and_then(|v| v.as_str()).unwrap_or("");

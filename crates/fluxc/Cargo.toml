@@ -9,6 +9,10 @@ name = "fluxc"
 path = "src/main.rs"
 
 [dependencies]
+fluxc-serve = { path = "../fluxc-serve" }
+fluxc-webhooks = { path = "../fluxc-webhooks" }
+fluxc-analytics = { path = "../fluxc-analytics" }
+fluxc-util = { path = "../fluxc-util" }
 fluxc-core = { path = "../fluxc-core" }
 fluxc-mcp = { path = "../fluxc-mcp" }
 flux-webcam = { path = "../flux-webcam" }

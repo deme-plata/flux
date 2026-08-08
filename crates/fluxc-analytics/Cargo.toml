@@ -1,0 +1,13 @@
+[package]
+name = "fluxc-analytics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "fluxc analysis layer — build prediction, tune presets, heatmap, qspec, benchmark, workspace x-ray (v0.41 god-crate split)."
+
+[dependencies]
+flux-graph = { path = "../flux-graph" }
+blake3 = { workspace = true }
+fluxc-util = { path = "../fluxc-util" }
+serde = { workspace = true }
+serde_json = { workspace = true }

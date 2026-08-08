@@ -247,7 +247,7 @@ mod tests {
         assert!(index.crates_scanned >= 15, "expected at least 15 crates, got {}", index.crates_scanned);
         assert!(index.total_exports > 50, "expected 50+ exports, got {}", index.total_exports);
         // Verify known functions exist
-        assert!(index.functions.contains_key("fluxc_core::predict_build"), "predict_build not found");
+        assert!(index.functions.contains_key("fluxc_analytics::predict_build"), "predict_build not found");
         assert!(index.functions.contains_key("fluxc_core::register_webhook"), "register_webhook not found");
     }
 }

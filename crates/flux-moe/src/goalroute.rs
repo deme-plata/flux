@@ -49,7 +49,7 @@ pub fn route_from_goal_text(goal: &str) -> GoalRoutePlan {
 pub fn route_from_consensus() -> Option<GoalRoutePlan> {
     let path = std::path::Path::new("/tmp/flux-goals.json");
     let bytes = std::fs::read(path).ok()?;
-    let store = fluxc_core::goals::GoalStore::load(&bytes);
+    let store = fluxc_serve::goals::GoalStore::load(&bytes);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?

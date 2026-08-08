@@ -1,0 +1,10 @@
+[package]
+name = "fluxc-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bottom-layer fluxc utilities — workspace resolution, live-binary path, the serve event bus, test helpers, and the webhook sink hook. Deliberately tiny and rarely edited: every crate above it rebuilds when this changes (v0.41 god-crate split, Amdahl layer 0)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

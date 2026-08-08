@@ -67,7 +67,8 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
-use fluxc_core::{predict, quantum_architect, tune};
+use fluxc_analytics::{predict, tune};
+use fluxc_core::quantum_architect;
 use serde_json::json;
 
 // ── flux_quickstart ──

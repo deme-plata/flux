@@ -1396,8 +1396,8 @@ fn fire_heal_webhook(event: &str, path: &str, attempt: usize, error: &str) {
             .unwrap_or_default()
             .as_secs(),
     });
-    crate::webhook::auto_dispatch(event, data);
-    crate::serve_events::push_feed_event(
+    fluxc_util::hooks::dispatch_webhook(event, data);
+    fluxc_util::serve_events::push_feed_event(
         "Heal",
         &format!("{} (attempt {}) → {}", path, attempt, event),
         "heal",

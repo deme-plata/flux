@@ -9,7 +9,7 @@ use flux_cortex::ai_cortex::{AiCortex, AiTaskKind};
 /// Routes development tasks through the agent registry, learning which models
 /// produce the best results for each task type.
 pub fn run_ai_cortex(target: &str, mode: &str, iterations: usize, json: bool) {
-    let root = crate::version::workspace_root();
+    let root = fluxc_util::version::workspace_root();
 
     let modes: Vec<AiTaskKind> = match mode {
         "heal" => vec![AiTaskKind::Heal],
@@ -86,7 +86,7 @@ pub fn run_cortex_loop(preset: &str, iterations: usize, json: bool) {
     use flux_graph::{CrateInfo, WorkspaceGraph, CrateType};
     use flux_optimize::OptimizationPreset;
 
-    let root = crate::version::workspace_root();
+    let root = fluxc_util::version::workspace_root();
     let members = match discover_members(&root) {
         Ok(m) => m,
         Err(e) => {
@@ -174,7 +174,7 @@ pub fn run_cortex_summary(json: bool) {
     use flux_graph::workspace::discover_members;
     use flux_graph::{CrateInfo, WorkspaceGraph, CrateType};
 
-    let root = crate::version::workspace_root();
+    let root = fluxc_util::version::workspace_root();
     let members = match discover_members(&root) {
         Ok(m) => m,
         Err(e) => {

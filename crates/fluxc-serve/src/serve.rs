@@ -22,12 +22,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// Re-export publicly so legacy `fluxc_core::serve::*` paths (fluxc bin, fluxc-mcp)
+// Re-export publicly so legacy `fluxc_serve::serve::*` paths (fluxc bin, fluxc-mcp)
 // keep working after the serve→serve_stats/serve_events split. The split left these
 // as private `use`, which made the whole workspace un-rebuildable (E0603) — that is
 // why target/debug/fluxc was frozen at the pre-split build.
 pub use crate::serve_stats::{LiveStats, init_live_stats};
-pub use crate::serve_events::{push_event, push_feed_event, now_ms};
+pub use fluxc_util::serve_events::{push_event, push_feed_event, now_ms};
 
 // ── Request / Response ──
 
@@ -230,7 +230,7 @@ fn handle_feed(_req: &Request, _stats: &LiveStats) -> Response {
 }
 
 fn handle_tune_get(_req: &Request, _stats: &LiveStats) -> Response {
-    let tune = crate::tune::load_tune();
+    let tune = fluxc_analytics::tune::load_tune();
     let json = serde_json::json!({
         "preset": tune.preset_name,
         "applied_at": tune.applied_at,
@@ -251,16 +251,16 @@ fn handle_tune_post(req: &Request, _stats: &LiveStats) -> Response {
                 5 => "SPEED_BOOTS",
                 _ => "BALANCED_BLADE",
             };
-            let presets = crate::tune::presets();
+            let presets = fluxc_analytics::tune::presets();
             if let Some(preset) = presets.iter().find(|p| p.name == preset_name) {
-                let tune = crate::tune::ActiveTune {
+                let tune = fluxc_analytics::tune::ActiveTune {
                     preset_name: preset.name.to_string(),
                     sap: preset.sap_weights.clone(),
                     xalgo: preset.xalgo_weights.clone(),
                     qspec: preset.qspec_weights.clone(),
                     applied_at: now_ms() / 1000,
                 };
-                let _ = crate::tune::save_tune(&tune);
+                let _ = fluxc_analytics::tune::save_tune(&tune);
                 let json = serde_json::json!({
                     "status": "ok",
                     "preset": preset.name,
@@ -372,7 +372,7 @@ pub fn build_router() -> Router {
 /// Written periodically to disk so q-flux can serve it as a static asset
 /// via quillon.xyz (the python garden bridge previously did this).
 fn build_garden_snapshot(stats: &LiveStats, started_at_us: u64) -> String {
-    let xray_val: serde_json::Value = match crate::xray::xray() {
+    let xray_val: serde_json::Value = match fluxc_analytics::xray::xray() {
         Ok(r) => serde_json::to_value(&r).unwrap_or(serde_json::json!(null)),
         Err(_) => serde_json::json!(null),
     };
@@ -490,7 +490,7 @@ fn handle_options(_req: &Request, _stats: &LiveStats) -> Response {
 /// `fluxc xray --json`. Used by the flux-arena Compile Garden UI as the
 /// single source of truth for crate state.
 fn handle_xray(_req: &Request, _stats: &LiveStats) -> Response {
-    match crate::xray::xray() {
+    match fluxc_analytics::xray::xray() {
         Ok(r) => match serde_json::to_string(&r) {
             Ok(s) => Response::ok_json(&s),
             Err(e) => Response::ok_json(&format!(r#"{{"error":"serialize: {}"}}"#, e)),

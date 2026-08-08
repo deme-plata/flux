@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use parking_lot;
 
-use crate::version;
+use fluxc_util::version;
 
 pub struct LiveStats {
     pub builds_completed: AtomicU64,
@@ -56,7 +56,7 @@ impl LiveStats {
         let uptime = (now_ms() - self.start_time_ms) / 1000;
 
         static SERVE_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-            crate::version::VersionInfo::load(&crate::version::workspace_root())
+            version::VersionInfo::load(&version::workspace_root())
                 .map(|v| v.display())
                 .unwrap_or_else(|_: String| "unknown".into())
         });

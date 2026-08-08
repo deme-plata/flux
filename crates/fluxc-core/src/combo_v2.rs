@@ -16,7 +16,6 @@
 use serde_json::{json, Value};
 use std::time::Instant;
 
-use crate::predict;
 
 /// Rich result for one supersonic-style combo.
 /// This is the contract between engine, MCP handler, and future CLI.
@@ -148,7 +147,7 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     let predict_handle = std::thread::spawn({
         let p = pkg.clone();
         let rel = release;
-        move || predict::predict_build(&p, rel, &[])
+        move || fluxc_util::hooks::predict_build(&p, rel)
     });
 
     // H&P red-skip: if high-conf low-cache, do cheap check first (fail fast).
@@ -164,7 +163,7 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     // crate's compiled artifacts from the content-addressed warm_bin_cache. On a hit,
     // cargo's fingerprint check passes (mtimes preserved) and it SKIPS the recompile —
     // turning a cold target warm. Best-effort: a miss just means a normal build.
-    let ws_root = crate::version::workspace_root();
+    let ws_root = fluxc_util::version::workspace_root();
     let wbc_key = crate::warm_bin_cache::crate_key(&ws_root, &pkg);
     let cache_hit = crate::warm_bin_cache::restore(&ws_root, &pkg, &wbc_key);
 

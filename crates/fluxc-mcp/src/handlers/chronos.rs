@@ -372,7 +372,7 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
     }
 
     let elapsed = start.elapsed().as_secs_f64();
-    fluxc_core::webhook::auto_dispatch("sigil_chronos_ci", json!({
+    fluxc_webhooks::webhook::auto_dispatch("sigil_chronos_ci", json!({
         "crate": crate_name, "status": status, "elapsed_secs": elapsed
     }));
 

@@ -6,6 +6,16 @@ mod webcam_cli;
 use std::env;
 
 fn main() {
+    // v0.41 split: core fires webhooks through the util hook; wire the sink.
+    fluxc_util::hooks::set_webhook_sink(fluxc_webhooks::webhook::auto_dispatch);
+    fluxc_util::hooks::set_predictor(|p, r| {
+        let x = fluxc_analytics::predict::predict_build(p, r, &[]);
+        fluxc_util::hooks::BuildPrediction {
+            predicted_ms: x.predicted_ms as u64,
+            predicted_cache_rate: x.predicted_cache_rate as f64,
+            confidence: x.confidence as f64,
+        }
+    });
     let args: Vec<String> = env::args().collect();
 
     // rustc-impersonation passthrough — cargo's host-triple probe calls
@@ -187,7 +197,7 @@ fn main() {
             let output = subcommand_args.get(2)
                 .map(|s| std::path::PathBuf::from(s))
                 .unwrap_or_else(|| std::path::PathBuf::from("src/generated"));
-            match fluxc_core::webhook_inbound::process_webhook_contracts(&input, &output) {
+            match fluxc_webhooks::webhook_inbound::process_webhook_contracts(&input, &output) {
                 Ok(report) => println!("{}", report),
                 Err(e) => eprintln!("  webhook-gen error: {}", e),
             }
@@ -208,7 +218,7 @@ fn main() {
             let path = subcommand_args.get(1)
                 .map(|s| std::path::PathBuf::from(s))
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let suggestions = fluxc_core::webhook_inbound::suggest_webhooks(&path);
+            let suggestions = fluxc_webhooks::webhook_inbound::suggest_webhooks(&path);
             if suggestions.is_empty() {
                 println!("  No webhook suggestions for this project.");
             } else {
@@ -224,8 +234,8 @@ fn main() {
         Some("dev") | Some("d") => fluxc_core::dev_mode(&config),
         Some("clean") => fluxc_core::clean(),
         Some("serve") => {
-            let stats = fluxc_core::serve::init_live_stats();
-            fluxc_core::serve::start_server(stats, 8084);
+            let stats = fluxc_serve::serve::init_live_stats();
+            fluxc_serve::serve::start_server(stats, 8084);
             loop { std::thread::sleep(std::time::Duration::from_secs(60)); }
         }
         Some("latex") | Some("tex") => fluxc_core::run_latex_build(&config, &subcommand_args[1..]),
@@ -302,13 +312,13 @@ fn main() {
         Some("swarm") | Some("sw") => {
             let op = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("status");
             match op {
-                "register" => println!("{}", fluxc_core::swarm::swarm_register_cli(
+                "register" => println!("{}", fluxc_webhooks::swarm::swarm_register_cli(
                     subcommand_args.get(2).map(|s| s.as_str()).unwrap_or("agent1"),
                     subcommand_args.get(3).map(|s| s.as_str()).unwrap_or("qnk..."),
                 )),
                 "status" | "st" => {
                     println!("⬡ Flux Swarm Status");
-                    let s = fluxc_core::swarm::swarm_status();
+                    let s = fluxc_webhooks::swarm::swarm_status();
                     println!("  agents: {}  claims: {}  completed: {}", s.agents, s.active_claims, s.completed_tasks);
                     println!("  QUG paid: {:.1}", s.qug_paid);
                     if !s.agents_list.is_empty() {
@@ -334,7 +344,7 @@ fn main() {
                     if crates.is_empty() {
                         eprintln!("usage: fluxc swarm claim [agent_id] <crate> [crates...]");
                     } else {
-                        match fluxc_core::swarm::claim_work(&agent_id, &crates, 10) {
+                        match fluxc_webhooks::swarm::claim_work(&agent_id, &crates, 10) {
                             Ok(claim) => println!("⬡ Claimed: {} by {} on {:?}", claim.task_id, claim.agent, claim.crates),
                             Err(e) if e.starts_with("self-owned:") => println!("ℹ {}", &e["self-owned: ".len()..]),
                             Err(e) => eprintln!("  claim failed: {e}"),
@@ -348,7 +358,7 @@ fn main() {
                     } else {
                         let agent_id = env::var("FLUX_AGENT_ID").unwrap_or_else(|_| "cli-agent".into());
                         let success = !subcommand_args.iter().any(|a| a == "--fail");
-                        match fluxc_core::swarm::complete_work(&agent_id, task_id, success) {
+                        match fluxc_webhooks::swarm::complete_work(&agent_id, task_id, success) {
                             Some(t) => println!("⬡ Completed: {} ({}) — {} QUG", t.task_id, if success { "✓" } else { "✗" }, t.qug_earned),
                             None => eprintln!("  complete failed (no such claim or not yours)"),
                         }
@@ -360,7 +370,7 @@ fn main() {
                         eprintln!("usage: fluxc swarm release <task_id>");
                     } else {
                         let agent_id = env::var("FLUX_AGENT_ID").unwrap_or_else(|_| "cli-agent".into());
-                        if fluxc_core::swarm::release_claim(&agent_id, task_id) {
+                        if fluxc_webhooks::swarm::release_claim(&agent_id, task_id) {
                             println!("⬡ Released: {task_id}");
                         } else {
                             eprintln!("  release failed");
@@ -620,7 +630,7 @@ fn main() {
         }
         Some("xray") => {
             let want_json = subcommand_args.iter().any(|a| a == "--json");
-            match fluxc_core::xray::xray() {
+            match fluxc_analytics::xray::xray() {
                 Ok(report) => {
                     if want_json {
                         match serde_json::to_string_pretty(&report) {
@@ -628,7 +638,7 @@ fn main() {
                             Err(e) => eprintln!("xray serialize error: {}", e),
                         }
                     } else {
-                        print!("{}", fluxc_core::xray::render_text(&report));
+                        print!("{}", fluxc_analytics::xray::render_text(&report));
                     }
                 }
                 Err(e) => eprintln!("xray: {}", e),

@@ -74,7 +74,8 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
-use fluxc_core::{webhook, predict};
+use fluxc_webhooks::webhook;
+use fluxc_analytics::predict;
 
 fn flux_compile(args: &Value) -> String {
     let release = args.get("release").and_then(|v| v.as_bool()).unwrap_or(false);

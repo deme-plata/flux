@@ -3,39 +3,30 @@
 // This is the core library crate. fluxc-mcp depends on it for tool implementations.
 // fluxc (CLI) depends on it for build orchestration.
 
-pub mod serve;
 pub mod tdg;
 pub mod tdg_sched;
-pub mod serve_stats;
-pub mod serve_events;
-pub mod serve_router;
 pub mod combo_v2;
 pub mod warm_bin_cache;
-pub mod tune;
-pub mod portal;
-pub mod goals;
 pub mod ai_debug;
 pub use ::flux_net; // P1: extracted to its own flux-net crate; re-export keeps fluxc_core::flux_net::* stable
-pub mod webhook;
-pub mod webhook_ssrf;
-pub mod webhook_inbound;
-pub mod predict;
-pub mod qspec;
 pub use ::flux_quantum_architect as quantum_architect; // P1: extracted to own crate; re-export keeps fluxc_core::quantum_architect::* stable
 pub mod cortex;
 pub mod self_heal;
-pub mod benchmark;
-pub mod heatmap;
 pub mod doctor;
-pub mod version;
+
+// v0.41 god-crate split — compatibility re-exports so downstream
+// `fluxc_core::version::…` / `fluxc_core::live_fluxc_path` keep working.
+// The moved clusters (analytics/webhooks/serve) are deliberately NOT
+// re-exported: core must never depend upward, or edits there would ripple
+// back through core and defeat the split.
+pub use fluxc_util::{live_fluxc_path, strip_deleted_suffix, version};
+pub(crate) use fluxc_util::test_home;
 pub mod phase3;
 pub mod distributed;
 pub mod p2p_worker;
 pub use distributed::distributed_build;
 pub mod chat;
-pub mod swarm;
 pub mod provenance;
-pub mod xray;
 pub mod fix;
 pub mod release_audit;
 
@@ -367,71 +358,6 @@ pub fn canonical_wrapper_path() -> std::path::PathBuf {
 /// Long-running servers (`fluxc mcp`, `fluxc serve`) outlive rebuilds: cargo
 /// replaces the binary by rename, the old inode is unlinked, and from then on
 /// the server's `current_exe()` (= readlink /proc/self/exe) yields
-/// "<path> (deleted)" — a path that does not exist and fails to spawn in ~70ms.
-/// That single mechanism was the TRUE root cause of the 0/0-green combo trap
-/// (confirmed live 2026-07-19: the serving mcp process's exe read
-/// ".../target/debug/fluxc (deleted)" while a fresh binary sat at the clean
-/// path), and it equally poisons RUSTC_WRAPPER handed to cargo by a stale
-/// server. Resolution order:
-/// 1. `FLUX_WRAPPER_PATH` (fleet symlink, operator keeps it live)
-/// 2. `current_exe()` as-is, when that file still exists
-/// 3. `current_exe()` with the " (deleted)" suffix stripped, when THAT exists
-///    — the freshly rebuilt binary at the same path (newer than the running
-///    process, and exactly the right thing to spawn)
-/// 4. `current_exe()` unchanged — let the caller surface the spawn error
-pub fn live_fluxc_path() -> std::path::PathBuf {
-    if let Ok(p) = env::var("FLUX_WRAPPER_PATH") {
-        if !p.is_empty() && std::path::Path::new(&p).exists() {
-            return std::path::PathBuf::from(p);
-        }
-    }
-    let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
-    if exe.exists() {
-        return exe;
-    }
-    if let Some(stripped) = strip_deleted_suffix(&exe) {
-        if stripped.exists() {
-            return stripped;
-        }
-    }
-    exe
-}
-
-/// "<path> (deleted)" → Some("<path>") — the shape /proc/self/exe takes after
-/// the running binary is rename-replaced. None when the suffix is absent.
-pub fn strip_deleted_suffix(p: &std::path::Path) -> Option<std::path::PathBuf> {
-    let s = p.to_str()?;
-    s.strip_suffix(" (deleted)").map(std::path::PathBuf::from)
-}
-
-#[cfg(test)]
-mod live_fluxc_path_tests {
-    use super::*;
-
-    #[test]
-    fn deleted_suffix_strips_exactly() {
-        assert_eq!(
-            strip_deleted_suffix(std::path::Path::new("/a/b/fluxc (deleted)")),
-            Some(std::path::PathBuf::from("/a/b/fluxc"))
-        );
-        assert_eq!(strip_deleted_suffix(std::path::Path::new("/a/b/fluxc")), None);
-        // Only the exact readlink suffix counts — not a lookalike inside the name.
-        assert_eq!(
-            strip_deleted_suffix(std::path::Path::new("/a/b (deleted)/fluxc")),
-            None
-        );
-    }
-
-    #[test]
-    fn live_path_resolves_to_an_existing_binary_here() {
-        // In a test process current_exe() is the (existing) test binary, so
-        // the resolver must return a path that exists — never a
-        // " (deleted)" phantom.
-        let p = live_fluxc_path();
-        assert!(p.exists(), "resolved {:?} does not exist", p);
-        assert!(!p.to_string_lossy().ends_with(" (deleted)"));
-    }
-}
 
 /// Quarantine a poisoned cargo target-info probe cache before spawning cargo.
 /// A crashlooping host process (a jq / ssh-keygen status feed observed on this
@@ -1679,26 +1605,6 @@ pub fn parse_args(raw: &[String]) -> (BuildConfig, Vec<String>) {
 /// $HOME out from under each other and read the wrong (or a half-written) store.
 /// One lock across all of them makes every HOME-touching test deterministic.
 #[cfg(test)]
-pub(crate) mod test_home {
-    use std::sync::Mutex;
-    static LOCK: Mutex<()> = Mutex::new(());
-
-    pub fn with_temp_home<T>(tag: &str, f: impl FnOnce() -> T) -> T {
-        let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var("HOME").ok();
-        let dir = std::env::temp_dir().join(format!("flux-test-home-{}", tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("HOME", &dir);
-        let out = f();
-        match prev {
-            Some(p) => std::env::set_var("HOME", p),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        out
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 //! Platform combo audit — POST to Aether control surface :4178 + durable jsonl captures.
-//! Complements fluxc_core::webhook::auto_dispatch (swarm feed) with MCP-combo audit trail.
+//! Complements fluxc_webhooks::webhook::auto_dispatch (swarm feed) with MCP-combo audit trail.
 
 use serde_json::{json, Value};
 use std::path::PathBuf;

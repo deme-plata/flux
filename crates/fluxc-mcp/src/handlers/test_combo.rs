@@ -99,7 +99,7 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
-use fluxc_core::webhook;
+use fluxc_webhooks::webhook;
 
 fn flux_test(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str());
@@ -157,7 +157,7 @@ fn flux_test(args: &Value) -> String {
     }
 }
 
-use fluxc_core::predict;
+use fluxc_analytics::predict;
 
 fn flux_combo(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc");
@@ -323,8 +323,8 @@ fn flux_combo(args: &Value) -> String {
     )
 }
 
-use fluxc_core::tune;
-use fluxc_core::heatmap;
+use fluxc_analytics::tune;
+use fluxc_analytics::heatmap;
 
 // ── Visual panel rendering (the ECONOMICS-box treatment for flux combos) ──
 const PANEL_W: usize = 50; // inner content width (all rows are single-width chars)
@@ -396,7 +396,7 @@ mod anchor_tests {
 }
 
 fn webhook_fired(event: &str) -> usize {
-    fluxc_core::webhook::count_listeners(event)
+    fluxc_webhooks::webhook::count_listeners(event)
 }
 
 fn flux_quickcast(args: &Value) -> String {
@@ -461,7 +461,7 @@ fn flux_ult(args: &Value) -> String {
     });
 
     let check_ok = check_handle.join().unwrap();
-    let heat: fluxc_core::heatmap::HeatmapSnapshot = heatmap_handle.join().unwrap_or_default();
+    let heat: fluxc_analytics::heatmap::HeatmapSnapshot = heatmap_handle.join().unwrap_or_default();
     let pred = pred_handle.join().unwrap();
 
     let ms = start.elapsed().as_millis();
@@ -517,7 +517,7 @@ fn flux_dev(args: &Value) -> String {
         .args(["cortex-summary"]).output();
     steps.push(json!({"step": "cortex", "ok": cortex.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
 
-    let listener_count = fluxc_core::webhook::count_listeners("build_complete");
+    let listener_count = fluxc_webhooks::webhook::count_listeners("build_complete");
     steps.push(json!({"step": "webhooks", "listeners": listener_count}));
 
     if deploy && check_ok && test_ok {
@@ -622,7 +622,7 @@ fn flux_develop(args: &Value) -> String {
     let all_ok = steps.iter().all(|s| s["ok"].as_bool().unwrap_or(true));
 
     // Fire internal webhook
-    fluxc_core::webhook::auto_dispatch("flux_develop", json!({
+    fluxc_webhooks::webhook::auto_dispatch("flux_develop", json!({
         "package": package, "all_ok": all_ok, "elapsed_secs": elapsed, "steps": steps
     }));
 

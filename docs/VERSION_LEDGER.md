@@ -41,6 +41,7 @@
 | v0.36.0 | 2026-07-03 | Durable storage (flux-db v3 SSTs, streaming merge, 1 TB+ proven) + fleet-warm builds (canonical wrapper path, toolchain pin) |
 | v0.37.0 | 2026-07-17 | The incremental release: FIP-0003 TDG (tracer + wrapper spool + crate/unit scheduler + flux_combo incremental), ladder rung 7 (traits, gates 36/25/16), module-tree cache-key fix (⚠ one cold rebuild), async compaction, 20 TB ladder PASS (40,001/40,001) |
 | v0.38.0 | 2026-07-18 | The ladder release: rungs 7b–11 (tagged dyn, closures, heap Vec/String via the flux runtime, range/vec for-loops, iterator fusion) — 12 outcome gates green; FIP-0003 write paths complete (swarm); FLUX_MIR_DEBUG; verbose verifier errors |
+| v0.40.0 | `full:86cf82a6ac1a2de4e0129e66e9d5321eeb7d0a3c3a63b57955dca87f6ea87fca` | head (parent of v0.39 chain) |
 | v0.39.0 | 2026-07-24 | The honest-tooling release: dep-info cache fix (no-op sigil check 216s→1.0s), flux_combo UNVERIFIED verdict + live_fluxc_path stale-server fix, fluxc test verbatim arg forwarding + test-bins, flux-db async-settle/WAL rewrite + ShardedDb parity |
 
 ## Track C — Planned / future

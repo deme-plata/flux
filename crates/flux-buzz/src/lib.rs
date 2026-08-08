@@ -12,6 +12,7 @@
 
 pub mod event;
 pub mod relay;
+pub mod rev;
 pub mod store;
 
 pub use event::{BuzzEvent, Identity};

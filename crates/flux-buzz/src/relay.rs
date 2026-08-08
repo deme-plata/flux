@@ -43,18 +43,50 @@ pub struct RelayState {
     /// clients can display (and re-verify) what code the relay runs. Read at
     /// boot from FLUX_BUZZ_REV, or the file named by FLUX_BUZZ_REV_FILE.
     pub provenance: Option<String>,
+    /// Shared secret guarding POST /v1/hooks/fluxc (the endpoint is reachable
+    /// through the public proxy, so unauthenticated build reports would be
+    /// forgeable). FLUX_BUZZ_HOOK_TOKEN or FLUX_BUZZ_HOOK_TOKEN_FILE.
+    pub hook_token: Option<String>,
+    /// Identity that signs auto-posted build-provenance events
+    /// (FLUX_BUZZ_HOOK_KEY = path to an identity.json).
+    pub signer: Option<crate::event::Identity>,
+    /// Workspace whose crates green combos refer to (FLUX_BUZZ_WORKSPACE).
+    pub workspace_root: std::path::PathBuf,
+}
+
+fn env_or_file(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .or_else(|| {
+            std::env::var(format!("{var}_FILE"))
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 impl RelayState {
     pub fn new(store: EventStore) -> Arc<Self> {
         let (tx, _) = broadcast::channel(1024);
-        let provenance = std::env::var("FLUX_BUZZ_REV").ok().or_else(|| {
-            std::env::var("FLUX_BUZZ_REV_FILE")
-                .ok()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-        });
-        let provenance = provenance.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        Arc::new(Self { store: Mutex::new(store), tx, started: Instant::now(), provenance })
+        let provenance = env_or_file("FLUX_BUZZ_REV");
+        let hook_token = env_or_file("FLUX_BUZZ_HOOK_TOKEN");
+        let signer = std::env::var("FLUX_BUZZ_HOOK_KEY")
+            .ok()
+            .and_then(|p| crate::event::Identity::load(std::path::Path::new(&p)).ok());
+        let workspace_root = std::path::PathBuf::from(
+            std::env::var("FLUX_BUZZ_WORKSPACE")
+                .unwrap_or_else(|_| "/home/storage/deepseek-codewhale/flux".into()),
+        );
+        Arc::new(Self {
+            store: Mutex::new(store),
+            tx,
+            started: Instant::now(),
+            provenance,
+            hook_token,
+            signer,
+            workspace_root,
+        })
     }
 }
 
@@ -229,6 +261,18 @@ where
                 }
             }
         }
+        ("POST", "/v1/hooks/fluxc") => {
+            let Some(ref want) = state.hook_token else {
+                return write_json(&mut stream, 404, r#"{"ok":false,"error":"hook disabled"}"#).await;
+            };
+            if req.query.get("token") != Some(want) {
+                return write_json(&mut stream, 403, r#"{"ok":false,"error":"bad token"}"#).await;
+            }
+            let payload: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let accepted = accept_fluxc_hook(&state, &payload);
+            let body = serde_json::json!({"ok": true, "accepted": accepted});
+            write_json(&mut stream, 200, &body.to_string()).await
+        }
         ("GET", "/v1/ws") => handle_ws(stream, req, state).await,
         ("GET", "/") | ("GET", "/buzz.html") | ("GET", "/index.html") => {
             let resp = format!(
@@ -242,6 +286,58 @@ where
             write_json(&mut stream, 404, r#"{"ok":false,"error":"not found"}"#).await
         }
     }
+}
+
+/// Handle a fluxc webhook envelope `{event, timestamp, data, source}`. On a
+/// green `combo_complete` (verdict "green" AND at least one test executed —
+/// the 0-passed/0-failed combo is a failed test build, never green), snapshot
+/// the crate with flux-rev and publish a signed provenance event to #builds.
+/// Snapshotting shells out and can take seconds, so it runs off-thread; the
+/// webhook response returns immediately. Returns whether a post was scheduled.
+fn accept_fluxc_hook(state: &Arc<RelayState>, payload: &serde_json::Value) -> bool {
+    if payload["event"] != "combo_complete" {
+        return false;
+    }
+    let data = &payload["data"];
+    let green = data["verdict"] == "green"
+        && data["tests_passed"].as_u64().unwrap_or(0) >= 1
+        && data["tests_failed"].as_u64().unwrap_or(1) == 0;
+    if !green || state.signer.is_none() {
+        return false;
+    }
+    let Some(package) = data["package"].as_str().map(String::from) else { return false };
+    let passed = data["tests_passed"].as_u64().unwrap_or(0);
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let dir = state.workspace_root.join("crates").join(&package);
+        let stamp = if dir.is_dir() { crate::rev::flux_rev_snapshot(&dir).ok() } else { None };
+        let signer = state.signer.as_ref().expect("checked above");
+        let mut tags = vec![
+            vec!["c".to_string(), "builds".to_string()],
+            vec!["name".to_string(), "buzz-relay".to_string()],
+            vec!["package".to_string(), package.clone()],
+        ];
+        let (kind, content) = match &stamp {
+            Some(s) => {
+                tags.push(vec!["rev".to_string(), s.clone()]);
+                tags.push(vec!["dir".to_string(), format!("crates/{package}")]);
+                (
+                    crate::event::KIND_PROVENANCE,
+                    format!("✅ flux_combo green: {package} · {passed} tests passed — full:{}", &s[..16]),
+                )
+            }
+            None => (
+                crate::event::KIND_AGENT_ACTION,
+                format!("✅ flux_combo green: {package} · {passed} tests passed (tree not snapshotted)"),
+            ),
+        };
+        let ev = signer.sign_event(kind, tags, content);
+        match publish(&state, ev) {
+            Ok(id) => info!("build-hook: posted provenance {id} for {package}"),
+            Err(e) => warn!("build-hook: publish failed for {package}: {e:#}"),
+        }
+    });
+    true
 }
 
 /// Manual WebSocket upgrade (RFC 6455 accept key), then hand the raw stream to
@@ -519,6 +615,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health["events"], 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Green fluxc combo webhook → token-gated → flux-rev snapshot (stubbed)
+    /// → signed provenance event lands in #builds. Red/forged never post.
+    #[tokio::test]
+    async fn fluxc_hook_posts_provenance_on_green() {
+        let dir = tmp_dir("hook");
+        std::fs::create_dir_all(dir.join("ws/crates/demo")).unwrap();
+        let stub = dir.join("flux-rev-stub.sh");
+        let stamp = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        std::fs::write(&stub, format!("#!/bin/sh\necho '   full: {stamp}'\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let keyp = dir.join("id.json");
+        Identity::generate().save(&keyp).unwrap();
+        std::env::set_var("FLUX_REV_BIN", &stub);
+        std::env::set_var("FLUX_BUZZ_HOOK_TOKEN", "sekret");
+        std::env::set_var("FLUX_BUZZ_HOOK_KEY", &keyp);
+        std::env::set_var("FLUX_BUZZ_WORKSPACE", dir.join("ws"));
+
+        let store = EventStore::open(&dir.join("data")).unwrap();
+        let state = RelayState::new(store);
+        assert!(state.signer.is_some(), "signer must load from FLUX_BUZZ_HOOK_KEY");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(run_plain(listener, state.clone()));
+
+        let client = reqwest::Client::new();
+        let green = serde_json::json!({
+            "event": "combo_complete", "timestamp": 0, "source": "fluxc test",
+            "data": {"package": "demo", "verdict": "green", "tests_passed": 7, "tests_failed": 0}
+        });
+
+        // Wrong token → rejected outright.
+        let r = client
+            .post(format!("http://{addr}/v1/hooks/fluxc?token=wrong"))
+            .json(&green)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403);
+
+        // Red and 0/0 ("UNVERIFIED" trap) verdicts → acknowledged, never posted.
+        for bad in [
+            serde_json::json!({"event":"combo_complete","data":{"package":"demo","verdict":"RED","tests_passed":3,"tests_failed":2}}),
+            serde_json::json!({"event":"combo_complete","data":{"package":"demo","verdict":"green","tests_passed":0,"tests_failed":0}}),
+        ] {
+            let r: serde_json::Value = client
+                .post(format!("http://{addr}/v1/hooks/fluxc?token=sekret"))
+                .json(&bad)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(r["accepted"], false, "must not post for {bad}");
+        }
+
+        // Green → accepted, async snapshot+publish.
+        let r: serde_json::Value = client
+            .post(format!("http://{addr}/v1/hooks/fluxc?token=sekret"))
+            .json(&green)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(r["accepted"], true);
+
+        let mut posted = Vec::new();
+        for _ in 0..50 {
+            posted = state.store.lock().unwrap().query(Some("builds"), 0, None, 10);
+            if !posted.is_empty() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(posted.len(), 1, "exactly one auto-post expected");
+        let ev = &posted[0];
+        assert_eq!(ev.kind, crate::event::KIND_PROVENANCE);
+        assert_eq!(
+            ev.tags.iter().find(|t| t[0] == "rev").map(|t| t[1].as_str()),
+            Some(stamp),
+            "posted stamp must be the flux-rev output"
+        );
+        ev.verify().expect("auto-posted event must be validly signed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

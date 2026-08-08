@@ -114,6 +114,11 @@ fn flux_test(args: &Value) -> String {
 
     let flux_exe = fluxc_core::live_fluxc_path();
     let mut cmd = std::process::Command::new(&flux_exe);
+    // Anchor at the workspace root — cargo resolves the workspace from CWD,
+    // and an MCP server inherits the parent shell's cwd (often NOT the flux
+    // tree, e.g. /home/storage/claude-code), which made every spawn die in
+    // ~25ms with "could not find Cargo.toml" → 0 suites → UNVERIFIED.
+    cmd.current_dir(super::ws());
     cmd.arg("test");
     if let Some(pkg) = package { cmd.args(["--package", pkg]); }
     // Cargo-side: scope to ONE integration-test binary + name filter.
@@ -214,8 +219,12 @@ fn flux_combo(args: &Value) -> String {
         // handler used to tell; `run_ok == false` means the subcommand itself
         // failed to spawn or exited non-zero without any suite output.
         move || {
+            // current_dir: same cwd trap as the flux_test handler above —
+            // without the workspace anchor this dies instantly when the MCP
+            // server was launched outside the flux tree.
             let raw = std::process::Command::new(&exe)
                 .args(["test", "-p", &pkg2])
+                .current_dir(crate::handlers::ws())
                 .output();
             match raw {
                 Ok(o) => {

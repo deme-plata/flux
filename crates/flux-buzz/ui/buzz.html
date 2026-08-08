@@ -3,255 +3,243 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Buzz — flux workspace</title>
+<title>Buzz</title>
 <style>
+  /* Design language of Block's Buzz (docs/assets/screenshots): warm cream
+     sidebar, white canvas, round avatars, honey accents, quiet grays. */
   :root {
-    --bg0: #070a14; --bg1: #0b0f1e; --panel: #10152a; --panel2: #161c36;
-    --glass: rgba(22, 28, 54, .55); --line: #222a4d; --line2: #2d3763;
-    --text: #e3e7f7; --dim: #8b94b8; --faint: #5a628a;
-    --cyan: #45e3ff; --cyan-dim: #2aa8c4; --mauve: #b394ff; --green: #58e8a4;
-    --amber: #f0b866; --red: #ff6d8e;
-    --r: 12px;
+    --cream: #f5f0d8; --cream2: #ece5c4; --cream-line: #e2dab7;
+    --paper: #ffffff; --ink: #1d1d1f; --ink2: #3c3c40; --gray: #85858c;
+    --line: #ececee; --hover: #f6f6f4; --sel: #ffffff;
+    --honey: #f2c94c; --honey-soft: #faf0cf; --honey-ink: #8a6d1a;
+    --green: #34c759; --red: #d8434e;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
-    background:
-      radial-gradient(900px 600px at 12% -8%, #1a2454 0%, transparent 55%),
-      radial-gradient(1100px 700px at 105% 110%, #221a4a 0%, transparent 50%),
-      var(--bg0);
-    color: var(--text);
-    font: 14.5px/1.55 "Inter", "SF Pro Text", -apple-system, "Segoe UI", system-ui, sans-serif;
-    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--paper); color: var(--ink);
+    font: 15px/1.5 -apple-system, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
+    display: flex; overflow: hidden;
   }
-  .mono { font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace; }
+  button { font: inherit; border: none; background: none; cursor: pointer; color: inherit; }
+  input { font: inherit; border: none; outline: none; background: none; color: var(--ink); }
+  ::placeholder { color: #a9a9b0; }
 
-  /* ── header ─────────────────────────────────────────── */
-  header {
-    display: flex; align-items: center; gap: 14px; padding: 12px 20px;
-    border-bottom: 1px solid var(--line); background: var(--glass);
-    backdrop-filter: blur(12px); z-index: 5;
-  }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand .bolt {
-    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
-    background: linear-gradient(135deg, #1c355c, #12406040);
-    border: 1px solid var(--line2); color: var(--cyan); font-size: 16px;
-    box-shadow: 0 0 18px #45e3ff22;
-  }
-  .brand b { font-size: 16px; letter-spacing: .3px; }
-  .brand small { color: var(--faint); font-weight: 400; display: block; font-size: 11px; margin-top: -2px; }
-  #status {
-    display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim);
-    background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px;
-  }
-  #status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); transition: all .3s; }
-  #status.ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
-  #status.err .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
-  #idchip {
-    margin-left: auto; display: flex; align-items: center; gap: 9px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 4px 12px 4px 4px;
-    cursor: default;
-  }
-  #idchip .av { width: 26px; height: 26px; font-size: 11px; }
-  #idchip .who { font-size: 12.5px; font-weight: 600; }
-  #idchip .key { font-size: 10.5px; color: var(--faint); }
-
-  /* ── layout ─────────────────────────────────────────── */
-  main { flex: 1; display: flex; min-height: 0; }
+  /* ── sidebar ────────────────────────────────────────── */
   nav {
-    width: 248px; display: flex; flex-direction: column; padding: 14px 10px 10px;
-    border-right: 1px solid var(--line); background: var(--bg1); gap: 4px; overflow-y: auto;
+    width: 268px; flex: none; display: flex; flex-direction: column;
+    background: linear-gradient(180deg, var(--cream) 0%, #f1ebd0 100%);
+    border-right: 1px solid var(--cream-line); padding: 14px 12px 10px;
+    overflow-y: auto; z-index: 40;
   }
-  nav h3 {
-    font-size: 10.5px; letter-spacing: 2.2px; text-transform: uppercase;
-    color: var(--faint); padding: 10px 10px 6px; font-weight: 600;
+  #search {
+    display: flex; align-items: center; gap: 8px; background: #ffffff8a;
+    border: 1px solid var(--cream-line); border-radius: 10px; padding: 7px 11px;
+    color: var(--gray); font-size: 13.5px; margin-bottom: 12px;
   }
+  #search input { flex: 1; min-width: 0; font-size: 13.5px; }
+  .navitem {
+    display: flex; align-items: center; gap: 10px; padding: 6.5px 10px;
+    border-radius: 9px; font-size: 14.5px; color: var(--ink2); cursor: pointer;
+    font-weight: 500;
+  }
+  .navitem:hover { background: #ffffff70; }
+  .navitem.active { background: var(--sel); box-shadow: 0 1px 4px #00000012; color: var(--ink); }
+  .navitem .ico { width: 18px; text-align: center; opacity: .75; }
+  .sect {
+    display: flex; align-items: center; gap: 7px; margin: 16px 6px 4px;
+    font-size: 13px; font-weight: 600; color: var(--ink2);
+  }
+  .sect .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chan {
-    display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px;
-    cursor: pointer; color: var(--dim); font-size: 14px; transition: background .12s;
+    display: flex; align-items: center; gap: 8px; padding: 5.5px 10px 5.5px 12px;
+    border-radius: 9px; cursor: pointer; color: var(--ink2); font-size: 14.5px;
   }
-  .chan:hover { background: var(--panel); color: var(--text); }
-  .chan.active { background: linear-gradient(90deg, #17335250, #17335210); color: var(--cyan); font-weight: 600; }
-  .chan .hash { color: var(--faint); font-weight: 400; }
-  .chan.active .hash { color: var(--cyan-dim); }
-  .chan .unread {
-    margin-left: auto; min-width: 18px; text-align: center; font-size: 10.5px; font-weight: 700;
-    background: var(--mauve); color: #1a1230; border-radius: 9px; padding: 1px 5px;
+  .chan:hover { background: #ffffff70; }
+  .chan.active { background: var(--sel); box-shadow: 0 1px 4px #00000012; color: var(--ink); font-weight: 600; }
+  .chan .hash { color: var(--gray); font-weight: 400; }
+  .chan .dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
+  .joinrow { display: flex; gap: 6px; margin: 6px 4px 0; }
+  .joinrow input {
+    flex: 1; min-width: 0; background: #ffffff8a; border: 1px solid var(--cream-line);
+    border-radius: 9px; padding: 5px 10px; font-size: 13px;
   }
-  .joinrow { display: flex; gap: 6px; padding: 6px 8px; }
-  .joinrow input { flex: 1; min-width: 0; }
-  .peer { display: flex; align-items: center; gap: 9px; padding: 6px 10px; border-radius: 8px; }
-  .peer .av { width: 26px; height: 26px; font-size: 10.5px; }
-  .peer .pname { font-size: 13px; font-weight: 500; }
-  .peer .plast { font-size: 10.5px; color: var(--faint); }
-  .peer .tag { margin-left: auto; font-size: 12px; }
-  #settings { margin-top: auto; border-top: 1px solid var(--line); padding: 12px 8px 4px; display: grid; gap: 7px; }
-  #settings label { font-size: 10.5px; color: var(--faint); letter-spacing: 1px; text-transform: uppercase; }
+  .joinrow button {
+    background: #ffffff8a; border: 1px solid var(--cream-line); border-radius: 9px;
+    padding: 0 11px; font-size: 15px; color: var(--ink2);
+  }
+  .joinrow button:hover { background: #fff; }
+  .peer { display: flex; align-items: center; gap: 9px; padding: 5px 10px; border-radius: 9px; font-size: 14px; }
+  .peer .plast { margin-left: auto; font-size: 11px; color: var(--gray); }
+  .agentpill {
+    display: inline-flex; align-items: center; gap: 4px; background: var(--honey-soft);
+    border: 1px solid #e8d89f; color: var(--honey-ink); border-radius: 7px;
+    font-size: 11px; font-weight: 600; padding: 0 6px; height: 18px;
+  }
+  #me {
+    margin-top: auto; display: flex; align-items: center; gap: 10px;
+    padding: 10px 8px 4px; border-top: 1px solid var(--cream-line); cursor: pointer;
+  }
+  #me .who { font-size: 14px; font-weight: 600; }
+  #me .org { font-size: 12px; color: var(--gray); display: flex; align-items: center; gap: 5px; }
+  #me .presence { width: 9px; height: 9px; border-radius: 50%; background: var(--green); position: absolute; right: -1px; bottom: -1px; border: 2px solid var(--cream); }
+  .avwrap { position: relative; flex: none; }
+  #settings { display: none; padding: 10px 8px; gap: 8px; }
+  #settings.open { display: grid; }
+  #settings label { font-size: 11px; color: var(--gray); font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+  #settings input {
+    background: #ffffff9a; border: 1px solid var(--cream-line); border-radius: 8px;
+    padding: 6px 10px; font-size: 13px;
+  }
 
-  input, button {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 13px;
-  }
-  input:focus { outline: none; border-color: var(--cyan-dim); box-shadow: 0 0 0 3px #45e3ff14; }
-  button { cursor: pointer; color: var(--cyan); font-weight: 600; transition: all .12s; }
-  button:hover { border-color: var(--cyan-dim); background: #17335230; }
-
-  /* ── feed ───────────────────────────────────────────── */
-  #feedcol { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #chanhead {
-    display: flex; align-items: baseline; gap: 12px; padding: 13px 24px;
-    border-bottom: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(8px);
-  }
-  #chanhead h2 { font-size: 16px; }
-  #chanhead h2 .hash { color: var(--cyan-dim); margin-right: 2px; }
-  #chanhead .sub { font-size: 12px; color: var(--faint); }
-  #msgs { flex: 1; overflow-y: auto; padding: 18px 24px 8px; scroll-behavior: smooth; }
-  .day {
-    display: flex; align-items: center; gap: 14px; margin: 18px 0 10px; color: var(--faint);
-    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
-  }
-  .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-  .row { display: flex; gap: 13px; padding: 3px 0; }
-  .row.head { margin-top: 14px; }
-  .row .gutter { width: 38px; flex: none; display: flex; justify-content: center; }
+  /* ── avatars ────────────────────────────────────────── */
   .av {
-    width: 38px; height: 38px; border-radius: 11px; flex: none;
-    display: grid; place-items: center; font-weight: 700; font-size: 13.5px;
-    color: #0b0f1e; text-transform: uppercase; user-select: none;
+    border-radius: 50%; flex: none; display: grid; place-items: center;
+    font-weight: 700; color: #fff; text-transform: uppercase; user-select: none;
   }
-  .row .body { min-width: 0; flex: 1; }
-  .row .meta { display: flex; align-items: baseline; gap: 9px; margin-bottom: 1px; }
-  .row .who { font-weight: 650; font-size: 14px; }
-  .row .when { font-size: 11px; color: var(--faint); }
-  .row .when-hover { font-size: 10.5px; color: var(--faint); opacity: 0; width: 38px; text-align: center; align-self: center; }
-  .row:hover .when-hover { opacity: 1; }
-  .row:hover { background: #ffffff05; border-radius: 8px; }
-  .content { word-break: break-word; white-space: pre-wrap; color: #d4daf0; }
-  .content a { color: var(--cyan); text-decoration: none; }
+  .av.s28 { width: 28px; height: 28px; font-size: 11px; }
+  .av.s36 { width: 36px; height: 36px; font-size: 13.5px; }
+
+  /* ── main column ────────────────────────────────────── */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--paper); }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 13px 22px;
+    border-bottom: 1px solid var(--line);
+  }
+  #navbtn { display: none; font-size: 18px; }
+  header h1 { font-size: 16.5px; font-weight: 700; }
+  header h1 .hash { color: var(--gray); font-weight: 500; }
+  header .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .hpill {
+    display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink2);
+    border: 1px solid var(--line); border-radius: 9px; padding: 4.5px 10px; background: #fff;
+  }
+  .hpill .st { width: 7px; height: 7px; border-radius: 50%; background: #c4c4c8; }
+  .hpill.ok .st { background: var(--green); }
+  .hpill.err .st { background: var(--red); }
+
+  #banner {
+    display: none; padding: 9px 22px; background: #fdecec; color: #a03038;
+    border-bottom: 1px solid #f3d2d4; font-size: 13px;
+  }
+  #msgs { flex: 1; overflow-y: auto; padding: 18px 26px 6px; scroll-behavior: smooth; }
+  .divider {
+    display: flex; align-items: center; gap: 12px; margin: 16px 0 8px;
+    color: var(--gray); font-size: 11.5px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase;
+  }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .divider.new { color: var(--red); }
+  .divider.new::before, .divider.new::after { background: #f0d5d7; }
+  .row { display: flex; gap: 13px; padding: 2.5px 8px; border-radius: 10px; }
+  .row:hover { background: var(--hover); }
+  .row.head { margin-top: 13px; }
+  .row .gutter { width: 36px; flex: none; display: flex; justify-content: center; }
+  .row .hover-ts { font-size: 10.5px; color: #c0c0c6; opacity: 0; align-self: center; width: 36px; text-align: center; }
+  .row:hover .hover-ts { opacity: 1; }
+  .row .body { min-width: 0; flex: 1; padding-bottom: 2px; }
+  .row .meta { display: flex; align-items: baseline; gap: 8px; }
+  .row .who { font-weight: 700; font-size: 15px; color: var(--ink); }
+  .row .when { font-size: 12px; color: var(--gray); }
+  .row .sig { font-size: 11px; color: #c9c9ce; cursor: help; }
+  .row .sig:hover { color: var(--green); }
+  .content { color: var(--ink2); word-break: break-word; white-space: pre-wrap; }
+  .content a { color: #2469d6; text-decoration: none; }
   .content a:hover { text-decoration: underline; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600;
-    padding: 1.5px 8px; border-radius: 9px; border: 1px solid var(--line2); color: var(--dim);
-  }
-  .badge.agent { color: var(--mauve); border-color: #b394ff55; background: #b394ff10; }
-  .badge.commit { color: var(--green); border-color: #58e8a455; background: #58e8a410; }
-  .badge.sig { color: var(--faint); border: none; padding: 0; cursor: help; }
-  .badge.sig:hover { color: var(--green); }
   .commitcard {
-    margin-top: 5px; border: 1px solid var(--line2); border-left: 3px solid var(--green);
-    background: var(--panel); border-radius: 8px; padding: 8px 12px; font-size: 13px;
+    margin-top: 4px; border: 1px solid var(--line); border-left: 3px solid var(--honey);
+    background: #fffdf5; border-radius: 9px; padding: 8px 12px; font-size: 13.5px;
   }
-  .commitcard .repo { color: var(--green); font-weight: 600; }
-  .commitcard .chash { color: var(--faint); }
+  .commitcard .repo { font-weight: 700; }
+  .commitcard .chash { color: var(--gray); }
+
+  #empty { margin: 8vh auto 0; max-width: 460px; text-align: center; }
+  #empty .glyph { font-size: 40px; }
+  #empty h2 { font-size: 18px; margin: 10px 0 6px; }
+  #empty p { color: var(--gray); font-size: 14px; margin-bottom: 16px; }
+  #empty .cli {
+    text-align: left; background: #fafaf7; border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; font-size: 12px; color: var(--ink2); overflow-x: auto; white-space: pre;
+  }
 
   /* ── composer ───────────────────────────────────────── */
-  #composerwrap { padding: 8px 24px 16px; }
-  #signhint { font-size: 11px; color: var(--faint); padding: 0 6px 6px; }
-  #signhint b { color: var(--dim); }
+  #composerwrap { padding: 6px 26px 10px; }
   #composer {
-    display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line2);
-    border-radius: var(--r); padding: 9px 10px 9px 16px; align-items: center;
-    transition: border-color .15s;
+    display: flex; align-items: center; gap: 10px;
+    border: 1.5px solid var(--line); border-radius: 14px; padding: 6px 6px 6px 16px;
+    box-shadow: 0 2px 10px #00000008; transition: border-color .15s;
   }
-  #composer:focus-within { border-color: var(--cyan-dim); box-shadow: 0 0 0 3px #45e3ff10, 0 8px 30px #00000040; }
-  #composer input { flex: 1; background: none; border: none; box-shadow: none; font-size: 14.5px; padding: 4px 0; }
-  #composer button { border-radius: 9px; padding: 8px 18px; background: linear-gradient(135deg, #16436b, #1a2d5c); border-color: var(--line2); }
-  #composer button:hover { border-color: var(--cyan); box-shadow: 0 0 14px #45e3ff30; }
+  #composer:focus-within { border-color: #c9c9cf; }
+  #composer input { flex: 1; font-size: 15px; padding: 6px 0; }
+  #sendbtn {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--ink); color: #fff;
+    display: grid; place-items: center; font-size: 16px; flex: none; transition: transform .1s;
+  }
+  #sendbtn:hover { transform: scale(1.06); }
+  #agentline {
+    display: flex; align-items: center; gap: 7px; padding: 7px 4px 0;
+    font-size: 12.5px; color: var(--gray);
+  }
+  #scrim { display: none; position: fixed; inset: 0; z-index: 30; background: #00000055; }
 
-  /* ── empty state ────────────────────────────────────── */
-  #empty { margin: auto; max-width: 520px; text-align: center; padding: 40px 20px; }
-  #empty .glyph { font-size: 42px; margin-bottom: 14px; filter: drop-shadow(0 0 18px #45e3ff50); }
-  #empty h2 { font-size: 19px; margin-bottom: 8px; }
-  #empty p { color: var(--dim); font-size: 13.5px; margin-bottom: 18px; }
-  #empty .cli {
-    text-align: left; background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 12px 16px; font-size: 12px; color: var(--dim);
-    overflow-x: auto; white-space: pre;
-  }
-  #empty .cli b { color: var(--cyan); font-weight: 500; }
-  #banner {
-    display: none; padding: 9px 24px; background: #341726; color: var(--red);
-    border-bottom: 1px solid #55284077; font-size: 12.5px;
-  }
-  /* ── mobile ─────────────────────────────────────────── */
-  #navbtn { display: none; }
   @media (max-width: 760px) {
-    #navbtn {
-      display: grid; place-items: center; width: 36px; height: 36px; flex: none;
-      font-size: 17px; border-radius: 9px;
-    }
-    .brand small { display: none; }
-    #status { display: none; }
-    #idchip .who, #idchip .key { display: none; }
-    #idchip { padding: 4px; border-radius: 10px; }
+    #navbtn { display: block; }
     nav {
-      position: fixed; top: 0; bottom: 0; left: 0; width: min(78vw, 300px); z-index: 40;
+      position: fixed; top: 0; bottom: 0; left: 0; width: min(80vw, 300px);
       transform: translateX(-105%); transition: transform .22s ease;
-      box-shadow: 18px 0 50px #00000090; border-right: 1px solid var(--line2);
+      box-shadow: 14px 0 40px #00000035;
     }
     nav.open { transform: none; }
-    #scrim {
-      display: none; position: fixed; inset: 0; z-index: 30; background: #00000080;
-    }
     #scrim.open { display: block; }
-    #chanhead { padding: 11px 16px; }
-    #msgs { padding: 14px 12px 6px; }
-    #composerwrap { padding: 6px 10px 12px; }
-    .msg, .row { max-width: 100%; }
-    .row .gutter { width: 32px; }
-    .av { width: 32px; height: 32px; border-radius: 9px; font-size: 12px; }
+    header { padding: 11px 14px; }
+    #msgs { padding: 14px 12px 4px; }
+    #composerwrap { padding: 4px 10px 10px; }
   }
-  ::-webkit-scrollbar { width: 9px; }
-  ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: #d9d9de; border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
 </style>
 </head>
 <body>
-<header>
-  <button id="navbtn" onclick="toggleNav()" aria-label="channels">☰</button>
-  <div class="brand">
-    <div class="bolt">⚡</div>
-    <div><b>Buzz</b><small>flux workspace · humans + agents</small></div>
-  </div>
-  <div id="status"><span class="dot"></span><span id="statustext">connecting…</span></div>
-  <div id="idchip" title="Your Ed25519 keypair IS your identity — generated in this browser, never leaves it.">
-    <div class="av" id="myav">?</div>
-    <div><div class="who" id="myname">…</div><div class="key mono" id="mykey"></div></div>
-  </div>
-</header>
-<div id="banner"></div>
 <div id="scrim" onclick="toggleNav(false)"></div>
+<nav>
+  <div id="search">🔍<input id="searchinput" placeholder="Search everything" oninput="repaint()"></div>
+  <div class="navitem" onclick="alert('Inbox: mentions land here in a later release')"><span class="ico">📥</span>Inbox</div>
+  <div class="navitem" id="agentsbtn"><span class="ico">🤖</span>Agents</div>
+  <div class="sect"><span>🐝</span><span class="lbl">The Hive</span></div>
+  <div id="chanlist"></div>
+  <div class="joinrow">
+    <input id="joininput" placeholder="new channel…" onkeydown="if(event.key==='Enter')joinChannel()">
+    <button onclick="joinChannel()" title="join or create">+</button>
+  </div>
+  <div class="sect" style="margin-top:18px"><span>👥</span><span class="lbl">People</span></div>
+  <div id="peers"></div>
+  <div id="me" onclick="document.getElementById('settings').classList.toggle('open')">
+    <span class="avwrap"><span id="myav"></span><span class="presence"></span></span>
+    <div><div class="who" id="myname">…</div><div class="org">🐝 <span id="myorg">flux workspace</span></div></div>
+  </div>
+  <div id="settings">
+    <label>display name</label><input id="nameinput" placeholder="anon" onchange="setName(this.value)">
+    <label>relay</label><input id="relayinput" class="mono" style="font-size:11px" onchange="setRelay(this.value)">
+    <label class="mono" style="text-transform:none" id="mykey"></label>
+  </div>
+</nav>
 <main>
-  <nav>
-    <h3>Channels</h3>
-    <div id="chanlist"></div>
-    <div class="joinrow">
-      <input id="joininput" placeholder="join channel…">
-      <button onclick="joinChannel()" title="join / create channel">+</button>
+  <header>
+    <button id="navbtn" onclick="toggleNav()">☰</button>
+    <h1><span class="hash">#</span> <span id="chantitle">general</span></h1>
+    <div class="right">
+      <span class="hpill" id="peerpill" title="participants seen on this relay">👥 <span id="peercount">0</span></span>
+      <span class="hpill" id="status"><span class="st"></span><span id="statustext">connecting…</span></span>
     </div>
-    <h3>Participants</h3>
-    <div id="peers"></div>
-    <div id="settings">
-      <label>display name</label>
-      <input id="nameinput" placeholder="anon" onchange="setName(this.value)">
-      <label>relay</label>
-      <input id="relayinput" class="mono" style="font-size:11.5px" onchange="setRelay(this.value)">
+  </header>
+  <div id="banner"></div>
+  <div id="msgs"></div>
+  <div id="composerwrap">
+    <div id="composer">
+      <input id="text" placeholder="Message #general" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}">
+      <button id="sendbtn" onclick="send()" title="send (Ed25519-signed)">↑</button>
     </div>
-  </nav>
-  <div id="feedcol">
-    <div id="chanhead">
-      <h2><span class="hash">#</span><span id="chantitle">general</span></h2>
-      <span class="sub" id="chansub"></span>
-    </div>
-    <div id="msgs"></div>
-    <div id="composerwrap">
-      <div id="signhint">signing as <b id="signwho">…</b> · Ed25519 · every message is verifiable</div>
-      <div id="composer">
-        <input id="text" placeholder="Message #general" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}">
-        <button onclick="send()">Send ⚡</button>
-      </div>
-    </div>
+    <div id="agentline"><span id="agentstatus">⚡ every message is Ed25519-signed · blake3-addressed</span></div>
   </div>
 </main>
 <script>
@@ -262,13 +250,15 @@ let relay = localStorage.buzz_relay ||
    location.host === "quillon.xyz"      ? "https://buzz.quillon.xyz" : location.origin);
 let channel = localStorage.buzz_channel || "general";
 let joined = JSON.parse(localStorage.buzz_joined || '["general"]');
-let cursor = 0;
+let cursor = 0, pollFailed = false, agentsOnly = false;
 let priv = null, pubHex = "";
 const seen = new Set();
-const all = [];                 // every event, chronological
-const unread = {};              // channel → count
-const peers = {};               // pubkey → {name, last, agent}
+const all = [];
+const unread = {};
+const peers = {};
 let lastAuthor = null, lastTs = 0, lastDay = "";
+const lastVisit = Number(localStorage.buzz_lastseen || 0);
+let newMarkerPlaced = false;
 
 const $ = id => document.getElementById(id);
 const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -277,14 +267,15 @@ const chanOf = ev => (ev.tags || []).find(t => t[0] === "c")?.[1];
 const tagOf = (ev, k) => (ev.tags || []).find(t => t[0] === k)?.[1];
 const hueOf = pk => { let h = 0; for (const c of pk.slice(0, 16)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const nameOf = ev => tagOf(ev, "name") || (peers[ev.pubkey]?.name) || ev.pubkey.slice(0, 8);
+const isAgentEv = ev => ev.kind === 20 || ev.kind === 3618;
 
-function avatarEl(pk, name, cls) {
-  const d = document.createElement("div");
-  d.className = "av " + (cls || "");
+function avatarEl(pk, name, size) {
+  const d = document.createElement("span");
+  d.className = "av " + (size || "s36");
   const h = hueOf(pk);
-  d.style.background = `linear-gradient(135deg, hsl(${h} 75% 68%), hsl(${(h + 40) % 360} 70% 52%))`;
+  d.style.background = `linear-gradient(135deg, hsl(${h} 62% 55%), hsl(${(h + 45) % 360} 58% 42%))`;
   const n = (name || pk).replace(/[^a-zA-Z0-9]/g, "");
-  d.textContent = (n.slice(0, 2) || pk.slice(0, 2));
+  d.textContent = n.slice(0, 2) || pk.slice(0, 2);
   return d;
 }
 
@@ -302,21 +293,16 @@ async function ensureIdentity() {
       localStorage.buzz_sk = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey))));
       localStorage.buzz_pk = pubHex;
     }
-  } catch (e) {
-    banner("This browser lacks WebCrypto Ed25519 (need a 2025+ browser). Read-only mode.");
-  }
+  } catch (e) { banner("This browser lacks WebCrypto Ed25519 — read-only mode."); }
   renderIdentity();
 }
 
 function renderIdentity() {
   const name = (localStorage.buzz_name || "").trim() || (pubHex ? pubHex.slice(0, 8) : "read-only");
   $("myname").textContent = name;
-  $("mykey").textContent = pubHex ? pubHex.slice(0, 16) + "…" : "";
-  $("signwho").textContent = name + (pubHex ? " (" + pubHex.slice(0, 10) + "…)" : "");
-  const old = $("myav");
-  const av = avatarEl(pubHex || "??", name); av.id = "myav"; av.classList.add("av");
-  av.style.width = "26px"; av.style.height = "26px"; av.style.fontSize = "11px"; av.style.borderRadius = "8px";
-  old.replaceWith(av);
+  $("mykey").textContent = pubHex ? "key " + pubHex.slice(0, 20) + "…" : "";
+  const av = avatarEl(pubHex || "??", name, "s28"); av.id = "myav";
+  $("myav").replaceWith(av);
 }
 
 const canonical = ev => JSON.stringify([ev.pubkey, ev.created_at, ev.kind, ev.tags, ev.content]);
@@ -342,51 +328,54 @@ async function send() {
 function notePeer(ev) {
   const p = peers[ev.pubkey] ||= { name: null, last: 0, agent: false };
   const n = tagOf(ev, "name"); if (n) p.name = n;
-  if (ev.kind === 20 || ev.kind === 3618) p.agent = true;
+  if (isAgentEv(ev)) p.agent = true;
   p.last = Math.max(p.last, ev.created_at);
 }
 
 function rel(ts) {
   const d = Date.now() - ts;
   if (d < 90e3) return "now";
-  if (d < 3600e3) return Math.round(d / 60e3) + "m ago";
-  if (d < 86400e3) return Math.round(d / 3600e3) + "h ago";
-  return Math.round(d / 86400e3) + "d ago";
+  if (d < 3600e3) return Math.round(d / 60e3) + "m";
+  if (d < 86400e3) return Math.round(d / 3600e3) + "h";
+  return Math.round(d / 86400e3) + "d";
 }
 
 function renderPeers() {
   const box = $("peers"); box.innerHTML = "";
-  Object.entries(peers).sort((a, b) => b[1].last - a[1].last).slice(0, 14).forEach(([pk, p]) => {
+  const entries = Object.entries(peers).sort((a, b) => b[1].last - a[1].last);
+  $("peercount").textContent = entries.length;
+  entries.slice(0, 12).forEach(([pk, p]) => {
+    if (agentsOnly && !p.agent) return;
     const d = document.createElement("div"); d.className = "peer";
-    d.appendChild(avatarEl(pk, p.name));
-    const col = document.createElement("div");
-    const n = document.createElement("div"); n.className = "pname"; n.textContent = p.name || pk.slice(0, 10);
-    n.style.color = `hsl(${hueOf(pk)} 65% 75%)`;
-    const l = document.createElement("div"); l.className = "plast"; l.textContent = rel(p.last);
-    col.appendChild(n); col.appendChild(l); d.appendChild(col);
-    if (p.agent) { const t = document.createElement("span"); t.className = "tag"; t.title = "posts agent/git events"; t.textContent = "🤖"; d.appendChild(t); }
-    if (pk === pubHex) { const t = document.createElement("span"); t.className = "tag"; t.title = "you"; t.textContent = "⭐"; d.appendChild(t); }
+    d.appendChild(avatarEl(pk, p.name, "s28"));
+    const n = document.createElement("span"); n.textContent = p.name || pk.slice(0, 10);
+    n.style.fontWeight = pk === pubHex ? "700" : "500";
+    d.appendChild(n);
+    if (p.agent) { const a = document.createElement("span"); a.className = "agentpill"; a.textContent = "🤖 agent"; d.appendChild(a); }
+    const l = document.createElement("span"); l.className = "plast"; l.textContent = rel(p.last);
+    d.appendChild(l);
     box.appendChild(d);
   });
 }
 
 function renderChannels() {
+  const q = ($("searchinput").value || "").toLowerCase();
   const list = $("chanlist"); list.innerHTML = "";
   for (const c of joined) {
+    if (q && !c.toLowerCase().includes(q)) continue;
     const d = document.createElement("div");
     d.className = "chan" + (c === channel ? " active" : "");
     const hash = document.createElement("span"); hash.className = "hash"; hash.textContent = "#";
     const nm = document.createElement("span"); nm.textContent = c;
     d.appendChild(hash); d.appendChild(nm);
-    if (unread[c]) { const u = document.createElement("span"); u.className = "unread"; u.textContent = unread[c] > 99 ? "99+" : unread[c]; d.appendChild(u); }
+    if (unread[c]) { const u = document.createElement("span"); u.className = "dot"; u.title = unread[c] + " unread"; d.appendChild(u); }
     d.onclick = () => switchChannel(c);
     list.appendChild(d);
   }
 }
 
 function linkify(text, into) {
-  const parts = text.split(/(https?:\/\/[^\s]+)/g);
-  for (const part of parts) {
+  for (const part of text.split(/(https?:\/\/[^\s]+)/g)) {
     if (/^https?:\/\//.test(part)) {
       const a = document.createElement("a");
       a.href = part; a.textContent = part; a.target = "_blank"; a.rel = "noopener";
@@ -398,10 +387,15 @@ function linkify(text, into) {
 function renderMsg(ev) {
   const msgs = $("msgs");
   $("empty")?.remove();
+  if (!newMarkerPlaced && lastVisit && ev.created_at > lastVisit) {
+    newMarkerPlaced = true; lastAuthor = null;
+    const d = document.createElement("div"); d.className = "divider new"; d.textContent = "new";
+    msgs.appendChild(d);
+  }
   const day = new Date(ev.created_at).toDateString();
   if (day !== lastDay) {
     lastDay = day; lastAuthor = null;
-    const d = document.createElement("div"); d.className = "day";
+    const d = document.createElement("div"); d.className = "divider";
     d.textContent = day === new Date().toDateString() ? "today" : day;
     msgs.appendChild(d);
   }
@@ -410,31 +404,29 @@ function renderMsg(ev) {
 
   const row = document.createElement("div");
   row.className = "row" + (grouped ? "" : " head");
-  const gutter = document.createElement("div"); gutter.className = "gutter";
-  if (!grouped) gutter.appendChild(avatarEl(ev.pubkey, nameOf(ev)));
-  else { gutter.className = "when-hover mono"; gutter.textContent = new Date(ev.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  const gutter = document.createElement("div");
+  if (!grouped) { gutter.className = "gutter"; gutter.appendChild(avatarEl(ev.pubkey, nameOf(ev), "s36")); }
+  else { gutter.className = "hover-ts"; gutter.textContent = new Date(ev.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
   row.appendChild(gutter);
 
   const body = document.createElement("div"); body.className = "body";
   if (!grouped) {
     const meta = document.createElement("div"); meta.className = "meta";
-    const who = document.createElement("span"); who.className = "who";
-    who.style.color = `hsl(${hueOf(ev.pubkey)} 65% 75%)`; who.textContent = nameOf(ev);
+    const who = document.createElement("span"); who.className = "who"; who.textContent = nameOf(ev);
     meta.appendChild(who);
+    if (isAgentEv(ev)) { const a = document.createElement("span"); a.className = "agentpill"; a.textContent = "🤖 " + (ev.kind === 3618 ? "git" : "agent"); meta.appendChild(a); }
     const when = document.createElement("span"); when.className = "when";
     when.textContent = new Date(ev.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     meta.appendChild(when);
-    if (ev.kind === 20) { const b = document.createElement("span"); b.className = "badge agent"; b.textContent = "🤖 agent"; meta.appendChild(b); }
-    if (ev.kind === 3618) { const b = document.createElement("span"); b.className = "badge commit"; b.textContent = "⎇ commit"; meta.appendChild(b); }
-    const sig = document.createElement("span"); sig.className = "badge sig"; sig.textContent = "✓";
-    sig.title = `Ed25519 verified by relay\nid ${ev.id.slice(0, 20)}…\nsig ${ev.sig.slice(0, 20)}…`;
+    const sig = document.createElement("span"); sig.className = "sig"; sig.textContent = "✓";
+    sig.title = `Ed25519 verified by relay\nid ${ev.id.slice(0, 20)}…`;
     meta.appendChild(sig);
     body.appendChild(meta);
   }
   if (ev.kind === 3618) {
-    const card = document.createElement("div"); card.className = "commitcard mono";
+    const card = document.createElement("div"); card.className = "commitcard";
     const repo = document.createElement("span"); repo.className = "repo"; repo.textContent = tagOf(ev, "repo") || "repo";
-    const ch = document.createElement("span"); ch.className = "chash"; ch.textContent = " @ " + (tagOf(ev, "commit") || "").slice(0, 10);
+    const ch = document.createElement("span"); ch.className = "chash mono"; ch.textContent = " " + (tagOf(ev, "commit") || "").slice(0, 10);
     const subj = document.createElement("div"); subj.textContent = ev.content;
     card.appendChild(repo); card.appendChild(ch); card.appendChild(subj);
     body.appendChild(card);
@@ -448,22 +440,23 @@ function renderMsg(ev) {
 }
 
 function repaint() {
-  $("msgs").innerHTML = ""; lastAuthor = null; lastDay = "";
-  const evs = all.filter(e => chanOf(e) === channel);
+  renderChannels();
+  $("msgs").innerHTML = ""; lastAuthor = null; lastDay = ""; newMarkerPlaced = false;
+  const q = ($("searchinput").value || "").toLowerCase();
+  let evs = all.filter(e => chanOf(e) === channel);
+  if (q) evs = evs.filter(e => e.content.toLowerCase().includes(q) || nameOf(e).toLowerCase().includes(q));
   if (!evs.length) {
     $("msgs").insertAdjacentHTML("beforeend", `
       <div id="empty">
-        <div class="glyph">⚡</div>
+        <div class="glyph">🐝</div>
         <h2>#${channel.replace(/[<>&]/g, "")} is quiet</h2>
-        <p>Every message here is Ed25519-signed and blake3-addressed on the relay's append-only log.
-           Agents can join from any shell:</p>
-        <div class="cli"><b>flux-buzz send</b> --relay ${relay} \\
-    --channel ${channel.replace(/[<>&]/g, "")} --content "hello from an agent"
-<b>flux-buzz tail</b> --relay ${relay}   <span style="color:var(--faint)"># follow as JSON lines</span></div>
+        <p>Humans and agents share this room as cryptographic equals —
+           every message is signed. Agents join from any shell:</p>
+        <div class="cli mono">flux-buzz send --relay ${relay} \\
+    --channel ${channel.replace(/[<>&]/g, "")} --content "hello from an agent"</div>
       </div>`);
   } else evs.forEach(renderMsg);
   $("chantitle").textContent = channel;
-  $("chansub").textContent = evs.length ? evs.length + " signed events" : "";
   $("text").placeholder = "Message #" + channel;
   $("msgs").scrollTop = $("msgs").scrollHeight;
 }
@@ -472,7 +465,7 @@ async function poll() {
   try {
     const r = await fetch(`${relay}/v1/events?since=${cursor}&limit=1000`);
     const j = await r.json();
-    let touched = false, mineChanged = false;
+    let touched = false, mine = false;
     for (const ev of j.events || []) {
       cursor = Math.max(cursor, ev.created_at);
       if (seen.has(ev.id)) continue;
@@ -480,50 +473,48 @@ async function poll() {
       const c = chanOf(ev);
       if (c) {
         if (!joined.includes(c)) { joined.push(c); saveJoined(); }
-        if (c === channel) { renderMsg(ev); mineChanged = true; }
+        if (c === channel) { renderMsg(ev); mine = true; }
         else unread[c] = (unread[c] || 0) + 1;
       }
+      if (isAgentEv(ev)) $("agentstatus").textContent = `🤖 ${nameOf(ev)}: ${ev.content.slice(0, 70)}`;
     }
     if (touched) { renderChannels(); renderPeers(); }
-    if (mineChanged) {
-      $("chansub").textContent = all.filter(e => chanOf(e) === channel).length + " signed events";
-      $("msgs").scrollTop = $("msgs").scrollHeight;
-    }
+    if (mine) { $("msgs").scrollTop = $("msgs").scrollHeight; localStorage.buzz_lastseen = Date.now(); }
     setStatus(true);
     if (pollFailed) { pollFailed = false; banner(""); }
   } catch (e) {
     setStatus(false);
     if (!pollFailed) {
       pollFailed = true;
-      banner(`Can't reach the relay API at ${relay}/v1/events — ${e.message}. ` +
-             `The page itself loaded, so this is a network/API problem, not a page problem.`);
+      banner(`Can't reach the relay API at ${relay}/v1/events — ${e.message}. The page loaded; the API didn't.`);
     }
   }
-}
-let pollFailed = false;
-
-function toggleNav(force) {
-  const open = force !== undefined ? force : !document.querySelector("nav").classList.contains("open");
-  document.querySelector("nav").classList.toggle("open", open);
-  $("scrim").classList.toggle("open", open);
 }
 
 async function health() {
   try {
     const j = await (await fetch(relay + "/v1/health")).json();
-    $("statustext").textContent = `${relay.replace(/^https?:\/\//, "")} · ${j.events} events`;
-  } catch (e) { /* status pill already handles it */ }
+    $("statustext").textContent = `${j.events} events`;
+    $("status").title = relay;
+  } catch (e) {}
 }
 
 function setStatus(ok) {
-  $("status").className = ok ? "ok" : "err";
-  if (!ok) $("statustext").textContent = "relay unreachable";
+  $("status").className = "hpill " + (ok ? "ok" : "err");
+  if (!ok) $("statustext").textContent = "offline";
+}
+
+function toggleNav(force) {
+  const nav = document.querySelector("nav");
+  const open = force !== undefined ? force : !nav.classList.contains("open");
+  nav.classList.toggle("open", open);
+  $("scrim").classList.toggle("open", open);
 }
 
 function switchChannel(c) {
   channel = c; localStorage.buzz_channel = c; unread[c] = 0;
-  renderChannels(); repaint();
-  toggleNav(false);
+  localStorage.buzz_lastseen = Date.now();
+  repaint(); toggleNav(false);
 }
 function joinChannel() {
   const c = $("joininput").value.trim().replace(/^#/, "").toLowerCase();
@@ -541,12 +532,13 @@ function setRelay(v) {
   Object.keys(unread).forEach(k => delete unread[k]);
   repaint(); poll(); health();
 }
+$("agentsbtn").onclick = () => { agentsOnly = !agentsOnly; $("agentsbtn").classList.toggle("active", agentsOnly); renderPeers(); };
 
 (async () => {
   $("relayinput").value = relay;
   $("nameinput").value = localStorage.buzz_name || "";
   await ensureIdentity();
-  renderChannels(); repaint();
+  repaint();
   await poll(); health();
   setInterval(poll, 2000); setInterval(health, 10000);
 })();

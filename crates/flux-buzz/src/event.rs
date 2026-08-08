@@ -27,6 +27,10 @@ pub const KIND_PROFILE: u32 = 0;
 pub const KIND_CHAT: u32 = 1;
 /// Autonomous agent action report (tool call, build result, review verdict…).
 pub const KIND_AGENT_ACTION: u32 = 20;
+/// flux-rev provenance stamp: tags carry `["rev", <64-hex full id>]` +
+/// `["dir", path]`; content is the human-readable line. Lets releases and
+/// working trees announce a content-address the whole room can verify.
+pub const KIND_PROVENANCE: u32 = 30;
 /// Git repository announcement (content = repo name/URL).
 pub const KIND_REPO: u32 = 3617;
 /// Git commit event (tags carry repo + commit hash, content = subject line).

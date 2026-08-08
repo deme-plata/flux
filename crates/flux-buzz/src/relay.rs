@@ -39,12 +39,22 @@ pub struct RelayState {
     pub store: Mutex<EventStore>,
     pub tx: broadcast::Sender<BuzzEvent>,
     pub started: Instant,
+    /// flux-rev `full:` stamp of the deployed tree, surfaced in /v1/health so
+    /// clients can display (and re-verify) what code the relay runs. Read at
+    /// boot from FLUX_BUZZ_REV, or the file named by FLUX_BUZZ_REV_FILE.
+    pub provenance: Option<String>,
 }
 
 impl RelayState {
     pub fn new(store: EventStore) -> Arc<Self> {
         let (tx, _) = broadcast::channel(1024);
-        Arc::new(Self { store: Mutex::new(store), tx, started: Instant::now() })
+        let provenance = std::env::var("FLUX_BUZZ_REV").ok().or_else(|| {
+            std::env::var("FLUX_BUZZ_REV_FILE")
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+        });
+        let provenance = provenance.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        Arc::new(Self { store: Mutex::new(store), tx, started: Instant::now(), provenance })
     }
 }
 
@@ -164,6 +174,7 @@ where
                 "events": events,
                 "channels": channels,
                 "uptime_s": state.started.elapsed().as_secs(),
+                "provenance": state.provenance,
             });
             write_json(&mut stream, 200, &body.to_string()).await
         }

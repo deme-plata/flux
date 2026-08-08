@@ -138,6 +138,13 @@
   .badge.commit { color: var(--green); border-color: #58e8a455; background: #58e8a410; }
   .badge.sig { color: var(--faint); border: none; padding: 0; cursor: help; }
   .badge.sig:hover { color: var(--green); }
+  .badge.rev { color: var(--amber); border-color: #f0b86655; background: #f0b86610; }
+  .revcard {
+    margin-top: 5px; border: 1px solid var(--line2); border-left: 3px solid var(--amber);
+    background: var(--panel); border-radius: 8px; padding: 8px 12px; font-size: 12.5px;
+  }
+  .revcard .rdir { color: var(--amber); font-weight: 600; }
+  .revcard .stamp { color: var(--dim); word-break: break-all; display: block; margin-top: 3px; }
   .commitcard {
     margin-top: 5px; border: 1px solid var(--line2); border-left: 3px solid var(--green);
     background: var(--panel); border-radius: 8px; padding: 8px 12px; font-size: 13px;
@@ -342,7 +349,7 @@ async function send() {
 function notePeer(ev) {
   const p = peers[ev.pubkey] ||= { name: null, last: 0, agent: false };
   const n = tagOf(ev, "name"); if (n) p.name = n;
-  if (ev.kind === 20 || ev.kind === 3618) p.agent = true;
+  if (ev.kind === 20 || ev.kind === 3618 || ev.kind === 30) p.agent = true;
   p.last = Math.max(p.last, ev.created_at);
 }
 
@@ -426,6 +433,7 @@ function renderMsg(ev) {
     meta.appendChild(when);
     if (ev.kind === 20) { const b = document.createElement("span"); b.className = "badge agent"; b.textContent = "🤖 agent"; meta.appendChild(b); }
     if (ev.kind === 3618) { const b = document.createElement("span"); b.className = "badge commit"; b.textContent = "⎇ commit"; meta.appendChild(b); }
+    if (ev.kind === 30) { const b = document.createElement("span"); b.className = "badge rev"; b.textContent = "⬡ provenance"; meta.appendChild(b); }
     const sig = document.createElement("span"); sig.className = "badge sig"; sig.textContent = "✓";
     sig.title = `Ed25519 verified by relay\nid ${ev.id.slice(0, 20)}…\nsig ${ev.sig.slice(0, 20)}…`;
     meta.appendChild(sig);
@@ -437,6 +445,16 @@ function renderMsg(ev) {
     const ch = document.createElement("span"); ch.className = "chash"; ch.textContent = " @ " + (tagOf(ev, "commit") || "").slice(0, 10);
     const subj = document.createElement("div"); subj.textContent = ev.content;
     card.appendChild(repo); card.appendChild(ch); card.appendChild(subj);
+    body.appendChild(card);
+  } else if (ev.kind === 30) {
+    const card = document.createElement("div"); card.className = "revcard mono";
+    const rdir = document.createElement("span"); rdir.className = "rdir";
+    rdir.textContent = "⬡ " + (tagOf(ev, "dir") || "tree");
+    const note = document.createElement("span"); note.textContent = " · " + ev.content;
+    const stamp = document.createElement("span"); stamp.className = "stamp";
+    stamp.textContent = "full:" + (tagOf(ev, "rev") || "?");
+    stamp.title = "flux-rev content address — re-run `flux-rev head <dir>` to verify this tree byte-for-byte";
+    card.appendChild(rdir); card.appendChild(note); card.appendChild(stamp);
     body.appendChild(card);
   } else {
     const c = document.createElement("div"); c.className = "content";
@@ -511,7 +529,11 @@ function toggleNav(force) {
 async function health() {
   try {
     const j = await (await fetch(relay + "/v1/health")).json();
-    $("statustext").textContent = `${relay.replace(/^https?:\/\//, "")} · ${j.events} events`;
+    $("statustext").textContent = `${relay.replace(/^https?:\/\//, "")} · ${j.events} events` +
+      (j.provenance ? " · ⬡" : "");
+    $("status").title = j.provenance
+      ? `relay code provenance (flux-rev)\nfull:${j.provenance}`
+      : "relay";
   } catch (e) { /* status pill already handles it */ }
 }
 

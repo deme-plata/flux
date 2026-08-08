@@ -13,7 +13,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use flux_buzz::event::{Identity, KIND_CHAT, KIND_COMMIT};
+use flux_buzz::event::{Identity, KIND_CHAT, KIND_COMMIT, KIND_PROVENANCE};
 use flux_buzz::relay::{run_plain, run_tls, RelayState};
 use flux_buzz::store::EventStore;
 use std::path::PathBuf;
@@ -79,6 +79,23 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         backlog: bool,
     },
+    /// Snapshot a directory with flux-rev and publish the content-address
+    /// (`full:` stamp) as a signed provenance event.
+    RevPost {
+        /// Directory to snapshot (must be flux-rev-initialized; run
+        /// `flux-rev genesis <dir>` once if not).
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:9950")]
+        relay: String,
+        #[arg(long, default_value_os_t = default_key_path())]
+        key: PathBuf,
+        #[arg(long, default_value = "provenance")]
+        channel: String,
+        /// Human-readable note for the event body (default: auto-generated).
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Announce the latest commit of a git repository as a signed event.
     GitPost {
         #[arg(long)]
@@ -92,6 +109,53 @@ enum Cmd {
     },
 }
 
+/// Run `flux-rev snapshot <dir>` and return the 64-hex `full:` stamp.
+/// Binary resolved via FLUX_REV_BIN, then PATH, then the flux-tree debug path.
+fn flux_rev_snapshot(dir: &std::path::Path) -> Result<String> {
+    let candidates = [
+        std::env::var("FLUX_REV_BIN").unwrap_or_default(),
+        "flux-rev".to_string(),
+        "/home/storage/deepseek-codewhale/flux/target/debug/flux-rev".to_string(),
+    ];
+    for bin in candidates.iter().filter(|b| !b.is_empty()) {
+        let out = match std::process::Command::new(bin).arg("snapshot").arg(dir).output() {
+            Ok(o) => o,
+            Err(_) => continue, // binary not found under this name — try next
+        };
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !out.status.success() {
+            bail!("flux-rev snapshot failed for {}: {}", dir.display(), text.trim());
+        }
+        if let Some(stamp) = parse_rev_stamp(&text) {
+            return Ok(stamp);
+        }
+        // Snapshot printed no stamp (shouldn't happen) — fall back to `head`.
+        let head = std::process::Command::new(bin).arg("head").arg(dir).output()?;
+        if let Some(stamp) = parse_rev_stamp(&String::from_utf8_lossy(&head.stdout)) {
+            return Ok(stamp);
+        }
+        bail!("could not parse a full: stamp from flux-rev output: {}", text.trim());
+    }
+    bail!("flux-rev binary not found (set FLUX_REV_BIN)")
+}
+
+/// Extract a 64-hex flux-rev full id from CLI output — either a `full: <hex>`
+/// line (snapshot/genesis) or a bare hex line (`head`).
+fn parse_rev_stamp(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        let cand = line.strip_prefix("full:").map(str::trim).unwrap_or(line);
+        if cand.len() == 64 && cand.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
 fn default_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".flux-buzz")
 }
@@ -102,6 +166,25 @@ fn default_key_path() -> PathBuf {
 
 fn default_data_dir() -> PathBuf {
     default_home().join("data")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rev_stamp;
+
+    #[test]
+    fn parses_snapshot_and_head_output() {
+        // Real observed formats (2026-08-08):
+        let snapshot = "📦 revision f82dc51b2146283a  ·  parent 4807c97d45fec4a8\n   +0 ~0 -0\n   full: f82dc51b2146283a43aa8ef305a71e0a1ed4f4b2ebc66d5daa266d7b2311c25a\n";
+        assert_eq!(
+            parse_rev_stamp(snapshot).as_deref(),
+            Some("f82dc51b2146283a43aa8ef305a71e0a1ed4f4b2ebc66d5daa266d7b2311c25a")
+        );
+        let head = "f82dc51b2146283a43aa8ef305a71e0a1ed4f4b2ebc66d5daa266d7b2311c25a\n";
+        assert_eq!(parse_rev_stamp(head).as_deref(), parse_rev_stamp(snapshot).as_deref());
+        assert_eq!(parse_rev_stamp("✗ no HEAD — run `flux-rev genesis .` first"), None);
+        assert_eq!(parse_rev_stamp("📦 revision f82dc51b2146283a"), None);
+    }
 }
 
 fn main() -> Result<()> {
@@ -190,6 +273,38 @@ fn main() -> Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
+        }
+        Cmd::RevPost { dir, relay, key, channel, note } => {
+            let stamp = flux_rev_snapshot(&dir)?;
+            let dir_name = dir
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| dir.display().to_string());
+            let content = note.unwrap_or_else(|| {
+                format!("📦 provenance snapshot of {dir_name} — full:{}", &stamp[..16])
+            });
+            let id = Identity::load_or_generate(&key)?;
+            let ev = id.sign_event(
+                KIND_PROVENANCE,
+                vec![
+                    vec!["c".into(), channel],
+                    vec!["rev".into(), stamp.clone()],
+                    vec!["dir".into(), dir_name],
+                ],
+                content,
+            );
+            let resp: serde_json::Value = reqwest::blocking::Client::new()
+                .post(format!("{relay}/v1/event"))
+                .json(&ev)
+                .send()
+                .context("relay unreachable")?
+                .json()?;
+            println!("{}", serde_json::json!({"relay": resp, "rev": stamp}));
+            if resp["ok"] != serde_json::json!(true) {
+                bail!("relay rejected provenance event");
+            }
+            Ok(())
         }
         Cmd::GitPost { repo, relay, key, channel } => {
             let out = std::process::Command::new("git")

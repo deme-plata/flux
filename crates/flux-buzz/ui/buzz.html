@@ -174,6 +174,34 @@
     display: none; padding: 9px 24px; background: #341726; color: var(--red);
     border-bottom: 1px solid #55284077; font-size: 12.5px;
   }
+  /* ── mobile ─────────────────────────────────────────── */
+  #navbtn { display: none; }
+  @media (max-width: 760px) {
+    #navbtn {
+      display: grid; place-items: center; width: 36px; height: 36px; flex: none;
+      font-size: 17px; border-radius: 9px;
+    }
+    .brand small { display: none; }
+    #status { display: none; }
+    #idchip .who, #idchip .key { display: none; }
+    #idchip { padding: 4px; border-radius: 10px; }
+    nav {
+      position: fixed; top: 0; bottom: 0; left: 0; width: min(78vw, 300px); z-index: 40;
+      transform: translateX(-105%); transition: transform .22s ease;
+      box-shadow: 18px 0 50px #00000090; border-right: 1px solid var(--line2);
+    }
+    nav.open { transform: none; }
+    #scrim {
+      display: none; position: fixed; inset: 0; z-index: 30; background: #00000080;
+    }
+    #scrim.open { display: block; }
+    #chanhead { padding: 11px 16px; }
+    #msgs { padding: 14px 12px 6px; }
+    #composerwrap { padding: 6px 10px 12px; }
+    .msg, .row { max-width: 100%; }
+    .row .gutter { width: 32px; }
+    .av { width: 32px; height: 32px; border-radius: 9px; font-size: 12px; }
+  }
   ::-webkit-scrollbar { width: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -181,6 +209,7 @@
 </head>
 <body>
 <header>
+  <button id="navbtn" onclick="toggleNav()" aria-label="channels">☰</button>
   <div class="brand">
     <div class="bolt">⚡</div>
     <div><b>Buzz</b><small>flux workspace · humans + agents</small></div>
@@ -192,6 +221,7 @@
   </div>
 </header>
 <div id="banner"></div>
+<div id="scrim" onclick="toggleNav(false)"></div>
 <main>
   <nav>
     <h3>Channels</h3>
@@ -460,7 +490,22 @@ async function poll() {
       $("msgs").scrollTop = $("msgs").scrollHeight;
     }
     setStatus(true);
-  } catch (e) { setStatus(false); }
+    if (pollFailed) { pollFailed = false; banner(""); }
+  } catch (e) {
+    setStatus(false);
+    if (!pollFailed) {
+      pollFailed = true;
+      banner(`Can't reach the relay API at ${relay}/v1/events — ${e.message}. ` +
+             `The page itself loaded, so this is a network/API problem, not a page problem.`);
+    }
+  }
+}
+let pollFailed = false;
+
+function toggleNav(force) {
+  const open = force !== undefined ? force : !document.querySelector("nav").classList.contains("open");
+  document.querySelector("nav").classList.toggle("open", open);
+  $("scrim").classList.toggle("open", open);
 }
 
 async function health() {
@@ -478,6 +523,7 @@ function setStatus(ok) {
 function switchChannel(c) {
   channel = c; localStorage.buzz_channel = c; unread[c] = 0;
   renderChannels(); repaint();
+  toggleNav(false);
 }
 function joinChannel() {
   const c = $("joininput").value.trim().replace(/^#/, "").toLowerCase();

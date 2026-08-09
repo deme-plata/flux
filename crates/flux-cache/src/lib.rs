@@ -226,6 +226,86 @@ pub fn add_external_bytes(n: u64) {
     if CACHED_DISK_BYTES_VALID.load(Ordering::Relaxed) {
         CACHED_DISK_BYTES.fetch_add(n, Ordering::Relaxed);
     }
+    persist_delta(n as i64);
+}
+
+// ── v0.41: cross-process persisted running total ──────────────────────────
+//
+// The v0.11.1 O(1) cached total lives in process statics — useless in the
+// RUSTC_WRAPPER, which is a FRESH fluxc process per compiled unit. Every
+// wrapper `store` therefore fell back to a full stat-walk of the shared
+// cache tree (51k files / 33 GiB measured 2026-08-09) inside
+// evict_to_capacity — ~10-25s blocked in wait_on_buffer on a cold inode
+// cache, dominating small-crate edit loops (fluxc-serve real-edit check:
+// 28s with the walk, 4s without). Persisting the total lets a fresh
+// process answer current_disk_bytes() with two tiny reads instead.
+//
+// Layout (both under cache_dir(); they count as cache bytes — negligible):
+//   .disk-total-base   ASCII u64 — total as of the last real walk
+//   .disk-total-delta  append-only signed-decimal lines (O_APPEND atomic)
+// Reader = base + sum(deltas). `rebase_persisted` folds the log back into
+// base after every real walk. Drift (crash between write and append, a
+// delta racing a compaction truncate) is tolerated by design: eviction
+// RECONFIRMS with a real walk before deleting anything, so drift can waste
+// one walk but never evict wrongly.
+
+fn persisted_base_path() -> PathBuf {
+    cache_dir().join(".disk-total-base")
+}
+fn persisted_delta_path() -> PathBuf {
+    cache_dir().join(".disk-total-delta")
+}
+
+/// Best-effort append of a signed byte delta to the cross-process log.
+fn persist_delta(delta: i64) {
+    if delta == 0 {
+        return;
+    }
+    let _ = fs::create_dir_all(cache_dir());
+    use std::io::Write;
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(persisted_delta_path())
+    {
+        let _ = writeln!(f, "{}", delta);
+    }
+    // Compact a runaway log back into base (~64 KiB ≈ thousands of stores).
+    if let Ok(meta) = fs::metadata(persisted_delta_path()) {
+        if meta.len() > 64 * 1024 {
+            if let Some(total) = persisted_disk_bytes() {
+                rebase_persisted(total);
+            }
+        }
+    }
+}
+
+/// Read the persisted total: base + sum of deltas. `None` when no base has
+/// ever been written for this cache dir — the caller must walk once.
+fn persisted_disk_bytes() -> Option<u64> {
+    let base: u64 = fs::read_to_string(persisted_base_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let mut total = base as i128;
+    if let Ok(log) = fs::read_to_string(persisted_delta_path()) {
+        for line in log.lines() {
+            if let Ok(d) = line.trim().parse::<i64>() {
+                total += d as i128;
+            }
+        }
+    }
+    Some(total.clamp(0, u64::MAX as i128) as u64)
+}
+
+/// Fold a known-true total into the base file and truncate the delta log.
+/// A delta appended by a racing wrapper between our read and the truncate
+/// is lost (undercount) — bounded drift, corrected at the next real walk.
+fn rebase_persisted(total: u64) {
+    let _ = fs::create_dir_all(cache_dir());
+    atomic_write(&persisted_base_path(), total.to_string().as_bytes());
+    let _ = fs::write(persisted_delta_path(), b"");
 }
 
 /// v0.11: total bytes of every cache entry on disk.
@@ -238,6 +318,13 @@ pub fn current_disk_bytes() -> u64 {
     if CACHED_DISK_BYTES_VALID.load(Ordering::Relaxed) {
         return CACHED_DISK_BYTES.load(Ordering::Relaxed);
     }
+    // v0.41: fresh process (the per-unit RUSTC_WRAPPER case) — seed from the
+    // persisted cross-process total instead of paying the full stat-walk.
+    if let Some(total) = persisted_disk_bytes() {
+        CACHED_DISK_BYTES.store(total, Ordering::Relaxed);
+        CACHED_DISK_BYTES_VALID.store(true, Ordering::Relaxed);
+        return total;
+    }
     recompute_disk_bytes()
 }
 
@@ -249,6 +336,9 @@ pub fn recompute_disk_bytes() -> u64 {
     let total = if dir.exists() { walk_bytes(&dir) } else { 0 };
     CACHED_DISK_BYTES.store(total, Ordering::Relaxed);
     CACHED_DISK_BYTES_VALID.store(true, Ordering::Relaxed);
+    // v0.41: a real walk is the reconciliation point — fold it into the
+    // cross-process persisted total so fresh processes skip their own walk.
+    rebase_persisted(total);
     total
 }
 
@@ -275,6 +365,12 @@ pub fn evict_to_capacity() -> usize {
     let mut current = current_disk_bytes();
     if current <= cap { return 0; }
 
+    // v0.41: the O(1) total (statics or persisted log) can drift — RECONFIRM
+    // with a real walk before deleting anything. Over-cap is rare, so the
+    // walk is the price of an actual eviction, not of every store.
+    current = recompute_disk_bytes();
+    if current <= cap { return 0; }
+
     // Collect (mtime, size, path) for every file under cache_dir/objects/.
     let dir = cache_dir();
     let mut victims: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
@@ -296,6 +392,9 @@ pub fn evict_to_capacity() -> usize {
     if CACHED_DISK_BYTES_VALID.load(Ordering::Relaxed) {
         CACHED_DISK_BYTES.fetch_sub(bytes_freed, Ordering::Relaxed);
     }
+    // `current` descends from the reconfirming walk above, so post-eviction
+    // it is the freshest truth — fold it into the persisted total.
+    rebase_persisted(current);
     count
 }
 
@@ -524,6 +623,7 @@ pub fn store(key: &str, entry: &CacheEntry) {
                 CACHED_DISK_BYTES.fetch_sub(old_size, Ordering::Relaxed);
             }
         }
+        persist_delta(entry_size as i64 - old_size as i64);
         // After a successful write, enforce the disk cap if one is set.
         evict_to_capacity_if_set(entry_size);
     }
@@ -540,18 +640,22 @@ pub fn store_batch(entries: &[(String, CacheEntry)]) {
     let _ = fs::create_dir_all(&dir);
 
     let mut total_size = 0u64;
+    let mut net_delta = 0i64;
     for (key, entry) in entries {
         let path = cache_path(key);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(bytes) = bincode::serialize(entry) {
+            let old_size = path.metadata().map(|m| m.len()).unwrap_or(0);
             total_size += bytes.len() as u64;
+            net_delta += bytes.len() as i64 - old_size as i64;
             atomic_write(&path, &bytes);
             lru_put(key.clone(), entry.clone());
         }
     }
     let _ = fs::File::open(&dir).and_then(|f| f.sync_all());
+    persist_delta(net_delta);
     STORES.fetch_add(entries.len() as u64, Ordering::Relaxed);
     evict_to_capacity_if_set(total_size);
 }
@@ -723,6 +827,51 @@ mod tests {
     }
 
     #[test]
+    fn test_v041_persisted_total_roundtrip() {
+        iso();
+        let _g = CACHE_TEST_LOCK.lock();
+        rebase_persisted(1000);
+        assert_eq!(persisted_disk_bytes(), Some(1000));
+        persist_delta(234);
+        persist_delta(-34);
+        assert_eq!(persisted_disk_bytes(), Some(1200));
+        // Rebase folds the log: base carries the total, delta log empties.
+        rebase_persisted(500);
+        assert_eq!(persisted_disk_bytes(), Some(500));
+        assert_eq!(
+            fs::metadata(persisted_delta_path()).map(|m| m.len()).unwrap_or(0),
+            0
+        );
+        // Negative drift clamps at zero instead of wrapping.
+        persist_delta(-9999);
+        assert_eq!(persisted_disk_bytes(), Some(0));
+    }
+
+    #[test]
+    fn test_v041_store_appends_persisted_delta() {
+        iso();
+        let _g = CACHE_TEST_LOCK.lock();
+        rebase_persisted(0);
+        let entry = CacheEntry {
+            source_hash: "v041src".into(),
+            args_hash: "v041args".into(),
+            outputs: HashMap::new(),
+            rustc_version: "test".into(),
+            timestamp: 0,
+        };
+        store("v041persistkey", &entry);
+        let after_first = persisted_disk_bytes().expect("base must exist after rebase");
+        assert!(after_first > 0, "store must persist a positive delta");
+        // Overwriting the same key with identical bytes nets to zero delta.
+        store("v041persistkey", &entry);
+        assert_eq!(persisted_disk_bytes(), Some(after_first));
+        // A fresh-process read path: seed statics from the persisted file.
+        CACHED_DISK_BYTES_VALID.store(false, Ordering::Relaxed);
+        assert_eq!(current_disk_bytes(), after_first);
+        assert!(CACHED_DISK_BYTES_VALID.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn test_compute_hash_deterministic() {
         let args1 = vec!["--crate-name".into(), "test".into(), "src/lib.rs".into()];
         let args2 = vec!["--crate-name".into(), "test".into(), "src/lib.rs".into()];
@@ -765,6 +914,9 @@ mod tests {
     #[test]
     fn test_store_and_lookup() {
         iso();
+        // v0.41: store() maintains the persisted cross-process total —
+        // global state, so this test now serializes like the stats tests.
+        let _g = CACHE_TEST_LOCK.lock();
         let entry = CacheEntry {
             source_hash: "abc123".into(),
             args_hash: "def456".into(),
@@ -780,6 +932,8 @@ mod tests {
     #[test]
     fn test_batch_store() {
         iso();
+        // v0.41: store_batch() maintains the persisted cross-process total.
+        let _g = CACHE_TEST_LOCK.lock();
         let entries: Vec<(String, CacheEntry)> = (0..3).map(|i| {
             (format!("batch_{}", i), CacheEntry {
                 source_hash: format!("hash_{}", i),

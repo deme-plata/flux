@@ -10,3 +10,8 @@ flux-trade = { path = "../flux-trade" }
 flux-market = { path = "../flux-market" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# btc-watch bin: Ed25519-signed Buzz events (same wire format as flux-buzz)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake3 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }

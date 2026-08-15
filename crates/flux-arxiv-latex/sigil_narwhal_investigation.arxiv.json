@@ -1,0 +1,52 @@
+{
+ "papers": [
+  {
+   "id": "2105.11827",
+   "title": "Narwhal and Tusk: A DAG-based Mempool and Efficient BFT Consensus",
+   "authors": ["George Danezis", "Lefteris Kokoris-Kogias", "Alberto Sonnino", "Alexander Spiegelman"],
+   "summary": "We propose separating the task of reliable transaction dissemination from transaction ordering, to enable high-performance Byzantine fault-tolerant quorum-based consensus. We design and evaluate a mempool protocol, Narwhal, specializing in high-throughput reliable dissemination and storage of causal histories of transactions. Narwhal tolerates an asynchronous network and maintains high performance despite failures.",
+   "published": "2021-05-25",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2201.05677",
+   "title": "Bullshark: DAG BFT Protocols Made Practical",
+   "authors": ["Alexander Spiegelman", "Neil Giridharan", "Alberto Sonnino", "Lefteris Kokoris-Kogias"],
+   "summary": "We present Bullshark, the first directed acyclic graph (DAG) based Byzantine Atomic Broadcast protocol that is optimized for the common synchronous case. Like previous DAG-based BFT protocols, Bullshark requires no extra communication to achieve consensus on top of building the DAG.",
+   "published": "2022-01-14",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2209.05633",
+   "title": "Bullshark: The Partially Synchronous Version",
+   "authors": ["Alexander Spiegelman", "Neil Giridharan", "Alberto Sonnino", "Lefteris Kokoris-Kogias"],
+   "summary": "A partially synchronous simplification of Bullshark, the DAG-based BFT atomic broadcast protocol, presenting a simpler and more direct construction that still preserves the practical performance benefits of the original.",
+   "published": "2022-09-12",
+   "categories": ["cs.DC"]
+  },
+  {
+   "id": "2012.06128",
+   "title": "SoK: Diving into DAG-based Blockchain Systems",
+   "authors": ["Qin Wang", "Jiangshan Yu", "Shiping Chen", "Yang Xiang"],
+   "summary": "A systematization of knowledge covering DAG-based distributed ledger systems, surveying consensus mechanisms, design tradeoffs, and open problems across the DAG-blockchain literature.",
+   "published": "2020-12-11",
+   "categories": ["cs.CR", "cs.DC"]
+  },
+  {
+   "id": "2409.19286",
+   "title": "Imitater: An Efficient Shared Mempool Protocol with Application to Byzantine Fault Tolerance",
+   "authors": ["Qingming Zeng", "Mo Li", "Ximing Fu", "Chuanyi Liu", "Hui Jiang"],
+   "summary": "We propose a novel Shared Mempool (SMP) protocol, named Imitater, which can be seamlessly integrated into BFT protocols. By chaining microblocks and applying coding techniques, Imitater efficiently achieves totality and availability. Furthermore, a BFT protocol augmented with Imitater ensures order preservation of client transactions while mitigating the risks of over-distribution and unbalanced workload.",
+   "published": "2024-09-28",
+   "categories": ["cs.DC", "cs.CR"]
+  },
+  {
+   "id": "2407.18085",
+   "title": "On the Design of Ethereum's Data Availability Sampling",
+   "authors": ["Ulysse Denis"],
+   "summary": "A design analysis of Ethereum's Data Availability Sampling (DAS), the erasure-coded scheme (a tensor code of two Reed-Solomon codes over a k-by-k matrix) proposed for danksharding, letting light nodes verify blob data availability by sampling without downloading the whole blob.",
+   "published": "2024-07-25",
+   "categories": ["cs.CR", "cs.DC"]
+  }
+ ]
+}

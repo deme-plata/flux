@@ -333,6 +333,12 @@ pub enum SwarmAppEvent {
     PeerDisconnected { peer_id: PeerId },
     /// New listen address confirmed.
     NewListenAddr(Multiaddr),
+    /// v0.78 (sigil-top v7.1.13): an outbound dial or handshake failed. Before
+    /// this variant the error only went to `tracing` — consumers without a
+    /// subscriber (the sigil-top TUI) saw "mesh 0 peers" with zero explanation.
+    DialFailure { peer_id: Option<PeerId>, error: String },
+    /// v0.78: an inbound connection attempt failed before becoming a peer.
+    IncomingConnectionFailed { addr: String, error: String },
     /// Peer identified itself.
     PeerIdentified {
         peer_id: PeerId,
@@ -645,20 +651,34 @@ impl FluxSwarmManager {
             return Ok(0); // 0 = broadcast (no entanglement filtering)
         }
 
-        // Publish to each entangled peer's individual topic variant
-        // In production, this would use direct messaging or per-peer topics
-        let t = gossipsub::IdentTopic::new(topic);
-        let mut sent = 0;
-        for (_peer_id, score) in &top {
-            if *score >= self.entanglement_min_score() {
-                self.swarm.behaviour_mut().gossipsub
-                    .publish(t.clone(), data.clone())
-                    .map_err(|e| format!("Entangled publish failed: {}", e))?;
-                sent += 1;
-            }
+        // NOTE on what this actually does: gossipsub's `.publish()` has no
+        // concept of "send to just these peer IDs" — it always broadcasts
+        // to the local mesh view for the topic. True per-peer-targeted
+        // delivery would need either direct messaging (this crate's
+        // existing `send_request`/`respond` request-response channel) or
+        // gossipsub PeerScore-driven mesh membership, neither of which this
+        // function does. What it DOES do, honestly: publish exactly ONCE
+        // (previously this looped and called `.publish()` once per
+        // qualifying peer — for 5 qualifying peers, that meant 5x redundant
+        // broadcasts of the SAME message on the SAME tick, a real bandwidth
+        // bug now fixed) if at least one known peer clears the entanglement
+        // score threshold, i.e. entanglement here decides WHETHER a
+        // narrowcast-appropriate publish fires, not WHO specifically
+        // receives it. Fine for optional/informational topics (e.g. combo
+        // affinity); NOT a substitute for reliable full-mesh delivery on
+        // consensus-critical topics (blocks, tip-proofs) — callers on those
+        // topics should keep using plain `publish()`.
+        let qualifying = top.iter().filter(|(_, score)| *score >= self.entanglement_min_score()).count();
+        if qualifying == 0 {
+            tracing::debug!(topic, peers = top.len(), "Entanglement-weighted publish: no peer cleared min_score, skipped");
+            return Ok(0);
         }
-        tracing::debug!(topic, sent, peers = top.len(), "Entanglement-weighted publish");
-        Ok(sent)
+        let t = gossipsub::IdentTopic::new(topic);
+        self.swarm.behaviour_mut().gossipsub
+            .publish(t, data)
+            .map_err(|e| format!("Entangled publish failed: {}", e))?;
+        tracing::debug!(topic, qualifying, peers = top.len(), "Entanglement-weighted publish");
+        Ok(qualifying)
     }
 
     /// Get the minimum entanglement score for mesh inclusion.
@@ -984,9 +1004,21 @@ impl FluxSwarmManager {
             // 0-peers / intermittent peers (dial failures, handshake/transport errors).
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 tracing::warn!(peer_id = ?peer_id, error = %error, "P2P-DBG OUTGOING DIAL/HANDSHAKE FAILED");
+                if let Some(ref rx) = self.event_rx {
+                    rx.write().push(SwarmAppEvent::DialFailure {
+                        peer_id,
+                        error: error.to_string(),
+                    });
+                }
             }
             SwarmEvent::IncomingConnectionError { error, send_back_addr, .. } => {
                 tracing::warn!(error = %error, addr = %send_back_addr, "P2P-DBG INCOMING CONNECTION FAILED");
+                if let Some(ref rx) = self.event_rx {
+                    rx.write().push(SwarmAppEvent::IncomingConnectionFailed {
+                        addr: send_back_addr.to_string(),
+                        error: error.to_string(),
+                    });
+                }
             }
             SwarmEvent::Dialing { peer_id, .. } => {
                 tracing::info!(peer_id = ?peer_id, "P2P-DBG dialing peer");

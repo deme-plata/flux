@@ -121,6 +121,13 @@ pub const SIGIL_TOPICS: &[&str] = &[
     "/sigil/g0/release",
 ];
 
+/// How many top-entangled peers `entangled_publish` targets when
+/// `entanglement_enabled` is on. Matches gossipsub's own typical target mesh
+/// degree (~6-8) — wide enough that entanglement-weighted routing doesn't
+/// undershoot normal mesh propagation, narrow enough to actually express a
+/// preference over plain broadcast-to-everyone.
+pub const ENTANGLED_PUBLISH_TOP_N: usize = 8;
+
 /// Extract the `/ip4/<ip>/tcp/<port>` (or ip6) endpoint prefix from a multiaddr string,
 /// dropping any `/p2p/<id>` suffix. Used for ENDPOINT-based bootstrap dedup that's robust
 /// to peer-id rotation: a node that doesn't persist its libp2p identity changes its id on
@@ -349,8 +356,17 @@ impl NetworkManager {
                 flush_interval_ms: 5,
                 enabled: true,
             },
+            // Thread the caller-facing NetworkConfig.entanglement_enabled flag
+            // into the swarm-level config that the Publish handler actually
+            // reads (see `SwarmCommand::Publish` below). Before this line,
+            // NetworkConfig.entanglement_enabled was set by callers (e.g.
+            // sigil-node) but never consumed anywhere in this crate — the
+            // swarm-level EntanglementConfig::default().enabled (always
+            // `true`) was the only thing that mattered, so toggling the
+            // caller-facing flag genuinely changed nothing.
             entanglement_config: entanglement::EntanglementConfig {
                 prefer_knot_routing: true,
+                enabled: self.config.entanglement_enabled,
                 ..Default::default()
             },
         };
@@ -540,7 +556,22 @@ impl NetworkManager {
                     cmd = cmd_rx.recv() => {
                         match cmd {
                             Some(SwarmCommand::Publish { topic, data }) => {
-                                let _ = swarm.publish(&topic, data);
+                                // Make entanglement_enabled actually mean something: when on,
+                                // route through the QtFT-inspired entanglement-weighted mesh
+                                // (`entangled_publish`) instead of always broadcasting. Before
+                                // this branch, EVERY publish — regardless of the flag — went
+                                // straight to `swarm.publish()`; the flag was read (see the
+                                // NetworkConfig -> FluxSwarmConfig threading above) but nothing
+                                // acted on it. `entangled_publish` already falls back to a full
+                                // broadcast when no entangled peers are known yet (e.g. right
+                                // after startup, before any inbound gossip has fed the router),
+                                // so this is safe from the very first publish call, not just
+                                // once scores have warmed up.
+                                if swarm.entanglement.config.enabled {
+                                    let _ = swarm.entangled_publish(&topic, data, ENTANGLED_PUBLISH_TOP_N);
+                                } else {
+                                    let _ = swarm.publish(&topic, data);
+                                }
                             }
                             Some(SwarmCommand::SendRequest { peer, payload, resp }) => {
                                 swarm.send_request(peer, payload, resp);

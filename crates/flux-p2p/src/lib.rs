@@ -50,14 +50,24 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 /// register the peer without its PeerId, so `peer_count` stays 0, the
 /// peer-gated backfill never starts, and sync sits at ~0 blk/s (root-caused
 /// 2026-06-09). Epsilon's id pulled live from `journalctl -u sigil-node`.
+// 2026-08-15: Delta/Gamma/Beta trimmed. CLAUDE.md confirms all three
+// permanently gone (Gamma confirmed dead 2026-08-14; Beta decommissioned
+// 2026-07-02; Delta separately down with no confirmed return) — Epsilon is
+// the fleet's only live SIGIL node. Kept them dialed for a real reproduction
+// of Viktor's "sigil-top stuck at mesh 0 peers" report (2026-08-15): a
+// fresh client redials all three, forever, every ~4s, with zero backoff —
+// `[mesh] ✗DIAL-FAIL … Connection timed out (os error 110)` for the same
+// three dead ids on every single retry pass, for the life of the process.
+// That's real, measured waste (three doomed connection attempts every
+// cycle) even though it did NOT block the one live connection to Epsilon
+// in this session's repro (peers went 0→1 within ~2s). Trimmed per
+// CLAUDE.md's own standing suggestion: "trims/warnings there would save a
+// future session (or a real user) from staring at '0 peers' with no
+// explanation." If any of the three ever comes back, re-add its line here
+// with a note of when/how it was confirmed live again — don't just restore
+// this list from git history without re-verifying each id.
 pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
-    // All four ids confirmed LIVE from the [p2p-sync] connection log (libp2p verifies
-    // the PeerId during the Noise handshake, so a connected id is authoritative — more
-    // reliable than `journalctl`, which can hold a stale id from an old node restart).
     ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
-    ("delta-sigil",   "/ip4/5.79.79.158/tcp/9501/p2p/12D3KooWPTkN7eVEfjWBkojcecTEsGr1udU2VgjxxbDSiQpDja9b"),
-    ("gamma-sigil",   "/ip4/109.205.176.60/tcp/9501/p2p/12D3KooWGr61P7jks3NjPMQkRa8Qmc2TNVyWYXm24BxZLtK675gd"),
-    ("beta-sigil",    "/ip4/185.182.185.227/tcp/9501/p2p/12D3KooWSJxrXTttxp6WVPTWxAZJG1JQ46zSRF1C6gY6LLtyVMuA"),
 ];
 
 /// Firewall-friendly relay bootstrap for networks where tcp/9501 is reachable

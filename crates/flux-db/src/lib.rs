@@ -243,8 +243,17 @@ const WAL_REPLAY_WINDOW: usize = 8 * 1024 * 1024;
 fn replay_wal_streaming(
     wal_path: &std::path::Path,
     memtable: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    mut on_progress: impl FnMut(u64, u64),
 ) -> Result<(), String> {
     let mut f = fs::File::open(wal_path).map_err(|e| format!("open wal: {}", e))?;
+    let total_bytes = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // Throttle: report at most once per ~4 MiB consumed, not once per entry — a WAL can
+    // hold millions of tiny entries, and a callback (channel send / atomic store) per
+    // entry would measurably slow the replay this exists to make visible, not measure.
+    const REPORT_STRIDE: u64 = 4 * 1024 * 1024;
+    let mut consumed: u64 = 0;
+    let mut last_reported: u64 = 0;
+    on_progress(0, total_bytes); // report immediately so a caller waiting on "started" sees it
     // `buf` is the live window; `pos` is the parse cursor — bytes [pos..buf.len()) are
     // unparsed. `pos` advances entry-by-entry WITHOUT copying; the window is only compacted
     // (the consumed prefix dropped) and refilled when the tail can't satisfy the next read.
@@ -312,13 +321,31 @@ fn replay_wal_streaming(
             memtable.insert(key, val);
         }
         pos += total; // advance the cursor; the window slides only when the tail runs short
+        consumed += total as u64;
+        if consumed - last_reported >= REPORT_STRIDE {
+            on_progress(consumed, total_bytes);
+            last_reported = consumed;
+        }
     }
+    on_progress(consumed, total_bytes); // final report — always 100% (or wherever a torn tail stopped us)
     Ok(())
 }
 
 impl Database {
     /// Open or create a database at the given path.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
+        Self::open_with_progress(path, |_consumed, _total| {})
+    }
+
+    /// Same as [`Self::open`], but `on_progress(bytes_consumed, total_bytes)` is called
+    /// periodically (every ~4 MiB) while the WAL replays — the one open-time cost that
+    /// scales with store size (measured ~330 MB/s; worst case ~13s at the default 4 GiB
+    /// WAL quarantine cap, longer on a store run with a larger `max_wal_bytes`). `total_bytes`
+    /// is `0` if the WAL doesn't exist (nothing to replay — opens instantly either way).
+    pub fn open_with_progress(
+        path: impl Into<PathBuf>,
+        mut on_progress: impl FnMut(u64, u64),
+    ) -> Result<Self, String> {
         let path = path.into();
         fs::create_dir_all(&path).map_err(|e| format!("create dir: {}", e))?;
 
@@ -372,7 +399,9 @@ impl Database {
             // read_to_end slurp held the whole WAL (+ a ~equal-size memtable) resident, which
             // is the OOM the 256 MiB quarantine above only papers over. Semantics (CRC, torn
             // write, tombstone) are byte-identical; see `replay_wal_streaming`.
-            replay_wal_streaming(&wal_path, &mut memtable)?;
+            replay_wal_streaming(&wal_path, &mut memtable, &mut on_progress)?;
+        } else {
+            on_progress(0, 0); // no WAL to replay — report "done" immediately
         }
 
         let mut wal_file = fs::OpenOptions::new()

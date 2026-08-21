@@ -8,6 +8,14 @@ description = "Flux P2P — libp2p-rust with DAGKnight native support, SAP/X-alg
 [features]
 default = []
 quic = ["libp2p/quic"]
+# v0.8's "Cortex-driven autonomous P2P optimization" (src/cortex_optimizer.rs) pulls in
+# flux-cortex + flux-graph + flux-optimize — flux-cortex alone is a ~40-crate transitive
+# closure (the whole Autonomous Continuous Optimization Engine / AI-agent-registry stack)
+# for a self-contained, opt-in-only feature that nothing outside this crate calls (verified
+# 2026-08-21: zero external references to `cortex_optimizer` in flux/ or sigil/). Every
+# consumer of flux-p2p that just wants networking — sigil-node, sigil-top, sigil-net, and
+# most other flux-p2p users — was paying that compile cost unconditionally. Now opt-in.
+cortex-optimizer = ["dep:flux-cortex", "dep:flux-graph", "dep:flux-optimize"]
 
 [dependencies]
 # libp2p core
@@ -35,10 +43,10 @@ sha3 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Cortex-driven autonomous optimization
-flux-cortex = { path = "../flux-cortex" }
-flux-graph = { path = "../flux-graph" }
-flux-optimize = { path = "../flux-optimize" }
+# Cortex-driven autonomous optimization (opt-in, see [features].cortex-optimizer above)
+flux-cortex = { path = "../flux-cortex", optional = true }
+flux-graph = { path = "../flux-graph", optional = true }
+flux-optimize = { path = "../flux-optimize", optional = true }
 # Content-addressed block backfill (closes the gossip-only "no history" gap).
 flux-sync = { path = "../flux-sync" }
 

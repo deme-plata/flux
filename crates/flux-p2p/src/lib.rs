@@ -15,6 +15,7 @@ pub mod sap;
 pub mod x_algo;
 pub mod entanglement;
 pub mod swarm;
+#[cfg(feature = "cortex-optimizer")]
 pub mod cortex_optimizer;
 /// Content-addressed block backfill protocol (flux-sync over the gossip mesh).
 /// The reusable version of what sigil-top wired inline — any flux-p2p consumer
@@ -276,6 +277,7 @@ struct NetworkInner {
     /// v0.8: Mesh health metrics for SIGIL fleet dashboard
     mesh_health: MeshHealth,
     /// v0.8: Cortex-driven autonomous P2P optimizer
+    #[cfg(feature = "cortex-optimizer")]
     cortex_opt: cortex_optimizer::CortexP2POptimizer,
 }
 
@@ -319,6 +321,7 @@ impl Default for NetworkConfig {
 impl NetworkManager {
     /// Create a new NetworkManager with the given configuration.
     pub fn new(config: NetworkConfig) -> Self {
+        #[cfg(feature = "cortex-optimizer")]
         let node_id = config.node_id.clone();
         NetworkManager {
             inner: Arc::new(RwLock::new(NetworkInner {
@@ -329,6 +332,7 @@ impl NetworkManager {
                 x_algo_scores: x_algo::CrossScoreTable::new(),
                 peers: Vec::new(),
                 mesh_health: MeshHealth::new(),
+                #[cfg(feature = "cortex-optimizer")]
                 cortex_opt: cortex_optimizer::CortexP2POptimizer::new(&node_id),
             })),
             config,
@@ -1052,6 +1056,7 @@ impl NetworkManager {
 
     /// Feed observed P2P metrics into the Cortex optimizer.
     /// Call periodically (every few seconds) with current SAP scores and mesh state.
+    #[cfg(feature = "cortex-optimizer")]
     pub fn observe_cortex(&self, metrics: &cortex_optimizer::P2PMetrics) {
         self.inner.write().cortex_opt.observe(metrics);
     }
@@ -1062,6 +1067,7 @@ impl NetworkManager {
     ///
     /// The caller should apply the returned weights to SAP/X-Algo scorers
     /// and update the batch configuration for optimal throughput.
+    #[cfg(feature = "cortex-optimizer")]
     pub fn optimize_cortex(
         &self,
         preset: flux_optimize::OptimizationPreset,
@@ -1092,12 +1098,14 @@ impl NetworkManager {
     }
 
     /// Get a summary of Cortex optimization activity for this node.
+    #[cfg(feature = "cortex-optimizer")]
     pub fn cortex_summary(&self) -> cortex_optimizer::CortexP2PSummary {
         self.inner.read().cortex_opt.summary()
     }
 
     /// Apply optimized weights from a CortexP2PResult to the live SAP scorer.
     /// Call this after optimize_cortex() to enact the recommendations.
+    #[cfg(feature = "cortex-optimizer")]
     pub fn apply_cortex_weights(&self, result: &cortex_optimizer::CortexP2PResult) {
         let mut inner = self.inner.write();
         // Apply SAP weights by rebuilding the score table with new weights

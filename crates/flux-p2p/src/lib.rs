@@ -35,6 +35,11 @@ pub use swarm::SwarmAppEvent;
 /// Re-export SIGIL block topic helpers for sigil-top integration.
 pub use swarm::{sigil_topic, SIGIL_G0_BLOCKS_TOPIC, COMBO_AFFINITY_TOPIC};
 
+/// Re-export so callers (e.g. sigil-node's peer-affinity tracking) can name
+/// the type `connected_peers()`/`GossipsubMessage::from` already hand them,
+/// without taking on a redundant direct `libp2p` dependency of their own.
+pub use libp2p::PeerId;
+
 /// Default bootstrap peers — always configured for out-of-the-box P2P.
 /// Delta (5.79.79.158) and Epsilon (89.149.241.126) are the core mesh.
 pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
@@ -66,8 +71,19 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 // explanation." If any of the three ever comes back, re-add its line here
 // with a note of when/how it was confirmed live again — don't just restore
 // this list from git history without re-verifying each id.
+//
+// 2026-08-21: added happysrv — a genuine second `sigil-node` full producer,
+// confirmed dual-producing and meshed with Epsilon since 2026-08-20. THIS is
+// the list that actually matters (consumed by `sigil_bootstrap_peers()` →
+// `for_sigil()`, the real dial path sigil-top uses) — an earlier attempt to
+// add happysrv to `sigil_net::DEFAULT_BOOTSTRAP_PEERS` (a same-named-looking
+// but entirely different, effectively DEAD constant in the `sigil` repo) was
+// a no-op that shipped as v7.1.44 without changing client behavior at all.
+// If you're here fixing a "sigil-top only shows N-1 peers" report again,
+// this is the list to edit — not the one in `sigil-net`.
 pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
+    ("happysrv-sigil", "/ip4/159.195.108.96/tcp/9501/p2p/12D3KooWF5hYvjWRcGAmmwsFDLP69p39zgh3Yuxp2oQ989R57Din"),
 ];
 
 /// Firewall-friendly relay bootstrap for networks where tcp/9501 is reachable

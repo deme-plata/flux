@@ -41,6 +41,7 @@
 | v0.36.0 | 2026-07-03 | Durable storage (flux-db v3 SSTs, streaming merge, 1 TB+ proven) + fleet-warm builds (canonical wrapper path, toolchain pin) |
 | v0.37.0 | 2026-07-17 | The incremental release: FIP-0003 TDG (tracer + wrapper spool + crate/unit scheduler + flux_combo incremental), ladder rung 7 (traits, gates 36/25/16), module-tree cache-key fix (⚠ one cold rebuild), async compaction, 20 TB ladder PASS (40,001/40,001) |
 | v0.38.0 | 2026-07-18 | The ladder release: rungs 7b–11 (tagged dyn, closures, heap Vec/String via the flux runtime, range/vec for-loops, iterator fusion) — 12 outcome gates green; FIP-0003 write paths complete (swarm); FLUX_MIR_DEBUG; verbose verifier errors |
+| v0.41.0 | 2026-08-22 | The layered core: fluxc-core split into a real layered stack (fluxc-util/analytics/webhooks/serve), flux-cache's 51k-file eviction walk killed (28s→1-2s edit loop), 3 real flux-p2p/SIGIL-mesh fixes, flux_release_readiness (this ledger's own 3-part rule, now machine-checkable), flux-btc accumulation brain |
 | v0.40.0 | `full:86cf82a6ac1a2de4e0129e66e9d5321eeb7d0a3c3a63b57955dca87f6ea87fca` | head (parent of v0.39 chain) |
 | v0.39.0 | 2026-07-24 | The honest-tooling release: dep-info cache fix (no-op sigil check 216s→1.0s), flux_combo UNVERIFIED verdict + live_fluxc_path stale-server fix, fluxc test verbatim arg forwarding + test-bins, flux-db async-settle/WAL rewrite + ShardedDb parity |
 
@@ -80,6 +81,11 @@ comparing — the identity is recomputable, not asserted.
 
 - `Cargo.lock` was not committed with v0.34.0 (it carries deps from in-flight flux-context WIP owned
   by another lane); it syncs with that owner's commit.
+- Same pattern repeats at v0.41.0: `Cargo.lock` carries an unrelated `alloy` (Ethereum client)
+  dependency diff from an in-flight `flux-dex-trader` lane; not committed with this release, syncs
+  with that lane's own commit. `flux_release_readiness` (new in v0.41.0) flags this honestly as a
+  dirty release file rather than silently ignoring it — the debt is accepted deliberately per this
+  entry, not because the tool failed to notice.
 - The Track A ↔ Track B relationship pre-0.29 is narrative, not linear — the ladder took over the
   number line at 0.29. Do not try to back-interpolate.
 - A working-tree cache change (restore-on-by-default flip in `fluxc-core/src/lib.rs` + flux-driver

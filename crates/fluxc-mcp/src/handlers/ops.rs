@@ -68,6 +68,7 @@ pub fn register(registry: &mut ToolRegistry) {
     // ── flux release channel (v0.16.x) — multi-product auto-update over HTTPS ──
     registry.register(ToolDef { name: "flux_release_publish", description: "Publish a release for any product (fluxc, flux-arena, flux-arena-server, ...). Copies the binary to the q-flux downloads dir and writes <product>-latest.json. Default product is 'fluxc'; default binary is the running fluxc binary.", input_schema: json!({"type":"object","properties":{"product":{"type":"string","description":"Product name (default: fluxc)"},"version":{"type":"string"},"binary_path":{"type":"string","description":"Path to binary to publish (optional; default: current fluxc exe)"}},"required":["version"]}) }, flux_release_publish);
     registry.register(ToolDef { name: "flux_release_check", description: "Check what version of a product is currently published. Fetches <product>-latest.json and reports version + URL + size + publisher. No download.", input_schema: json!({"type":"object","properties":{"product":{"type":"string","description":"Product name (default: fluxc)"},"manifest_url":{"type":"string","description":"Override manifest URL (default: derived from product name)"}}}) }, flux_release_check);
+    registry.register(ToolDef { name: "flux_release_readiness", description: "Is the fluxc workspace's CURRENT version (Cargo.toml) ready to be tagged as a release? Checks docs/VERSION_LEDGER.md's 3-part rule against reality: a CHANGELOG.md heading for the version, a VERSION_LEDGER.md Track B row, a matching git tag, and clean release files. Verdict is one of released / stale_tag / ready_to_tag / not_ready — stale_tag means the tag exists but HEAD has moved on (time to bump for the next release).", input_schema: json!({"type":"object","properties":{}}) }, flux_release_readiness);
     registry.register(ToolDef { name: "flux_os_stage", description: "Stage QuillonOS wasm32-wasip1 modules from N packages: cargo-builds, BLAKE3-hashes, writes stub SQIsign proofs, merges into manifest.json. Preserves existing entries for modules not in this run. Output defaults to /home/orobit/q-narwhalknight/dist-final/quillonos.", input_schema: json!({"type":"object","properties":{"packages":{"type":"array","items":{"type":"string"},"description":"Cargo package names (e.g. ['quillonos-init','quillonos-sh'])"},"output_dir":{"type":"string","description":"Override dist-final/quillonos path"}},"required":["packages"]}) }, flux_os_stage);
     // ── Multi-agent goal stack (v0.17.x) — three terminals control one in-game player ──
     registry.register(ToolDef { name: "flux_goal_post", description: "Post a goal for the agent-controlled player in flux-arena. Three Claude terminals share control; the game polls /api/goal/current each tick and executes the top-priority active goal. Priority: 0=emergency, 1=focused action, 2=tactical, 3=strategic, 5=idle. ttl_secs=0 means never expires.", input_schema: json!({"type":"object","properties":{"agent_id":{"type":"string"},"text":{"type":"string","description":"Free-form goal text (e.g. 'shoot viktor 3 times', 'pause', 'move around and shoot')"},"priority":{"type":"integer","description":"0-9 lower=more urgent (default 3)"},"ttl_secs":{"type":"integer","description":"Auto-expire after N seconds (0 = never, default 30)"}},"required":["agent_id","text"]}) }, flux_goal_post);
@@ -1426,6 +1427,42 @@ fn flux_release_check(args: &Value) -> String {
         ),
         Err(e) => format!("Check failed for {}: {}", manifest_url, e),
     }
+}
+
+fn flux_release_readiness(_args: &Value) -> String {
+    let root = fluxc_core::version::workspace_root();
+    let r = fluxc_core::release_readiness::check(&root);
+    let icon = match r.verdict.as_str() {
+        "released" => "✅",
+        "ready_to_tag" => "🟢",
+        "stale_tag" => "🟡",
+        _ => "🔴",
+    };
+    let mut out = format!(
+        "{icon} v{} — {}\n  CHANGELOG.md entry:        {}\n  VERSION_LEDGER.md row:     {}\n  git tag v{} exists:        {}\n  tag matches HEAD:          {}\n",
+        r.version,
+        r.verdict.replace('_', " "),
+        yn(r.changelog_entry),
+        yn(r.ledger_row),
+        r.version,
+        yn(r.git_tag_exists),
+        yn(r.tag_matches_head),
+    );
+    if r.commits_since_tag > 0 {
+        out.push_str(&format!("  commits since tag:         {}\n", r.commits_since_tag));
+    }
+    if !r.missing.is_empty() {
+        out.push_str("  missing:\n");
+        for m in &r.missing {
+            out.push_str(&format!("    - {m}\n"));
+        }
+    }
+    out.push_str(&format!("```json\n{}\n```", serde_json::to_string_pretty(&r.to_json()).unwrap_or_default()));
+    out
+}
+
+fn yn(b: bool) -> &'static str {
+    if b { "✓" } else { "✗" }
 }
 
 // ── QuillonOS staging (v0.17.x) ───────────────────────────────────────────

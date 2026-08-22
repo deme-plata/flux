@@ -457,6 +457,21 @@ fn main() {
             }
         }
         Some("release-audit") | Some("rel-audit") => fluxc_core::release_audit::print_release_audit(),
+        Some("release-readiness") | Some("rel-ready") => {
+            let root = fluxc_core::version::workspace_root();
+            let r = fluxc_core::release_readiness::check(&root);
+            println!("v{} — {}", r.version, r.verdict);
+            println!("  CHANGELOG.md entry:    {}", r.changelog_entry);
+            println!("  VERSION_LEDGER.md row: {}", r.ledger_row);
+            println!("  git tag v{} exists:    {}", r.version, r.git_tag_exists);
+            println!("  tag matches HEAD:      {}", r.tag_matches_head);
+            for m in &r.missing {
+                println!("  missing: {m}");
+            }
+            if r.verdict == "not_ready" {
+                std::process::exit(1);
+            }
+        }
         Some("mcp") => fluxc_mcp::run_mcp_server(),
         // Operator-only consent control for flux-webcam.
         //

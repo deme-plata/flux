@@ -1,5 +1,96 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.41.0 — The layered core (2026-08-22)
+
+The theme: the 16.4k-LOC `fluxc-core` god-crate is now a real layered stack, the
+dev-loop's worst latency spike (a 28s cache-eviction walk) is gone, and the
+release ceremony this ledger has documented in prose since v0.34.0 is now a
+tool you can call instead of a checklist you can forget.
+
+### fluxc-core split into a layered stack (65c42f15)
+- `fluxc-util` (L0: `version`/`workspace_root`, `live_fluxc_path`, the serve
+  event bus, `test_home`, dependency-inversion hooks) ← `fluxc-analytics`
+  (predict/tune/heatmap/qspec/benchmark/xray) + `fluxc-webhooks`
+  (webhook/inbound/ssrf/swarm) ← `fluxc-serve` (serve/router/stats/goals/
+  portal). Core keeps lib, phase3, tdg, combo_v2, distributed, p2p_worker
+  (~9k LOC) and depends only downward, so cluster edits never rebuild core.
+  Compat re-exports keep `fluxc_core::version` / `live_fluxc_path` working.
+  All 194 tests green, perfectly conserved across the split.
+
+### flux_release_readiness — the ledger's own rule, made checkable (new)
+- `docs/VERSION_LEDGER.md` has said since v0.34.0 that "a release = a commit
+  that bumps the version + an annotated tag + a CHANGELOG entry — no tag
+  without all three," and that rule has been broken before (v0.33.0 shipped
+  a tag with neither, backfilled after the fact). `crates/fluxc-core/src/
+  release_readiness.rs` (new) makes the same three checks — plus a
+  VERSION_LEDGER Track B row and a clean release-file tree — a single
+  callable fact instead of tribal knowledge, and additionally distinguishes
+  a *stale* tag (exists, but HEAD has moved past it — the state this repo
+  was in this session: v0.40.0 tagged, 11 commits ahead) from a genuinely
+  untagged tree. Exposed as MCP tool `flux_release_readiness` and CLI
+  `fluxc release-readiness` / `rel-ready`. 7 new pure-parse tests, no new
+  dependencies added to `fluxc-core`.
+
+### flux-cache — killed the per-store 51k-file eviction walk (b67fe05f)
+- Every `RUSTC_WRAPPER` store re-stat-walked the whole shared cache tree
+  (51k files / 33 GiB) because the disk-usage total was cached only in
+  process-static memory, which a fresh per-unit wrapper process never has.
+  Now persisted as a base total + an append-only delta log
+  (`.disk-total-base` / `.disk-total-delta`), reconfirmed with a real walk
+  before any eviction actually deletes something. Measured: `serve` edit
+  loop 28-35s → 1.1-1.4s, `core` edit 53.4s → 2.0s. 24/24 flux-cache tests
+  green (2 new).
+
+### flux-p2p — three real fixes to the SIGIL mesh (e9c63bdb, cad58d35, 294f0bb3)
+- Cortex-optimizer coupling (flux-cortex + flux-graph + flux-optimize, the
+  ~40-crate AI-agent-registry stack) is now behind an opt-in
+  `cortex-optimizer` feature instead of an unconditional dependency every
+  networking-only consumer (sigil-node, sigil-top, sigil-net) paid for.
+- Permanently-dead Delta/Gamma/Beta trimmed from `SIGIL_BOOTSTRAP_PEERS`
+  (reproduced live: a fresh client redialed all three every ~4s forever,
+  zero backoff); Epsilon is now the sole entry, and happysrv
+  (159.195.108.96:9501, a real second dual-producing full node meshed
+  since 2026-08-20) was added with its required `/p2p/<PeerId>` suffix.
+- `entanglement_enabled` now actually gates routing end-to-end (previously
+  set by callers but never consumed), and a real redundant-broadcast bug
+  is fixed: the entangled-publish path called `gossipsub.publish()` once
+  per qualifying peer instead of once per tick. 44/44 flux-p2p tests green.
+
+### flux-db — optional live progress on `Database::open`'s WAL replay (506fcd9b)
+- `Database::open_with_progress(path, on_progress)` (additive; `open()` is
+  unchanged, delegates with a no-op callback). Fires roughly every 4 MiB
+  during WAL replay so a caller opening a large archive (measured ~330
+  MB/s) can show a real gauge instead of a static "still opening" message.
+
+### flux-btc — Bitcoin accumulation brain + capitulation watcher (93c0fc42, e7ad7c78)
+- New propose-only crate composing `flux-trade` (9 SIMD indicators + Kelly
+  sizing) and `flux-market` (fear/greed + DCA + governor) into a single
+  dip-strength score (0-100) + contrarian DCA multiple; MCP tools
+  `flux_btc_analyze` / `_dca_plan` / `_indicators` / `_fear_greed`.
+  `btc-watch` posts one signed daily line to Buzz #trading (dip strength +
+  regime, a labeled-not-prophecy ETA band, a war-chest nudge); fires a
+  loud alert on a strong dip or price within 10% of target. No order path
+  exists in the binary — execute is always `false`. 5/5 + 7/7 tests green.
+
+### Fixes
+- `ai_debug`'s two tests raced on the shared `AI_LOG` static (both asserted
+  on the log's last entry while running in parallel) — fixed by matching
+  each test's own entry within a window instead of the tail (7e083a19).
+
+### Research
+- A same-day SIGIL narwhal-mempool novelty claim (erasure-coded batch
+  dissemination as an "invented upgrade") was checked against the
+  literature and corrected: Imitater (arXiv:2409.19286) already does the
+  same shape ~11 months earlier. Published alongside Turbine/RaptorCast,
+  Ethereum DAS, and Aptos's own documented counter-argument (7e895b50).
+
+### Known reconciliation debt (deliberate, tracked — see the pattern already
+noted for v0.34.0 in this ledger)
+- `Cargo.lock` is not part of this release's commit: at bump time it carries
+  a large, unrelated diff (the `alloy` Ethereum client + transitive deps)
+  from another in-flight lane's WIP (a new `flux-dex-trader` crate). It
+  syncs with that lane's own commit, same as the v0.34.0 precedent.
+
 ## v0.40.0 — Receipts everywhere: builds prove themselves (2026-08-08)
 
 The theme: a green build is no longer a claim, it's a receipt. The builder

@@ -29,6 +29,7 @@ pub mod chat;
 pub mod provenance;
 pub mod fix;
 pub mod release_audit;
+pub mod release_readiness;
 
 use std::env;
 use std::path::PathBuf;

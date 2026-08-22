@@ -69,6 +69,7 @@ comparing — the identity is recomputable, not asserted.
 
 | Release | flux-rev identity | Chain position |
 |---|---|---|
+| v0.41.0 | `full:c13d480a79df53ce623a790e90fe1c815479da7efd061df7fad91af5e20a9de0` | head (parent `53bd930509b63646`, grandparent `86cf82a6ac1a2de4` = v0.40.0's stamp) |
 | v0.39.0 | `full:43a5d16f016c36ce6f37c869e628ffcebe6dd3cb628e4f35ff02b72202772d85` | head (parent `059a51e2a7299c43`) |
 | v0.38.0 | `full:059a51e2a7299c43bafef9dfb591a1a0e1e7b9767fc1d58c8a2a004224e08c75` | parent chain |
 | v0.37.0 | `full:9c924bd287449b7bee9fbb32f1f0918b1460f0be1ccbbd5285e22c411ab99966` | parent chain (parent `bf2273ea2797600b`) |

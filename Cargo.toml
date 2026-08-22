@@ -80,7 +80,7 @@ resolver = "2"
 version = "0.41.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/flux-lang/flux"
+repository = "https://github.com/deme-plata/flux"
 
 [workspace.dependencies]
 anyhow = "1.0"

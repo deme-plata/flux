@@ -154,6 +154,19 @@ pub fn register(registry: &mut ToolRegistry) {
     }, |_a| get("/v1/shielded/anchor"));
 
     registry.register(ToolDef {
+        name: "flux_sigil_shielded_register",
+        description: "Publish a wallet's shielded key so its BLOCK REWARDS are minted \
+                      directly into the shielded pool instead of a transparent balance. \
+                      The highest-leverage call for network privacy: a miner registers \
+                      once and every later reward becomes a pool note they own, which \
+                      grows the anonymity set without anyone changing behaviour. Opt-in — \
+                      an unregistered wallet keeps transparent rewards. Args: wallet (hex), \
+                      pk_shield (hex, from ShieldedAccount::public_key), fee (string, \
+                      default 0). (sigil-api POST /v1/shielded/register)",
+        input_schema: json!({"type":"object","properties":{"wallet":{"type":"string"},"pk_shield":{"type":"string"},"fee":{"type":"string","default":"0"}},"required":["wallet","pk_shield"]}),
+    }, shielded_register);
+
+    registry.register(ToolDef {
         name: "flux_sigil_shield_plan",
         description: "Plan how to move an arbitrary amount into (or out of) the shielded \
                       pool. Ramp amounts must be standard denominations so shield/unshield \
@@ -318,6 +331,18 @@ fn shield_plan(a: &Value) -> String {
                  dust_remaining should always be 0 — anything else is a bug worth reporting.",
     })
     .to_string()
+}
+
+fn shielded_register(a: &Value) -> String {
+    let body = json!({
+        "wallet": arg_str(a, "wallet", ""),
+        "pk_shield": arg_str(a, "pk_shield", ""),
+        "fee": arg_str(a, "fee", "0"),
+    });
+    match post("/v1/shielded/register", &body.to_string()) {
+        Ok(b) => b,
+        Err(e) => json!({"ok": false, "error": e, "endpoint": "/v1/shielded/register"}).to_string(),
+    }
 }
 
 fn shield_submit(a: &Value) -> String {

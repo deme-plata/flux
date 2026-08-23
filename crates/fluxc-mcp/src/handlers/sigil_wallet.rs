@@ -3,23 +3,39 @@
 //! (create_wallet / import_wallet / get_balance / network_status / mining_status
 //! / send / faucet).
 //!
-//! Talks to the live `sigil-rpcd` JSON API over HTTP **or HTTPS** via `ureq`
-//! (rustls), so it works ON-box (`http://127.0.0.1:8099`) or OFF-box against the
-//! public endpoint. Set `FLUX_SIGIL_RPC` to the base URL (default
-//! `http://127.0.0.1:8099`; public: `https://quillon.xyz:8843`).
+//! Talks to the live SIGIL money API over HTTP **or HTTPS** via `ureq` (rustls),
+//! so it works ON-box (`http://127.0.0.1:18181`) or OFF-box against the public
+//! endpoint (`https://sigilgraph.org`). Set `FLUX_SIGIL_RPC` to override.
 //!
-//! Reads are live + safe. Key generation is real ed25519 (rpcd's convention:
-//! `wallet_id == ed25519 pubkey`). Sends are SIGNED locally with the
-//! caller-supplied secret and, by default, merely PROPOSED (returned
-//! ready-to-POST) — a real transfer only happens on explicit `"broadcast": true`.
-//! The MCP never stores keys.
+//! 2026-08-23 (grogu-sigil-wallet-mcp-fix): the backend this crate talked to was
+//! `sigil-rpcd` (`:8099`) — that service was retired by the operator 2026-08-17
+//! and is permanently offline. The default here now points at `sigil-api`
+//! (`:18181`, embedded in `sigil-node`, `SIGIL_MONEY_API` env), the real live
+//! braid-backed money API. `sigil-api`'s route surface is NARROWER than the old
+//! rpcd one, though — confirmed live (curl probes against a running node):
+//!   ✅ works as-is:   /api/v1/balance, /api/v1/mining/challenge, /api/v1/pools,
+//!                     /api/v1/supply, POST /api/v1/send (from/to/amount/token/
+//!                     sig/req_nonce — same shape `wallet_send` already builds)
+//!   ✅ works, no /api prefix: /v1/health (NOT /api/v1/health — 404)
+//!   ❌ 404, no equivalent yet: /api/v1/{status,tip,economy,tokens,recent,onboard}
+//! Tools hitting a ❌ route below return an explicit "route not on sigil-api yet"
+//! error instead of silently passing through an empty 404 body — don't let an
+//! agent mistake "route missing" for "zero economy activity". See the
+//! `sigil-wallet-mcp` skill for the full trap list (this file fixes the routing
+//! half; that skill still documents the operational gotchas: dead default host
+//! on the node-control tools, `txn_send`/`deploy`/`batch` preview-only status).
 //!
-//! The "flux way" (zerox idiom): the rpcd surface these tools drive is ALSO
-//! modeled as flux-api [`ApiEndpoint`]s ([`sigil_wallet_spec`]), so
+//! Reads are live + safe. Key generation is real ed25519 (rpcd's convention,
+//! still honored by sigil-api: `wallet_id == ed25519 pubkey`). Sends are SIGNED
+//! locally with the caller-supplied secret and, by default, merely PROPOSED
+//! (returned ready-to-POST) — a real transfer only happens on explicit
+//! `"broadcast": true`. The MCP never stores keys.
+//!
+//! The "flux way" (zerox idiom): the surface these tools drive is ALSO modeled
+//! as flux-api [`ApiEndpoint`]s ([`sigil_wallet_spec`]), so
 //! `flux_sigil_wallet_openapi` emits the OpenAPI 3.1 document and
 //! `flux_sigil_wallet_sdk` generates typed clients (TS/Python/Rust/Go/Kotlin)
-//! from the same definitions. Response schemas mirror the live sigil-rpcd
-//! handlers (sigil/crates/sigil-rpc/src/bin/sigil-rpcd.rs), probed 2026-07-05.
+//! from the same definitions.
 
 use flux_api::{ApiEndpoint, ApiParameter, ApiResponse, ApiSchema, HttpMethod, ParamLocation};
 use serde_json::{json, Value};
@@ -28,8 +44,24 @@ use crate::handlers::{ToolDef, ToolRegistry};
 
 const AUTH_DOMAIN: &str = "sigil-rpc/v1";
 
-fn rpc_base() -> String {
-    std::env::var("FLUX_SIGIL_RPC").unwrap_or_else(|_| "http://127.0.0.1:8099".to_string())
+/// Base URL for the live SIGIL money API (`sigil-api`, not the retired
+/// `sigil-rpcd`). `pub(crate)` so `sigil_ops.rs`'s `agent_panel` can share it
+/// instead of hardcoding its own (now-dead) endpoint.
+pub(crate) fn rpc_base() -> String {
+    std::env::var("FLUX_SIGIL_RPC").unwrap_or_else(|_| "http://127.0.0.1:18181".to_string())
+}
+
+/// A handful of `sigil-api` routes genuinely don't exist yet (confirmed live,
+/// 2026-08-23 — see the module doc). Return an honest error instead of an
+/// empty/404 passthrough that an agent could misread as "zero results".
+fn unsupported_route(tool: &str, old_path: &str) -> String {
+    json!({
+        "ok": false,
+        "error": format!("{old_path} has no equivalent on the current sigil-api backend"),
+        "hint": format!("{tool} talked to sigil-rpcd's {old_path}; sigil-rpcd is permanently retired \
+                          and sigil-api (the live backend) doesn't serve this route yet. \
+                          See the sigil-wallet-mcp skill for the full route-support table."),
+    }).to_string()
 }
 fn arg_str(a: &Value, k: &str, d: &str) -> String {
     a.get(k).and_then(|v| v.as_str()).unwrap_or(d).to_string()
@@ -88,52 +120,105 @@ pub fn register(registry: &mut ToolRegistry) {
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_network_status",
-        description: "Live SIGIL network status: service, network_id, height, peers, tip. (rpcd /status + /tip)",
+        description: "Live SIGIL network status: service health + native supply (sigil-api /v1/health + /api/v1/supply — the old rpcd /status+/tip pair no longer exists).",
         input_schema: json!({"type":"object","properties":{}}),
     }, wallet_network_status);
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_economy",
-        description: "Live SIGIL economy: tokens, pools, traders, citizens, treasury. (rpcd /economy)",
+        description: "Live SIGIL economy: tokens, pools, traders, citizens, treasury. NOTE: this rpcd-only route (/economy) has no sigil-api equivalent yet — returns an explicit unsupported-route error, not fabricated data.",
         input_schema: json!({"type":"object","properties":{}}),
-    }, |_a| get("/api/v1/economy"));
+    }, |_a| unsupported_route("flux_sigil_wallet_economy", "/api/v1/economy"));
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_pools",
-        description: "Live DEX pools on SIGIL. (rpcd /pools)",
+        description: "Live DEX pools on SIGIL. (sigil-api /api/v1/pools)",
         input_schema: json!({"type":"object","properties":{}}),
     }, |_a| get("/api/v1/pools"));
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_tokens",
-        description: "Live token registry on SIGIL. (rpcd /tokens)",
+        description: "Live token registry on SIGIL. NOTE: this rpcd-only route (/tokens) has no sigil-api equivalent yet — returns an explicit unsupported-route error, not fabricated data.",
         input_schema: json!({"type":"object","properties":{}}),
-    }, |_a| get("/api/v1/tokens"));
+    }, |_a| unsupported_route("flux_sigil_wallet_tokens", "/api/v1/tokens"));
+
+    // ── PV-1 shielded pool (2026-08-23) ────────────────────────────────────────────
+    registry.register(ToolDef {
+        name: "flux_sigil_shielded_status",
+        description: "Live shielded-pool state: the anchor (anonymity-set root), note count, \
+                      spent-nullifier count and value locked. THE NOTE COUNT IS THE REAL \
+                      PRIVACY NUMBER — an empty pool provides no anonymity no matter how \
+                      strong the proofs, because a spend can only hide among notes that \
+                      exist. Capacity is 32,768. (sigil-api /v1/shielded/anchor)",
+        input_schema: json!({"type":"object","properties":{}}),
+    }, |_a| get("/v1/shielded/anchor"));
+
+    registry.register(ToolDef {
+        name: "flux_sigil_shield_plan",
+        description: "Plan how to move an arbitrary amount into (or out of) the shielded \
+                      pool. Ramp amounts must be standard denominations so shield/unshield \
+                      values cannot be correlated across the transparent boundary; this \
+                      returns the exact split. The ladder includes 1, so EVERY integer \
+                      amount decomposes with no stranded dust. Args: amount (string, raw \
+                      base units).",
+        input_schema: json!({"type":"object","properties":{"amount":{"type":"string"}},"required":["amount"]}),
+    }, shield_plan);
+
+    registry.register(ToolDef {
+        name: "flux_sigil_shield",
+        description: "Move value from a transparent wallet INTO the shielded pool. Args: \
+                      from (hex wallet), amount (string raw), cm (hex note commitment the \
+                      CALLER derives — the server never learns the blinding, which is what \
+                      makes the note private), fee (string, default 0). Amount must be a \
+                      denomination — use flux_sigil_shield_plan first for an arbitrary \
+                      sum. (sigil-api POST /v1/shield)",
+        input_schema: json!({"type":"object","properties":{"from":{"type":"string"},"amount":{"type":"string"},"cm":{"type":"string"},"fee":{"type":"string","default":"0"}},"required":["from","amount","cm"]}),
+    }, shield_submit);
+
+    registry.register(ToolDef {
+        name: "flux_sigil_shielded_send",
+        description: "A PRIVATE shielded-to-shielded transfer. Carries no sender, no \
+                      recipient and no amount — authorization is the STARK, not a wallet \
+                      signature. Args: anchor, nullifier, cm_outs (2 hex commitments), \
+                      proof (hex), fee (string; must be exactly the fixed shielded fee — a \
+                      chosen fee is a fingerprint that identifies the sender). Build the \
+                      proof with sigil-shield's wallet::build_spend. \
+                      (sigil-api POST /v1/shielded_send)",
+        input_schema: json!({"type":"object","properties":{"anchor":{"type":"string"},"nullifier":{"type":"string"},"cm_outs":{"type":"array","items":{"type":"string"}},"proof":{"type":"string"},"fee":{"type":"string"}},"required":["anchor","nullifier","cm_outs","proof","fee"]}),
+    }, shielded_send);
+
+    registry.register(ToolDef {
+        name: "flux_sigil_unshield",
+        description: "Move value OUT of the shielded pool to a transparent wallet. \
+                      Proof-carrying like a shielded send: without a proof binding \
+                      (nullifier, amount) to a note you own, naming a nullifier would be \
+                      enough to drain the pool. Args: to, amount (string raw, must be a \
+                      denomination), anchor, nullifier, cm_outs, proof, fee. \
+                      (sigil-api POST /v1/unshield)",
+        input_schema: json!({"type":"object","properties":{"to":{"type":"string"},"amount":{"type":"string"},"anchor":{"type":"string"},"nullifier":{"type":"string"},"cm_outs":{"type":"array","items":{"type":"string"}},"proof":{"type":"string"},"fee":{"type":"string","default":"0"}},"required":["to","amount","anchor","nullifier","cm_outs","proof"]}),
+    }, unshield_submit);
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_mining_status",
-        description: "Live mining challenge/status for a wallet. Args: wallet (hex). (rpcd /mining/challenge)",
+        description: "Live mining challenge/status for a wallet. Args: wallet (hex). (sigil-api /api/v1/mining/challenge)",
         input_schema: json!({"type":"object","properties":{"wallet":{"type":"string"}},"required":["wallet"]}),
     }, wallet_mining_status);
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_recent",
-        description: "Recent on-chain activity. Args: kind (optional filter). (rpcd /recent)",
+        description: "Recent on-chain activity. NOTE: this rpcd-only route (/recent) has no sigil-api equivalent yet — returns an explicit unsupported-route error, not fabricated data.",
         input_schema: json!({"type":"object","properties":{"kind":{"type":"string"}}}),
-    }, |a| {
-        let kind = arg_str(a, "kind", "");
-        if kind.is_empty() { get("/api/v1/recent") } else { get(&format!("/api/v1/recent?kind={kind}")) }
-    });
+    }, |_a| unsupported_route("flux_sigil_wallet_recent", "/api/v1/recent"));
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_faucet",
-        description: "Onboard + fund a new wallet from the rpcd faucet (verified-user starter funding, per-IP rate-limited). Args: seed (optional 32-byte hex; rpcd derives one if omitted). Returns the funded wallet. (rpcd POST /onboard)",
+        description: "Onboard + fund a new wallet. NOTE: this rpcd-only route (POST /onboard) has no sigil-api equivalent yet — returns an explicit unsupported-route error rather than claiming to have funded a wallet it didn't.",
         input_schema: json!({"type":"object","properties":{"seed":{"type":"string"}}}),
-    }, wallet_faucet);
+    }, |_a| unsupported_route("flux_sigil_wallet_faucet", "POST /api/v1/onboard"));
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_send",
-        description: "Send SIGIL/tokens. SIGNS locally with the caller's secret (rpcd ed25519 auth). By DEFAULT only PROPOSES (returns the signed request ready to POST). Pass \"broadcast\": true to submit to rpcd /send. Args: from (hex), to (hex), amount (int), secret (hex), token (default 'SIGIL'), nonce (default now ms), broadcast (default false).",
+        description: "Send SIGIL/tokens. SIGNS locally with the caller's secret (ed25519, sigil-api auth). By DEFAULT only PROPOSES (returns the signed request ready to POST). Pass \"broadcast\": true to submit to sigil-api's POST /api/v1/send (confirmed live route — from/to/amount/token/sig/req_nonce). Args: from (hex), to (hex), amount (int), secret (hex), token (default 'SIGIL'), nonce (default now ms), broadcast (default false).",
         input_schema: json!({"type":"object","properties":{
             "from":{"type":"string"},"to":{"type":"string"},"amount":{"type":"integer"},
             "secret":{"type":"string"},"token":{"type":"string","default":"SIGIL"},
@@ -143,7 +228,7 @@ pub fn register(registry: &mut ToolRegistry) {
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_openapi",
-        description: "Emit the OpenAPI 3.1 spec of the SIGIL wallet surface — the 10 sigil-rpcd endpoints these tools drive, generated the flux way from flux-api ApiEndpoint definitions. Feed to any SDK generator or docs pipeline.",
+        description: "Emit the OpenAPI 3.1 spec of the SIGIL wallet surface — the 10 endpoints these tools drive, generated the flux way from flux-api ApiEndpoint definitions. NOTE: this models the original rpcd-era surface for documentation completeness; balance/mining_challenge/pools/supply/send are confirmed live on sigil-api, status/tip/economy/tokens/recent/onboard are NOT (see sigil_wallet_spec's doc comment). Feed to any SDK generator or docs pipeline, but don't assume every generated call succeeds.",
         input_schema: json!({"type":"object","properties":{}}),
     }, |_a| flux_api::generate_openapi("SIGIL Wallet API (sigil-rpcd)", "1.0.0", &sigil_wallet_spec()).to_string());
 
@@ -170,7 +255,7 @@ fn wallet_create(_a: &Value) -> String {
     json!({
         "ok": true, "wallet_id": pk_hex, "pubkey": pk_hex, "secret": hex::encode(sk_bytes),
         "warning": "SECRET grants full control — store it securely; the MCP does not keep it.",
-        "next": "fund via flux_sigil_wallet_faucet, then flux_sigil_wallet_balance"
+        "next": "flux_sigil_wallet_faucet has no live backend route right now (see its tool description) — fund this wallet another way, then check flux_sigil_wallet_balance"
     }).to_string()
 }
 
@@ -186,6 +271,98 @@ fn wallet_import(a: &Value) -> String {
     json!({"ok": true, "wallet_id": wid, "pubkey": wid, "note": "derived from secret; ready for balance/send"}).to_string()
 }
 
+/// The denomination ladder, mirrored from `sigil_state::shielded::DENOMINATIONS`.
+///
+/// Duplicated deliberately rather than depended on: fluxc-mcp does not link sigil-state,
+/// and pulling it in for one constant would drag the whole chain into the MCP build. The
+/// plan this returns is ADVISORY — the chokepoint is the authority and re-checks, so a
+/// drift here produces a rejected transaction, never an accepted bad one.
+fn denominations() -> Vec<u128> {
+    let mut v = Vec::new();
+    let mut p: u128 = 1;
+    for _ in 0..16 {
+        for d in [1u128, 2, 5] {
+            v.push(d * p);
+        }
+        p *= 10;
+    }
+    v.sort_unstable();
+    v
+}
+
+fn shield_plan(a: &Value) -> String {
+    let raw = arg_str(a, "amount", "");
+    let amount: u128 = match raw.parse() {
+        Ok(v) => v,
+        Err(_) => return json!({"ok": false, "error": "amount must be an integer string of raw base units"}).to_string(),
+    };
+    if amount == 0 {
+        return json!({"ok": false, "error": "amount must be > 0"}).to_string();
+    }
+    let ladder = denominations();
+    let mut left = amount;
+    let mut parts: Vec<String> = Vec::new();
+    for d in ladder.iter().rev() {
+        while left >= *d {
+            left -= *d;
+            parts.push(d.to_string());
+        }
+    }
+    json!({
+        "ok": left == 0,
+        "amount": raw,
+        "parts": parts,
+        "operations": parts.len(),
+        "dust_remaining": left.to_string(),
+        "note": "one note per part; derive a commitment for each. The ladder includes 1, so \
+                 dust_remaining should always be 0 — anything else is a bug worth reporting.",
+    })
+    .to_string()
+}
+
+fn shield_submit(a: &Value) -> String {
+    let body = json!({
+        "from": arg_str(a, "from", ""),
+        "amount": arg_str(a, "amount", "0"),
+        "cm": arg_str(a, "cm", ""),
+        "fee": arg_str(a, "fee", "0"),
+    });
+    match post("/v1/shield", &body.to_string()) {
+        Ok(b) => b,
+        Err(e) => json!({"ok": false, "error": e, "endpoint": "/v1/shield"}).to_string(),
+    }
+}
+
+fn shielded_send(a: &Value) -> String {
+    let body = json!({
+        "anchor": arg_str(a, "anchor", ""),
+        "nullifier": arg_str(a, "nullifier", ""),
+        "cm_outs": a.get("cm_outs").cloned().unwrap_or(json!([])),
+        "proof": arg_str(a, "proof", ""),
+        "fee": arg_str(a, "fee", "0"),
+    });
+    match post("/v1/shielded_send", &body.to_string()) {
+        Ok(b) => b,
+        Err(e) => json!({"ok": false, "error": e, "endpoint": "/v1/shielded_send"}).to_string(),
+    }
+}
+
+fn unshield_submit(a: &Value) -> String {
+    let body = json!({
+        "to": arg_str(a, "to", ""),
+        "amount": arg_str(a, "amount", "0"),
+        "anchor": arg_str(a, "anchor", ""),
+        "nullifier": arg_str(a, "nullifier", ""),
+        "cm_outs": a.get("cm_outs").cloned().unwrap_or(json!([])),
+        "proof": arg_str(a, "proof", ""),
+        "fee": arg_str(a, "fee", "0"),
+    });
+    match post("/v1/unshield", &body.to_string()) {
+        Ok(b) => b,
+        Err(e) => json!({"ok": false, "error": e, "endpoint": "/v1/unshield"}).to_string(),
+    }
+}
+
 fn wallet_balance(a: &Value) -> String {
     let wallet = arg_str(a, "wallet", "");
     let token = arg_str(a, "token", "SIGIL");
@@ -193,25 +370,24 @@ fn wallet_balance(a: &Value) -> String {
     get(&format!("/api/v1/balance?wallet={wallet}&token={token}"))
 }
 
+/// sigil-api has no `/status`+`/tip` pair (confirmed 404 live) — the closest
+/// honest live substitute is `/v1/health` (note: NOT under `/api`) + the real
+/// `/api/v1/supply` route. Shaped differently from the old rpcd response on
+/// purpose: this reports what's ACTUALLY there, not a fake status/tip pair.
 fn wallet_network_status(_a: &Value) -> String {
-    let sj: Value = serde_json::from_str(&get("/api/v1/status")).unwrap_or(json!(null));
-    let tj: Value = serde_json::from_str(&get("/api/v1/tip")).unwrap_or(json!(null));
-    json!({"ok": true, "status": sj, "tip": tj}).to_string()
+    let hj: Value = serde_json::from_str(&get("/v1/health")).unwrap_or(json!(null));
+    let sj: Value = serde_json::from_str(&get("/api/v1/supply")).unwrap_or(json!(null));
+    json!({
+        "ok": true, "backend": "sigil-api",
+        "health": hj, "supply": sj,
+        "note": "sigil-rpcd's /status+/tip pair no longer exists; this is /v1/health + /api/v1/supply instead",
+    }).to_string()
 }
 
 fn wallet_mining_status(a: &Value) -> String {
     let wallet = arg_str(a, "wallet", "");
     if wallet.is_empty() { return json!({"ok": false, "error": "wallet required"}).to_string(); }
     get(&format!("/api/v1/mining/challenge?wallet={wallet}"))
-}
-
-fn wallet_faucet(a: &Value) -> String {
-    let seed = arg_str(a, "seed", "");
-    let body = if seed.is_empty() { json!({}) } else { json!({"seed": seed}) };
-    match post("/api/v1/onboard", &body.to_string()) {
-        Ok(b) => json!({"ok": true, "onboard": serde_json::from_str::<Value>(&b).unwrap_or(json!({"raw": b}))}).to_string(),
-        Err(e) => json!({"ok": false, "error": e}).to_string(),
-    }
 }
 
 fn wallet_send(a: &Value) -> String {
@@ -257,7 +433,7 @@ fn wallet_setup_script(_a: &Value) -> String {
             "command": "fluxc", "args": ["mcp"],
             "env": {"FLUX_SIGIL_RPC": rpc_base()}
         }}},
-        "note": "off-box: set FLUX_SIGIL_RPC=https://quillon.xyz:8843 ; on-box: http://127.0.0.1:8099",
+        "note": "off-box: set FLUX_SIGIL_RPC=https://sigilgraph.org (confirmed live 2026-08-23; sigilgraph.quillon.xyz 502s, sigilgraph.fluxapp.xyz silently falls through to the marketing homepage instead of sigil-api) ; on-box: http://127.0.0.1:18181 (NOT :8099 — sigil-rpcd is permanently retired)",
         "tools": [
             "flux_sigil_wallet_create","flux_sigil_wallet_import","flux_sigil_wallet_balance",
             "flux_sigil_wallet_network_status","flux_sigil_wallet_economy","flux_sigil_wallet_pools",
@@ -320,8 +496,19 @@ fn hex32() -> ApiSchema {
     ApiSchema::string_with_format("hex32")
 }
 
-/// The sigil-rpcd endpoints the `flux_sigil_wallet_*` tools drive, as flux-api
-/// endpoint definitions. Response shapes mirror the rpcd handlers 1:1.
+/// The endpoints the `flux_sigil_wallet_*` tools drive, as flux-api endpoint
+/// definitions — kept as the original rpcd-era 10-endpoint surface for
+/// documentation/SDK-generation completeness. As of 2026-08-23, confirmed live
+/// against the real backend (`sigil-api`, `sigil-rpcd` being permanently
+/// retired): `balance`, `mining_challenge`, `pools`, `send` all work as
+/// specified here. `status`, `tip`, `economy`, `tokens`, `recent`, `onboard`
+/// do NOT exist on `sigil-api` (404, confirmed via live curl) — the
+/// corresponding `flux_sigil_wallet_*` tools return an explicit
+/// unsupported-route error rather than silently passing through an empty
+/// 404. This spec is left describing the historical/aspirational full
+/// surface rather than trimmed to match, so the OpenAPI doc and generated
+/// SDKs stay useful as a target for whoever extends `sigil-api` to cover the
+/// gap — treat a generated SDK call to a dead route as a TODO, not a promise.
 pub fn sigil_wallet_spec() -> Vec<ApiEndpoint> {
     vec![
         ep(
@@ -521,16 +708,28 @@ fn wallet_sdk(a: &Value) -> String {
 // turbosync/market), virtual-time pipeline gates (commit_pipeline_bench), or
 // build-time prediction (flux_benchmark). RULE 0 says measure the LIVE path —
 // this does, over the same FLUX_SIGIL_RPC transport the wallet tools use, so
-// it works on-box (:8099) and off-box (:8843). Every number comes off the
-// wire during the window; nothing is fabricated or replayed.
+// it works on-box (http://127.0.0.1:18181, sigil-api) and off-box
+// (https://sigilgraph.org). Every number comes off the wire during the
+// window; nothing is fabricated or replayed.
+//
+// 2026-08-23: this used to poll `/api/v1/tip` for height + a genesis
+// timestamp — that route is gone (sigil-rpcd retirement). The closest live
+// substitute is `/api/v1/mining/challenge`'s `height` field (confirmed live,
+// no `ok` envelope — see `timed_get_field`); there's no live genesis
+// timestamp source any more, so the lifetime-average rate is no longer
+// computable and is reported as unavailable rather than guessed.
 
-/// GET with measured round-trip; returns (parsed json, rtt_ms) on success.
-fn timed_get(path: &str) -> Option<(Value, f64)> {
+/// GET with measured round-trip, for routes that don't carry an `ok` envelope —
+/// `/api/v1/mining/challenge` returns the raw challenge object (confirmed live,
+/// see `sigil_wallet_spec`'s note on that endpoint). Success = the body parses
+/// AND has the field we actually need.
+fn timed_get_field(path: &str, field: &str) -> Option<(Value, f64)> {
     let s = std::time::Instant::now();
     let body = get(path);
     let rtt = s.elapsed().as_secs_f64() * 1000.0;
     let v: Value = serde_json::from_str(&body).ok()?;
-    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) { Some((v, rtt)) } else { None }
+    v.get(field)?;
+    Some((v, rtt))
 }
 
 /// (entries, span_secs, rate_per_sec) over the ts_ms range of /recent rows.
@@ -557,21 +756,16 @@ pub fn live_node_bench(window_secs: u64) -> String {
     let mut lat_ms: Vec<f64> = Vec::new();
     let mut first: Option<(f64, u64, u64)> = None; // (t_rel, block_height, height)
     let mut last: Option<(f64, u64, u64)> = None;
-    let mut genesis_us: Option<u64> = None;
+    let genesis_us: Option<u64> = None; // no live source any more — see module note above
     let mut errors = 0usize;
     while t0.elapsed().as_secs() < secs {
-        match timed_get("/api/v1/tip") {
+        match timed_get_field("/api/v1/mining/challenge", "height") {
             Some((v, rtt)) => {
                 lat_ms.push(rtt);
-                let bh = v["block_height"].as_u64().unwrap_or(0);
                 let h = v["height"].as_u64().unwrap_or(0);
-                if genesis_us.is_none() {
-                    genesis_us = v["genesis_ts_us"].as_str().and_then(|s| s.parse().ok())
-                        .or_else(|| v["genesis_ts_us"].as_u64());
-                }
                 let now = t0.elapsed().as_secs_f64();
-                if first.is_none() { first = Some((now, bh, h)); }
-                last = Some((now, bh, h));
+                if first.is_none() { first = Some((now, h, h)); }
+                last = Some((now, h, h));
             }
             None => errors += 1,
         }
@@ -582,7 +776,7 @@ pub fn live_node_bench(window_secs: u64) -> String {
             "ok": false, "mode": "live",
             "error": format!("live node unreachable for the whole {secs}s window ({errors} failed polls)"),
             "endpoint": rpc_base(),
-            "hint": "set FLUX_SIGIL_RPC to a reachable sigil-rpcd (on-box http://127.0.0.1:8099)"
+            "hint": "set FLUX_SIGIL_RPC to a reachable sigil-api (on-box http://127.0.0.1:18181, NOT :8099 — sigil-rpcd is permanently retired)"
         }).to_string();
     };
     let dt = (t_b - t_a).max(0.001);
@@ -637,9 +831,11 @@ mod tests {
     /// node is up so CI stays hermetic — the live run is the real gate.
     #[test]
     fn live_bench_measures_real_node_when_up() {
-        if serde_json::from_str::<Value>(&get("/api/v1/tip")).ok()
-            .and_then(|v| v.get("ok").and_then(|b| b.as_bool())) != Some(true) {
-            eprintln!("live_bench smoke: no reachable rpcd at {} — skipped", rpc_base());
+        // Reachability gate: /api/v1/tip is gone (sigil-rpcd retirement) — use
+        // the same /api/v1/mining/challenge route live_node_bench itself polls.
+        if serde_json::from_str::<Value>(&get("/api/v1/mining/challenge")).ok()
+            .and_then(|v| v.get("height").cloned()).is_none() {
+            eprintln!("live_bench smoke: no reachable sigil-api at {} — skipped", rpc_base());
             return;
         }
         let out = live_node_bench(3);

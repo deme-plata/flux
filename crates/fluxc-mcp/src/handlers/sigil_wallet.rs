@@ -14,8 +14,13 @@
 //! braid-backed money API. `sigil-api`'s route surface is NARROWER than the old
 //! rpcd one, though — confirmed live (curl probes against a running node):
 //!   ✅ works as-is:   /api/v1/balance, /api/v1/mining/challenge, /api/v1/pools,
-//!                     /api/v1/supply, POST /api/v1/send (from/to/amount/token/
-//!                     sig/req_nonce — same shape `wallet_send` already builds)
+//!                     /api/v1/supply
+//!   ⚠ retired 2026-08-23: POST /api/v1/send now unconditionally refuses every
+//!                     request (transparent sends are dead network-wide). The
+//!                     shielded family (POST /v1/shield, /v1/shielded_send,
+//!                     /v1/unshield, /v1/shielded/register) is the only live
+//!                     transfer path now, and (2026-08-24) propagates via
+//!                     Dandelion++ privacy relay — see those tools' own docs.
 //!   ✅ works, no /api prefix: /v1/health (NOT /api/v1/health — 404)
 //!   ❌ 404, no equivalent yet: /api/v1/{status,tip,economy,tokens,recent,onboard}
 //! Tools hitting a ❌ route below return an explicit "route not on sigil-api yet"
@@ -160,10 +165,19 @@ pub fn register(registry: &mut ToolRegistry) {
                       The highest-leverage call for network privacy: a miner registers \
                       once and every later reward becomes a pool note they own, which \
                       grows the anonymity set without anyone changing behaviour. Opt-in — \
-                      an unregistered wallet keeps transparent rewards. Args: wallet (hex), \
-                      pk_shield (hex, from ShieldedAccount::public_key), fee (string, \
-                      default 0). (sigil-api POST /v1/shielded/register)",
-        input_schema: json!({"type":"object","properties":{"wallet":{"type":"string"},"pk_shield":{"type":"string"},"fee":{"type":"string","default":"0"}},"required":["wallet","pk_shield"]}),
+                      an unregistered wallet keeps transparent rewards. \
+                      2026-08-24: now propagates to peers via Dandelion++ (stem-relay \
+                      before gossip fluff), so a network observer can no longer link this \
+                      submission's timing to the sending node's IP. SIGNS locally (secret \
+                      never leaves this process) — required since 2026-08-23, previously \
+                      anyone could register any wallet's rewards to a shield key of their \
+                      choosing. Args: wallet (hex), pk_shield (hex, from \
+                      ShieldedAccount::public_key), pk_encrypt (hex X25519 note-delivery \
+                      key, required — without it nothing can tell this wallet a payment \
+                      landed), secret (hex, this wallet's signing key), fee (string, \
+                      default 0), nonce (default now ms). (sigil-api POST \
+                      /v1/shielded/register)",
+        input_schema: json!({"type":"object","properties":{"wallet":{"type":"string"},"pk_shield":{"type":"string"},"pk_encrypt":{"type":"string"},"secret":{"type":"string"},"fee":{"type":"string","default":"0"},"nonce":{"type":"integer"}},"required":["wallet","pk_shield","pk_encrypt","secret"]}),
     }, shielded_register);
 
     registry.register(ToolDef {
@@ -179,23 +193,36 @@ pub fn register(registry: &mut ToolRegistry) {
 
     registry.register(ToolDef {
         name: "flux_sigil_shield",
-        description: "Move value from a transparent wallet INTO the shielded pool. Args: \
-                      from (hex wallet), amount (string raw), cm (hex note commitment the \
-                      CALLER derives — the server never learns the blinding, which is what \
-                      makes the note private), fee (string, default 0). Amount must be a \
+        description: "Move value from a transparent wallet INTO the shielded pool. \
+                      2026-08-24: now propagates to peers via Dandelion++ privacy relay \
+                      instead of being visible only to the node that received it. SIGNS \
+                      locally (secret never leaves this process) — required since \
+                      2026-08-23, previously anyone could drain any named wallet's \
+                      transparent balance into a note only they control. Args: from (hex \
+                      wallet), amount (string raw), cm (hex note commitment the CALLER \
+                      derives — the server never learns the blinding, which is what makes \
+                      the note private), secret (hex, this wallet's signing key), fee \
+                      (string, default 0), nonce (default now ms). Amount must be a \
                       denomination — use flux_sigil_shield_plan first for an arbitrary \
                       sum. (sigil-api POST /v1/shield)",
-        input_schema: json!({"type":"object","properties":{"from":{"type":"string"},"amount":{"type":"string"},"cm":{"type":"string"},"fee":{"type":"string","default":"0"}},"required":["from","amount","cm"]}),
+        input_schema: json!({"type":"object","properties":{"from":{"type":"string"},"amount":{"type":"string"},"cm":{"type":"string"},"secret":{"type":"string"},"fee":{"type":"string","default":"0"},"nonce":{"type":"integer"}},"required":["from","amount","cm","secret"]}),
     }, shield_submit);
 
     registry.register(ToolDef {
         name: "flux_sigil_shielded_send",
         description: "A PRIVATE shielded-to-shielded transfer. Carries no sender, no \
                       recipient and no amount — authorization is the STARK, not a wallet \
-                      signature. Args: anchor, nullifier, cm_outs (2 hex commitments), \
-                      proof (hex), fee (string; must be exactly the fixed shielded fee — a \
-                      chosen fee is a fingerprint that identifies the sender). Build the \
-                      proof with sigil-shield's wallet::build_spend. \
+                      signature. 2026-08-24: now propagates via Dandelion++ (private \
+                      point-to-point stem relay before gossip fluff) instead of being \
+                      visible only to whichever node received the HTTP call — this closes \
+                      a real gap, since the shielded pool's own cryptography hides amounts \
+                      and identities on-chain but previously did nothing to hide WHICH IP \
+                      submitted the transfer at the network layer. Args: anchor, nullifier, \
+                      cm_outs (2 hex commitments), proof (hex), fee (string; must be \
+                      exactly the fixed shielded fee — a chosen fee is a fingerprint that \
+                      identifies the sender). Build the proof with sigil-shield's \
+                      wallet::build_spend — NOT implemented by this MCP tool; the caller \
+                      must generate a valid proof elsewhere and pass it in. \
                       (sigil-api POST /v1/shielded_send)",
         input_schema: json!({"type":"object","properties":{"anchor":{"type":"string"},"nullifier":{"type":"string"},"cm_outs":{"type":"array","items":{"type":"string"}},"proof":{"type":"string"},"fee":{"type":"string"}},"required":["anchor","nullifier","cm_outs","proof","fee"]}),
     }, shielded_send);
@@ -231,7 +258,7 @@ pub fn register(registry: &mut ToolRegistry) {
 
     registry.register(ToolDef {
         name: "flux_sigil_wallet_send",
-        description: "Send SIGIL/tokens. SIGNS locally with the caller's secret (ed25519, sigil-api auth). By DEFAULT only PROPOSES (returns the signed request ready to POST). Pass \"broadcast\": true to submit to sigil-api's POST /api/v1/send (confirmed live route — from/to/amount/token/sig/req_nonce). Args: from (hex), to (hex), amount (int), secret (hex), token (default 'SIGIL'), nonce (default now ms), broadcast (default false).",
+        description: "⚠ RETIRED (2026-08-23): transparent peer-to-peer sends are dead network-wide — POST /api/v1/send now unconditionally refuses every request (sigil_tx::SHIELDED_ONLY_HEIGHT == 0). SIGNS locally with the caller's secret and, with \"broadcast\": true, still submits so you get the LIVE refusal + guidance back, but it will never actually move value. Use flux_sigil_shield to enter the shielded pool, flux_sigil_shielded_send to pay privately, flux_sigil_unshield to exit — those are the only working transfer paths, and shield/shielded_send/register now propagate via Dandelion++ privacy relay. Args: from (hex), to (hex), amount (int), secret (hex), token (default 'SIGIL'), nonce (default now ms), broadcast (default false).",
         input_schema: json!({"type":"object","properties":{
             "from":{"type":"string"},"to":{"type":"string"},"amount":{"type":"integer"},
             "secret":{"type":"string"},"token":{"type":"string","default":"SIGIL"},
@@ -333,11 +360,35 @@ fn shield_plan(a: &Value) -> String {
     .to_string()
 }
 
+/// 2026-08-24: `/v1/shielded/register` and `/v1/shield` became wallet-signature-
+/// authenticated (previously anyone could name any wallet — see sigil-api's own
+/// changelog for that fix); this tool predates that and never sent a `secret` to
+/// sign with. Both now sign locally, same pattern as `wallet_send`, so the
+/// caller's `secret` never leaves the process — only the resulting signature does.
 fn shielded_register(a: &Value) -> String {
+    use ed25519_dalek::{Signer, SigningKey};
+    let wallet = arg_str(a, "wallet", "");
+    let pk_shield = arg_str(a, "pk_shield", "");
+    let pk_encrypt = arg_str(a, "pk_encrypt", "");
+    let fee = arg_str(a, "fee", "0");
+    let secret = arg_str(a, "secret", "");
+    let nonce = arg_u64(a, "nonce", now_ms());
+    if wallet.is_empty() || pk_shield.is_empty() || pk_encrypt.is_empty() || secret.is_empty() {
+        return json!({"ok": false, "error": "wallet, pk_shield, pk_encrypt, secret required"}).to_string();
+    }
+    let sk_bytes = match hex::decode(&secret).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        Some(b) => b,
+        None => return json!({"ok": false, "error": "secret must be 32-byte hex"}).to_string(),
+    };
+    let sk = SigningKey::from_bytes(&sk_bytes);
+    if hex::encode(sk.verifying_key().as_bytes()) != wallet.to_lowercase() {
+        return json!({"ok": false, "error": "secret does not match `wallet`"}).to_string();
+    }
+    let msg = format!("{AUTH_DOMAIN}|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={nonce}");
+    let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
     let body = json!({
-        "wallet": arg_str(a, "wallet", ""),
-        "pk_shield": arg_str(a, "pk_shield", ""),
-        "fee": arg_str(a, "fee", "0"),
+        "wallet": wallet, "pk_shield": pk_shield, "pk_encrypt": pk_encrypt,
+        "fee": fee, "sig": sig, "req_nonce": nonce,
     });
     match post("/v1/shielded/register", &body.to_string()) {
         Ok(b) => b,
@@ -346,12 +397,27 @@ fn shielded_register(a: &Value) -> String {
 }
 
 fn shield_submit(a: &Value) -> String {
-    let body = json!({
-        "from": arg_str(a, "from", ""),
-        "amount": arg_str(a, "amount", "0"),
-        "cm": arg_str(a, "cm", ""),
-        "fee": arg_str(a, "fee", "0"),
-    });
+    use ed25519_dalek::{Signer, SigningKey};
+    let from = arg_str(a, "from", "");
+    let amount = arg_str(a, "amount", "0");
+    let cm = arg_str(a, "cm", "");
+    let fee = arg_str(a, "fee", "0");
+    let secret = arg_str(a, "secret", "");
+    let nonce = arg_u64(a, "nonce", now_ms());
+    if from.is_empty() || cm.is_empty() || amount == "0" || secret.is_empty() {
+        return json!({"ok": false, "error": "from, amount, cm, secret required"}).to_string();
+    }
+    let sk_bytes = match hex::decode(&secret).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        Some(b) => b,
+        None => return json!({"ok": false, "error": "secret must be 32-byte hex"}).to_string(),
+    };
+    let sk = SigningKey::from_bytes(&sk_bytes);
+    if hex::encode(sk.verifying_key().as_bytes()) != from.to_lowercase() {
+        return json!({"ok": false, "error": "secret does not match `from` wallet"}).to_string();
+    }
+    let msg = format!("{AUTH_DOMAIN}|shield|{from}|{amount}|{cm}|{fee}|nonce={nonce}");
+    let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+    let body = json!({"from": from, "amount": amount, "cm": cm, "fee": fee, "sig": sig, "req_nonce": nonce});
     match post("/v1/shield", &body.to_string()) {
         Ok(b) => b,
         Err(e) => json!({"ok": false, "error": e, "endpoint": "/v1/shield"}).to_string(),

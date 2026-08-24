@@ -8,13 +8,23 @@
 //!
 //! What's REAL right now vs the one marked seam:
 //!   • node_restart / node_deploy / benchmark → real (ssh + process control,
-//!     same mechanism as `flux_nodeswarm_*`).
+//!     same mechanism as `flux_nodeswarm_*`). node_restart/node_deploy default
+//!     to Epsilon (89.149.241.126) as of 2026-08-23 — Delta is permanently gone.
 //!   • dex_swap → real constant-product math (the exact quote sigil-dex computes:
 //!     amount_out, price impact, LP + master + operator fee split).
-//!   • txn_send / deploy / batch → construct the REAL signed-tx / token-deploy
-//!     descriptor (fields + deterministic id). **Broadcast** is the one seam:
-//!     the SIGIL node is P2P-only until its `:8181` JSON-RPC lands, so these
-//!     return the ready-to-broadcast artifact + the wire point, not a txid.
+//!   • txn_send / deploy / batch → construct a descriptor (fields + deterministic
+//!     preview id) but do NOT actually sign or broadcast it. **This is still a
+//!     real gap, not a stale comment any more**: `sigil-api`'s money API HAS
+//!     been live on `:18181` since 2026-08-17 (the old "SIGIL node is P2P-only"
+//!     reasoning is out of date), but these three tools' schemas never gained a
+//!     `secret` parameter, so there is nothing here to sign WITH. Moot for
+//!     `POST /api/v1/send` specifically now anyway: it's RETIRED (2026-08-23,
+//!     transparent sends unconditionally refused network-wide). The only live
+//!     transfer paths are the shielded family — `flux_sigil_shield`,
+//!     `flux_sigil_shielded_send`, `flux_sigil_unshield`, `flux_sigil_shielded_
+//!     register` — which (2026-08-24) also propagate via Dandelion++ privacy
+//!     relay. Treat these three as preview-only by design and point anyone who
+//!     wants a real transfer at the shielded tools instead.
 //!
 //! Tools:
 //!   flux_sigil_dex_swap      quote/route a constant-product swap (fees split 3 ways)
@@ -30,9 +40,13 @@ use serde_json::{json, Value};
 
 use crate::handlers::{safe_cmd_charset, safe_host, ToolDef, ToolRegistry};
 
-/// Default SIGIL node host (Delta — never Epsilon production).
+/// Default SIGIL node host.
+/// 2026-08-23: was Delta (5.79.79.158) — Delta is PERMANENTLY GONE (operator-
+/// confirmed 2026-08-16; see the `sigil` skill / `project_sigil_delta_gone_epsilon_standing`
+/// memory). Epsilon is now the only live SIGIL box, so it's the correct default
+/// — calling these tools with no `host=` used to SSH into a dead IP and hang.
 /// SEC-019: env-overridable (`FLUX_SIGIL_HOST`) so the IP isn't hardcoded.
-const DEFAULT_SIGIL_HOST: &str = "5.79.79.158";
+const DEFAULT_SIGIL_HOST: &str = "89.149.241.126";
 fn default_sigil_host() -> String {
     std::env::var("FLUX_SIGIL_HOST")
         .ok()
@@ -200,7 +214,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_sigil_node_restart",
-            description: "Restart sigil-node on a host (graceful). Args: [host=Delta], [via=process|systemd].",
+            description: "Restart sigil-node on a host (graceful). Args: [host=Epsilon 89.149.241.126 — Delta is permanently gone], [via=process|systemd, defaults to systemd on Epsilon].",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -213,7 +227,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_sigil_node_deploy",
-            description: "Deploy a sigil-node binary to a host (scp) and (re)launch it. Args: host, binary_path, [launch_cmd].",
+            description: "Deploy a sigil-node binary to a host (scp) and (re)launch it. Only meaningful for a non-Epsilon host — Epsilon builds in place, see flux_sigil_node_restart. Args: host, binary_path, [launch_cmd].",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -259,7 +273,7 @@ fn sigil_dex_swap(a: &Value) -> String {
         ri + ain, ro - amount_out,
         json!({"amount_out": amount_out, "to_user": to_user, "price_impact_pct": impact,
                "lp_fee": lp_fee, "master_fee": master_fee, "operator_fee": operator_fee,
-               "broadcast": "pending sigil-node :8181 JSON-RPC"})
+               "broadcast": "NOT wired — this tool has no secret param to sign with. Also: /api/v1/send is retired (transparent sends dead network-wide); use flux_sigil_shield/_shielded_send/_unshield for a real transfer"})
     )
 }
 
@@ -285,8 +299,9 @@ fn sigil_txn_send(a: &Value) -> String {
     let id = preview_id(&[&from, &to, &amount.to_string(), &token]);
     format!(
         "⬡ SIGIL SignedTx::Send — built + ready to broadcast\n{}\n\
-         → SIGN with the agent's SQIsign-L5 key, then broadcast on /sigil/g0/txs\n\
-         → BROADCAST SEAM: sigil-node is P2P-only; wire to :8181 JSON-RPC `submit_tx` when it lands.",
+         → preview only — this tool has no secret param to sign with (see module doc).\n\
+         → for a REAL transfer today: transparent sends are retired network-wide (POST /api/v1/send refuses every request). \
+         Use flux_sigil_shield to enter the shielded pool, flux_sigil_shielded_send to pay privately, flux_sigil_unshield to exit.",
         json!({
             "kind": "Send", "from": from, "to": to, "amount": amount, "token": token, "fee": fee,
             "preview_id": id, "network_id": "sigil-g0", "mandate": mandate, "mandate_remaining": remaining.to_string(),
@@ -310,7 +325,7 @@ fn sigil_deploy(a: &Value) -> String {
     format!(
         "⬡ SIGIL token deploy — built\n{}\n\
          → emits a DeployToken event committed in the contract_state_root.\n\
-         → BROADCAST SEAM: submit via :8181 when live (same as txn_send).",
+         → preview only — no broadcast path wired for token deploys yet (same schema gap as txn_send).",
         json!({
             "kind": "DeployToken", "name": name, "symbol": symbol,
             "supply": supply, "decimals": decimals, "supply_base_units": base_units.to_string(),
@@ -329,7 +344,7 @@ fn sigil_batch(a: &Value) -> String {
     format!(
         "⬡ SIGIL batch — {} ops bundled into ONE atomic transition (commit-or-nothing)\n{}\n\
          → all-or-nothing via commit_state_transition; one set of 4 committed roots for the whole batch.\n\
-         → BROADCAST SEAM: submit the bundle via :8181 when live.",
+         → preview only — no broadcast path wired for batches yet (same schema gap as txn_send).",
         ops.len(),
         json!({ "kind": "BatchTransition", "op_count": ops.len(), "ops": ops,
                 "atomicity": "commit-or-nothing", "preview_id": id, "network_id": "sigil-g0" })
@@ -381,11 +396,19 @@ fn sigil_node_restart(a: &Value) -> String {
     if !safe_host(&host) {
         return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
     }
-    let via = arg_str(a, "via", "process");
+    // 2026-08-23: default `via` used to be "process" (a launch-script relaunch
+    // that only ever existed on the now-gone Delta). Epsilon — the only real
+    // target since Delta's retirement — runs sigil-node under systemd
+    // (`sigil-node.service`), so that's the correct default whenever the host
+    // resolves to Epsilon. Other/future hosts still fall back to "process".
+    let default_via = if host == "89.149.241.126" { "systemd" } else { "process" };
+    let via = arg_str(a, "via", default_via);
     let remote = if via == "systemd" {
         "systemctl restart sigil-node && sleep 2 && systemctl is-active sigil-node".to_string()
     } else {
         // graceful: SIGTERM the running node, then relaunch via its launch script
+        // (Delta-era pattern — /home/orobit/sigil-data/launch-delta.sh does not
+        // exist on Epsilon; use via="systemd" there).
         "pkill -TERM -f 'sigil-node start'; sleep 2; \
          (setsid bash /home/orobit/sigil-data/launch-delta.sh >/home/orobit/sigil-data/delta.log 2>&1 & ) ; \
          sleep 2; pgrep -af 'sigil-node start' | head -1"
@@ -404,6 +427,16 @@ fn sigil_node_deploy(a: &Value) -> String {
     }
     if !safe_host(&host) {
         return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
+    }
+    // 2026-08-23: the scp+launch-script flow below is a Delta-era pattern.
+    // Epsilon builds sigil-node IN PLACE (fluxc build --release -p sigil-node
+    // directly on the box, capped via systemd-run — see the `sigil` skill) and
+    // restarts it via `sigil_node_restart {via:"systemd"}`; there is no
+    // launch-delta.sh on Epsilon and no reason to scp a binary to itself.
+    if host == "89.149.241.126" {
+        return "error: this tool's scp+launch-script flow is Delta-era and doesn't apply to Epsilon. \
+                Build in place (fluxc build --release -p sigil-node, resource-capped) and use \
+                flux_sigil_node_restart {via:\"systemd\"} to pick up the new binary.".into();
     }
     // SEC-001: `launch` is interpolated into the remote shell string below.
     // Restrict it to a binary path + plain flags — every shell metacharacter
@@ -580,13 +613,19 @@ fn sigil_mandate_close(a: &Value) -> String {
 fn sigil_agent_panel(a: &Value) -> String {
     let wallet = arg_str(a, "wallet", "");
     let bal = if wallet.len() == 64 {
+        // 2026-08-23: this was hardcoded to :8099 (sigil-rpcd, permanently
+        // retired 2026-08-17) — always failed regardless of chain health.
+        // Share the same FLUX_SIGIL_RPC-driven base the rest of the SIGIL
+        // wallet surface uses (default now :18181, sigil-api, the real
+        // live backend).
+        let base = crate::handlers::sigil_wallet::rpc_base();
         std::process::Command::new("curl")
             .args(["-s", "--max-time", "4",
-                   &format!("http://127.0.0.1:8099/api/v1/balance?wallet={wallet}")])
+                   &format!("{base}/api/v1/balance?wallet={wallet}")])
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_else(|| "rpcd unreachable".into())
+            .unwrap_or_else(|| format!("sigil-api unreachable at {base}"))
     } else {
         "(pass wallet=64-hex for balance)".into()
     };

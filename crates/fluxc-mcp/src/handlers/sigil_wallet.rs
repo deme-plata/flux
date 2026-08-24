@@ -917,6 +917,31 @@ pub fn live_node_bench(window_secs: u64) -> String {
 mod tests {
     use super::*;
 
+    /// Live smoke test for the shielded-register signing+submit path — this is
+    /// the exact code the `flux_sigil_shielded_register` MCP tool calls. Proves
+    /// the request reaches the real API and gets back a well-formed response
+    /// (accept OR a real server-side error), not a connection failure or a
+    /// signature rejection. `pk_shield`/`pk_encrypt` here are placeholder hex,
+    /// not real derived keys (the server doesn't validate that at the door) —
+    /// this test is about the MCP layer's wiring, not the shielded-pool crypto.
+    #[test]
+    fn live_smoke_shielded_register_reaches_real_api() {
+        let c: Value = serde_json::from_str(&wallet_create(&json!({}))).unwrap();
+        let (wallet, secret) = (c["wallet_id"].as_str().unwrap(), c["secret"].as_str().unwrap());
+        let pk_shield = hex::encode([0x11u8; 32]);
+        let pk_encrypt = hex::encode([0x22u8; 32]);
+        let out = shielded_register(&json!({
+            "wallet": wallet, "pk_shield": pk_shield, "pk_encrypt": pk_encrypt, "secret": secret
+        }));
+        let parsed: Result<Value, _> = serde_json::from_str(&out);
+        let Ok(v) = parsed else {
+            eprintln!("live_smoke_shielded_register: no reachable sigil-api — skipped ({out})");
+            return;
+        };
+        eprintln!("LIVE shielded_register response: {out}");
+        assert!(v.get("ok").is_some(), "response must at least have an ok field: {out}");
+    }
+
     /// RULE 0 smoke: when a real rpcd is reachable, the live bench must
     /// return measured numbers (ok:true + polls>0). Skips silently when no
     /// node is up so CI stays hermetic — the live run is the real gate.

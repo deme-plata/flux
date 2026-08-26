@@ -22,6 +22,40 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
+/// Where flux-db's own diagnostics go.
+///
+/// WHY THIS EXISTS (operator-reported, 2026-08-26): these were raw `db_eprintln!`,
+/// which write straight onto the terminal. That is fine for a CLI, but
+/// `sigil-top` is a full-screen ratatui TUI that OWNS the screen — a stray
+/// stderr write lands in the middle of the frame and garbles it. A real SST
+/// read error (`failed to fill whole buffer`) rendered as corrupted text
+/// spliced through the sync card, which looks like a UI bug and hides the
+/// actual error. Diagnostics must not be able to damage a host's display.
+///
+/// Resolution order, so nothing silently loses errors:
+///   * `FLUX_DB_LOG=<path>` — append there (what a TUI host sets)
+///   * `FLUX_DB_QUIET`      — drop it (already honored at one site; now global)
+///   * otherwise            — `db_eprintln!`, i.e. today's behavior, unchanged
+fn db_log(msg: &str) {
+    if let Some(path) = std::env::var_os("FLUX_DB_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+            return;
+        }
+        // Fall through to stderr if the log file cannot be opened — an
+        // unwritable path must not silently swallow a storage error.
+    }
+    if std::env::var_os("FLUX_DB_QUIET").is_some() {
+        return;
+    }
+    eprintln!("{msg}");
+}
+
+macro_rules! db_eprintln {
+    ($($arg:tt)*) => { crate::db_log(&format!($($arg)*)) };
+}
+
 // v0.37: background/async compaction (918a3b2e) renames a merge's outputs into
 // place, invalidates the shared SST-path cache, THEN deletes the old inputs one
 // at a time -- a reader whose pread() (index build or block read) lands on one
@@ -381,7 +415,7 @@ impl Database {
             if let Ok(m) = fs::metadata(&wal_path) {
                 if m.len() > wal_quarantine_bytes {
                     let q = path.join(format!("flux.wal.quarantined-{}", m.len()));
-                    eprintln!("[flux-db] WAL is {} bytes (cap {}) — quarantining to {:?}; resuming from last checkpoint",
+                    db_eprintln!("[flux-db] WAL is {} bytes (cap {}) — quarantining to {:?}; resuming from last checkpoint",
                         m.len(), wal_quarantine_bytes, q);
                     let _ = fs::rename(&wal_path, &q);
                 }
@@ -606,7 +640,7 @@ impl Database {
         let inline = wal_bytes > max.saturating_mul(4) || !self.flush_background();
         if inline {
             if let Err(e) = self.flush() {
-                eprintln!(
+                db_eprintln!(
                     "flux-db: auto-flush at {} WAL bytes (threshold {}) failed: {} — \
                      continuing; data is safe in WAL+memtable",
                     wal_bytes, max, e
@@ -1584,7 +1618,7 @@ impl Database {
                     let _ = fs::remove_file(&tmp_path);
                     // Keep the fat WAL — correctness unaffected, only the counter stays high.
                     if std::env::var_os("FLUX_DB_QUIET").is_none() {
-                        eprintln!("[flux-db] wal rewrite skipped: {e}");
+                        db_eprintln!("[flux-db] wal rewrite skipped: {e}");
                     }
                 }
             }
@@ -2065,7 +2099,7 @@ impl SstReader {
         if version == 2 {
             let true_body = flen.saturating_sub(payload_off);
             if true_body != payload_len as u64 && true_body % (1u64 << 32) == payload_len as u64 {
-                eprintln!("[flux-db] v2 SST {} : u32-wrapped body length recovered ({} -> {} bytes)",
+                db_eprintln!("[flux-db] v2 SST {} : u32-wrapped body length recovered ({} -> {} bytes)",
                     path.display(), payload_len, true_body);
                 payload_len = true_body as usize;
             }
@@ -2107,7 +2141,7 @@ impl SstReader {
             match read {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("[flux-db] lazy SST payload read failed {}: {e}", self.path.display());
+                    db_eprintln!("[flux-db] lazy SST payload read failed {}: {e}", self.path.display());
                     Vec::new()
                 }
             }
@@ -2209,13 +2243,13 @@ impl SstReader {
                         Ok(Some(kv)) => out.push(kv),
                         Ok(None) => break,
                         Err(e) => {
-                            eprintln!("[flux-db] pairs() stream error on {}: {}", self.path.display(), e);
+                            db_eprintln!("[flux-db] pairs() stream error on {}: {}", self.path.display(), e);
                             break;
                         }
                     }
                 },
                 Err(e) => {
-                    eprintln!("[flux-db] pairs() stream open error on {}: {}", self.path.display(), e);
+                    db_eprintln!("[flux-db] pairs() stream open error on {}: {}", self.path.display(), e);
                 }
             }
             return out;
@@ -2254,7 +2288,7 @@ impl SstReader {
                     SstIndex::empty()
                 }
                 Err(e) => {
-                    eprintln!("[flux-db] SST index parse failed {}: {}", self.path.display(), e);
+                    db_eprintln!("[flux-db] SST index parse failed {}: {}", self.path.display(), e);
                     SstIndex::empty()
                 }
             }
@@ -2878,7 +2912,7 @@ impl Database {
                 .filter_map(|h| fs::metadata(&h.path).ok().map(|m| m.len()))
                 .sum();
             if compact_cap > 0 && input_bytes > compact_cap {
-                eprintln!("[flux-db] compact SKIP at L{}: {} input bytes > FLUX_DB_COMPACT_MAX_BYTES {}",
+                db_eprintln!("[flux-db] compact SKIP at L{}: {} input bytes > FLUX_DB_COMPACT_MAX_BYTES {}",
                     current_level, input_bytes, compact_cap);
                 break;
             }
@@ -2893,7 +2927,7 @@ impl Database {
             // FLUX_DB_QUIET=1 suppresses progress chatter (NOT errors): a fullscreen-TUI
             // host (sigil-top) sets it — raw stderr prints corrupt the alternate screen.
             if std::env::var_os("FLUX_DB_QUIET").is_none() {
-                eprintln!("[flux-db] compact L{}->L{}: merging {} tables ({} MiB) ...",
+                db_eprintln!("[flux-db] compact L{}->L{}: merging {} tables ({} MiB) ...",
                     current_level, current_level + 1, at_level.len(), input_bytes / (1024*1024));
             }
 
@@ -2967,7 +3001,7 @@ impl Database {
                 }
             }
             if std::env::var_os("FLUX_DB_QUIET").is_none() {
-                eprintln!("[flux-db] compact L{}->L{}: done in {:.1}s",
+                db_eprintln!("[flux-db] compact L{}->L{}: done in {:.1}s",
                     current_level, current_level + 1, t_compact.elapsed().as_secs_f64());
             }
             // Keep iterating — out_level may now exceed its own threshold.
@@ -3198,6 +3232,47 @@ impl BloomFilter {
 
 #[cfg(test)]
 mod tests {
+
+    /// Storage diagnostics must never be able to corrupt a host's display.
+    ///
+    /// REGRESSION (operator-reported, 2026-08-26): these were raw `eprintln!`.
+    /// `sigil-top` is a full-screen ratatui TUI that owns the terminal, so a
+    /// real SST read error rendered as corrupted text spliced through the sync
+    /// card — it looked like a UI bug AND hid the storage error. `FLUX_DB_LOG`
+    /// sends them to a file instead. Env is process-global, so this test holds
+    /// a lock and restores what it found (the codebase has been bitten by
+    /// tests racing the process env before).
+    #[test]
+    fn diagnostics_follow_flux_db_log_instead_of_the_terminal() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_log = std::env::var_os("FLUX_DB_LOG");
+        let prev_quiet = std::env::var_os("FLUX_DB_QUIET");
+
+        let path = std::env::temp_dir().join(format!("flux_db_log_test_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("FLUX_DB_LOG", &path);
+        std::env::remove_var("FLUX_DB_QUIET");
+
+        db_log("[flux-db] SST read failed: failed to fill whole buffer");
+        db_log("[flux-db] second line");
+
+        let body = std::fs::read_to_string(&path).expect("FLUX_DB_LOG file must be written");
+        assert!(body.contains("failed to fill whole buffer"), "the real error must be preserved, not swallowed: {body:?}");
+        assert_eq!(body.lines().count(), 2, "each diagnostic is one line, appended");
+
+        // QUIET drops output entirely — but only when no log file is configured,
+        // because losing a storage error silently is worse than a stray line.
+        std::env::remove_var("FLUX_DB_LOG");
+        std::env::set_var("FLUX_DB_QUIET", "1");
+        db_log("[flux-db] must not appear anywhere");
+        let after = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(after.lines().count(), 2, "QUIET must not append to a file it was not given");
+
+        let _ = std::fs::remove_file(&path);
+        match prev_log { Some(v) => std::env::set_var("FLUX_DB_LOG", v), None => std::env::remove_var("FLUX_DB_LOG") }
+        match prev_quiet { Some(v) => std::env::set_var("FLUX_DB_QUIET", v), None => std::env::remove_var("FLUX_DB_QUIET") }
+    }
     use super::*;
 
     #[test]
@@ -4727,7 +4802,7 @@ mod tests {
         sampler.join().unwrap();
 
         let peak_delta_kb = peak.load(Ordering::Relaxed).saturating_sub(rss_before);
-        eprintln!(
+        db_eprintln!(
             "[1gb-wal] file={} MiB  rss_before={} MiB  peak_delta={} MiB  memtable={} keys",
             file_len / 1048576, rss_before / 1024, peak_delta_kb / 1024, mt.len()
         );

@@ -284,6 +284,28 @@ pub struct FluxSwarmManager {
     /// Currently-connected peers, shared so NetworkManager::connected_peers can
     /// read it. Tracked from ConnectionEstablished/ConnectionClosed.
     pub connected: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<PeerId>>>,
+    /// 2026-08-23 (grogu-halfdead-connection): consecutive ping FAILURES per
+    /// peer. libp2p's `ping::Behaviour` does not close a connection on its own
+    /// when pings fail — it only emits an event — so without this, a
+    /// half-dead connection (TCP socket still ESTABLISHED at the kernel level,
+    /// e.g. after a silent NAT rebind or a black-holed path with no RST/FIN)
+    /// stays in `connected` FOREVER: `ConnectionClosed` never fires because
+    /// nothing ever tells the swarm the connection is bad. Every subsequent
+    /// backfill request queued onto it vanishes with no server-side trace and
+    /// no client-side error — indistinguishable from the peer just being slow,
+    /// except it never recovers. Proven live: sigil-top would resync fast in
+    /// bursts after a fresh process start, then permanently wedge at the same
+    /// height until manually restarted — restarting forces a fresh TCP dial,
+    /// which is the ONLY thing that was actually fixing it. See
+    /// `handle_swarm_event`'s Ping arm for the actual disconnect logic this
+    /// field drives.
+    ping_failures: HashMap<PeerId, u32>,
+    /// 2026-08-23 (grogu-halfdead-substream): consecutive `OutboundFailure`
+    /// events per peer, specifically for the backfill request_response
+    /// protocol. Separate from `ping_failures` because this failure mode is
+    /// independent of ping health — see the `OutboundFailure` arm in
+    /// `handle_swarm_event` for the full story and live evidence.
+    outbound_req_failures: HashMap<PeerId, u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -498,7 +520,16 @@ impl FluxSwarmManager {
 
         // Bootstrap Kademlia from configured peers
         for addr in &config.bootstrap_peers {
-            kademlia.add_address(&extract_peer_id_from_addr(addr).unwrap_or(local_peer_id), addr.clone());
+            // 2026-08-26 (rocky-win): a BARE bootstrap multiaddr (no /p2p/<id> - the
+            // documented, id-rotation-immune form the sigil launchers use) has no peer
+            // id to extract, and `.unwrap_or(local_peer_id)` filed the remote address
+            // under OUR OWN peer id, poisoning our Kademlia self-entry with a host we
+            // are not. Skip instead: Identify learns the real id post-handshake and
+            // Kademlia adopts the address then, which is the intended path anyway.
+            match extract_peer_id_from_addr(addr) {
+                Some(pid) => { kademlia.add_address(&pid, addr.clone()); }
+                None => tracing::debug!(%addr, "bare bootstrap multiaddr - id learned via Identify"),
+            }
         }
 
         // Build identify
@@ -514,12 +545,31 @@ impl FluxSwarmManager {
         // Build request-response (point-to-point backfill). Custom BackfillCodec
         // (raw opaque Vec<u8>, 64 MiB cap) instead of libp2p's built-in cbor codec,
         // whose response cap is a hardcoded 10 MiB const — too small for big
-        // backfill chunks. 30s request timeout.
+        // backfill chunks.
+        //
+        // 2026-08-23 (grogu-sync-stall): this MUST stay <= every caller's own
+        // give-up timeout (sigil-top's block_sync REQ_TIMEOUT = 10s). It was 30s.
+        // `outbound_waiters` (below) is only ever cleared by a libp2p
+        // Message::Response or OutboundFailure event — there is NO app-side
+        // cancellation path when the caller's own `tokio::time::timeout` drops
+        // the future early. With a 30s internal timeout vs a 10s caller timeout,
+        // every request the caller gives up on stayed "in flight" inside libp2p
+        // for up to 20s AFTER the app had already reissued a fresh one for the
+        // same range. sigil-top's frontier fetch reissues up to 5 requests every
+        // ~2s cycle on timeout, so those zombie requests piled up 10-15x deep per
+        // logical slot, permanently exhausting that peer connection's concurrent
+        // request/stream budget — a specific, repeatedly-firing peer would then
+        // NEVER again answer that request pattern (proven live: 24,900+ requests,
+        // 100% timeout, zero server-side trace, while a lower-volume serial
+        // request lane over the SAME connection kept working). Set to 8s — safely
+        // under the 10s caller timeout — so libp2p's own cleanup always fires
+        // before (or right alongside) the caller gives up, and a slot is truly
+        // free by the time it's reissued.
         let request_response = request_response::Behaviour::<BackfillCodec>::with_codec(
             BackfillCodec,
             [(StreamProtocol::new(BACKFILL_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
-                .with_request_timeout(Duration::from_secs(30)),
+                .with_request_timeout(Duration::from_secs(8)),
         );
 
         // Assemble behaviour
@@ -568,6 +618,8 @@ impl FluxSwarmManager {
                 next_inbound_id: 1,
                 outbound_waiters: HashMap::new(),
                 connected: std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
+                ping_failures: HashMap::new(),
+                outbound_req_failures: HashMap::new(),
             },
             event_rx,
         ))
@@ -894,16 +946,39 @@ impl FluxSwarmManager {
                         .unwrap_or_default()
                         .as_millis() as u64;
 
-                    self.peers.insert(peer_id, PeerInfo {
-                        peer_id: peer_id.to_string(),
-                        multiaddr: info.listen_addrs.first()
-                            .map(|a| a.to_string())
-                            .unwrap_or_default(),
-                        connected_since_ms: now_ms,
-                        last_seen_ms: now_ms,
-                        protocols: info.protocols.iter().map(|p| p.to_string()).collect(),
-                        agent_version: info.agent_version.clone(),
-                    });
+                    // BUGFIX 2026-08-20 (mesh-maintenance duplicate-connection bug): this used
+                    // to REPLACE the whole PeerInfo, clobbering `multiaddr` — set correctly at
+                    // ConnectionEstablished from `endpoint.get_remote_address()` (the actual
+                    // dialed/observed TCP endpoint) — with `info.listen_addrs.first()`, the
+                    // REMOTE peer's own SELF-REPORTED listen address(es) (their local bind
+                    // config, e.g. literally "/ip4/0.0.0.0/tcp/9501", or a loopback/wrong
+                    // interface if `.first()` didn't pick the routable one). That value is not
+                    // guaranteed to match the endpoint we actually connected to. Once
+                    // overwritten (which happens within moments of every connection, since
+                    // identify runs immediately), the mesh-maintenance redial timer's
+                    // dedup-by-endpoint check (`ip_tcp_endpoint` comparison against
+                    // `bootstrap_peers_cache` in lib.rs) permanently stopped recognizing this
+                    // peer as "already connected" and kept re-dialing forever — reproduced live
+                    // as 8 simultaneous duplicate connections to one peer (`ss -tnp` on
+                    // Epsilon while a fresh happysrv node tried to resync). Fix: identify only
+                    // ever updates protocols/agent_version/last_seen_ms; `multiaddr` and
+                    // `connected_since_ms` stay whatever ConnectionEstablished set.
+                    self.peers.entry(peer_id)
+                        .and_modify(|pi| {
+                            pi.protocols = info.protocols.iter().map(|p| p.to_string()).collect();
+                            pi.agent_version = info.agent_version.clone();
+                            pi.last_seen_ms = now_ms;
+                        })
+                        .or_insert_with(|| PeerInfo {
+                            peer_id: peer_id.to_string(),
+                            multiaddr: info.listen_addrs.first()
+                                .map(|a| a.to_string())
+                                .unwrap_or_default(),
+                            connected_since_ms: now_ms,
+                            last_seen_ms: now_ms,
+                            protocols: info.protocols.iter().map(|p| p.to_string()).collect(),
+                            agent_version: info.agent_version.clone(),
+                        });
                 }
             }
             SwarmEvent::Behaviour(FluxBehaviourEvent::Kademlia(ev)) => {
@@ -931,19 +1006,88 @@ impl FluxSwarmManager {
                         request_response::Message::Response { request_id, response } => {
                             if let Some(tx) = self.outbound_waiters.remove(&request_id) {
                                 let _ = tx.send(Ok(response));
+                                // 2026-08-23 (grogu-halfdead-substream, tuning pass): a real
+                                // response landed on THIS peer, but a FULL reset was too
+                                // forgiving in practice — proven live: with several concurrent
+                                // in-flight ranges per peer, occasional unrelated successes
+                                // (a different height's request landing fine) kept wiping the
+                                // streak before it ever reached the threshold, even while ONE
+                                // specific stuck request kept timing out forever. Decay instead
+                                // of zeroing: a healthy connection still trends the counter to 0
+                                // over a run of successes, but a connection that's failing much
+                                // more than it succeeds still accumulates toward the threshold.
+                                if let Some(f) = self.outbound_req_failures.get_mut(&peer) {
+                                    *f = f.saturating_sub(2);
+                                    if *f == 0 { self.outbound_req_failures.remove(&peer); }
+                                }
                             } else {
                                 tracing::warn!(%request_id, "Backfill response for unknown request_id");
                             }
                         }
                     },
-                    request_response::Event::OutboundFailure { request_id, error, .. } => {
+                    request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                         if let Some(tx) = self.outbound_waiters.remove(&request_id) {
                             let _ = tx.send(Err(error.to_string()));
                         }
                         tracing::warn!(%request_id, %error, "Backfill outbound failure");
+                        // 2026-08-23 (grogu-halfdead-substream): the actual root cause behind a
+                        // recurring sync-stall pattern — proven live, not theoretical. A
+                        // connection can go substream-specific-broken (request_response
+                        // timeouts pile up) WHILE ping keeps succeeding fine (ping and
+                        // request_response are independent protocols multiplexed over the
+                        // same yamux connection — a stuck/exhausted substream in ONE protocol
+                        // does not touch the other). So the ping-based half-dead-connection
+                        // detector above does NOT catch this failure mode; confirmed live
+                        // (0 ping-triggered disconnects while backfill sat at 85-90% outbound
+                        // failure for minutes, even over a LOOPBACK connection on the same
+                        // machine — ruling out a real network-path cause and pointing at
+                        // something in libp2p's request_response/yamux substream accounting).
+                        // Track failures on the signal that's actually failing, net of the
+                        // decay applied on success above. Threshold lowered 10→6 (tuning pass,
+                        // same session): with several concurrent in-flight ranges per peer and
+                        // decay-not-reset on success, 6 net failures already means this peer is
+                        // losing far more requests than it's winning — waiting for 10 let a
+                        // confirmed-stuck sync sit at 97.5% (49,718 blocks from tip) for
+                        // several minutes before this fired even once, live.
+                        let failures = self.outbound_req_failures.entry(peer).or_insert(0);
+                        *failures += 1;
+                        if *failures >= 6 {
+                            tracing::warn!(%peer, consecutive_failures = *failures,
+                                "6 net backfill request failures — request_response \
+                                 substream likely wedged (ping still healthy); tearing down \
+                                 connection so bootstrap redial gets a fresh one");
+                            self.outbound_req_failures.remove(&peer);
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                        }
                     }
-                    request_response::Event::InboundFailure { request_id, error, .. } => {
-                        tracing::warn!(%request_id, %error, "Backfill inbound failure");
+                    request_response::Event::InboundFailure { peer, request_id, error, .. } => {
+                        // 2026-08-26: the responder-side mirror of the 2026-08-23
+                        // half-dead-substream fix above. That fix only tracked
+                        // OutboundFailure (this node asking a peer and not getting a
+                        // response) — InboundFailure (this node BEING asked, and
+                        // failing to get its response out before timeout) was logged
+                        // and otherwise ignored, with no counter and no recovery.
+                        // Live-observed on happysrv (2026-08-26): a peer wedged on the
+                        // inbound side spammed "Backfill inbound failure" continuously
+                        // (98% of a 2000-line log window) with zero self-healing,
+                        // while the node kept producing independently — the likely
+                        // mechanism behind the supply divergence measured against
+                        // Epsilon that same day. Same underlying signal (this peer's
+                        // request_response substream is broken), same fix: accumulate
+                        // into the same net-failure counter used for outbound, and
+                        // tear the connection down past threshold so bootstrap redial
+                        // gets a fresh substream instead of a permanently wedged one.
+                        tracing::warn!(%peer, %request_id, %error, "Backfill inbound failure");
+                        let failures = self.outbound_req_failures.entry(peer).or_insert(0);
+                        *failures += 1;
+                        if *failures >= 6 {
+                            tracing::warn!(%peer, consecutive_failures = *failures,
+                                "6 net backfill failures (inbound) — request_response \
+                                 substream likely wedged (ping still healthy); tearing down \
+                                 connection so bootstrap redial gets a fresh one");
+                            self.outbound_req_failures.remove(&peer);
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                        }
                     }
                     request_response::Event::ResponseSent { .. } => { /* ignore */ }
                 }
@@ -952,8 +1096,37 @@ impl FluxSwarmManager {
                 #[allow(irrefutable_let_patterns)]
                 if let ping::Event { peer, result, .. } = ev {
                     match result {
-                        Ok(rtt) => tracing::trace!(%peer, rtt_ms = rtt.as_millis(), "Ping ok"),
-                        Err(e) => tracing::warn!(%peer, %e, "Ping failed"),
+                        Ok(rtt) => {
+                            tracing::trace!(%peer, rtt_ms = rtt.as_millis(), "Ping ok");
+                            self.ping_failures.remove(&peer);
+                        }
+                        Err(e) => {
+                            // 2026-08-23 (grogu-halfdead-connection): a ping failure alone
+                            // does NOT mean the peer is gone — a single dropped/delayed ping
+                            // under real network jitter is normal and must not cause churn.
+                            // But ping::Config here is interval=10s/timeout=5s, so TWO
+                            // consecutive failures already means ~15-20s with zero
+                            // successful round-trip on this connection — past that point,
+                            // continuing to trust it (and silently swallowing every
+                            // backfill request queued onto it) is strictly worse than
+                            // tearing it down and letting the swarm's normal bootstrap
+                            // redial establish a fresh, working connection. This is the
+                            // fix for a connection that looks alive at the TCP level
+                            // (ESTABLISHED, no RST/FIN — confirmed live via `ss`) but is
+                            // actually a black hole: nothing else in this codebase ever
+                            // reacts to ping failures, so without this, such a connection
+                            // was permanent until the whole process was restarted.
+                            let failures = self.ping_failures.entry(peer).or_insert(0);
+                            *failures += 1;
+                            tracing::warn!(%peer, %e, consecutive_failures = *failures, "Ping failed");
+                            if *failures >= 2 {
+                                tracing::warn!(%peer, "Ping failed twice in a row — tearing down \
+                                    connection as likely half-dead (TCP alive, protocol dead); \
+                                    normal bootstrap redial will re-establish it");
+                                self.ping_failures.remove(&peer);
+                                let _ = self.swarm.disconnect_peer_id(peer);
+                            }
+                        }
                     }
                 }
             }
@@ -964,6 +1137,8 @@ impl FluxSwarmManager {
                 let addr = endpoint.get_remote_address().to_string();
                 tracing::info!(%peer_id, %addr, "Peer connected");
                 self.connected.write().insert(peer_id);
+                self.ping_failures.remove(&peer_id);
+                self.outbound_req_failures.remove(&peer_id);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -995,6 +1170,8 @@ impl FluxSwarmManager {
                 if num_established == 0 {
                     self.connected.write().remove(&peer_id);
                     self.peers.remove(&peer_id);
+                    self.ping_failures.remove(&peer_id);
+                    self.outbound_req_failures.remove(&peer_id);
                     if let Some(ref rx) = self.event_rx {
                         rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
                     }

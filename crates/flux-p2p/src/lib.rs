@@ -89,9 +89,22 @@ pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 
 /// Firewall-friendly relay bootstrap for networks where tcp/9501 is reachable
 /// from the fleet but blocked or slow from an operator desktop. This is a
-/// socat-fronted Epsilon path that speaks to the same SIGIL node identity.
+/// socat-fronted path that speaks to the same SIGIL node identity, on a
+/// port (853, registered for DNS-over-TLS) that reads as ordinary traffic
+/// to a network filter that treats 9501 as suspicious.
+///
+/// 2026-08-24: added happysrv's relay. Operator-reported live: a Windows
+/// client connected to Epsilon (via its own :853 relay, added earlier) but
+/// never to happysrv, sitting at "mesh 1 peers" indefinitely — confirmed
+/// happysrv itself was healthy and well-meshed (7 peers) via direct SSH,
+/// so the gap was specifically an asymmetric block on the CLIENT's network
+/// against happysrv:9501 with no fallback port to try instead. Same fix as
+/// Epsilon's own :853 relay, same reasoning, mirrored onto happysrv
+/// (`sigil-relay853.service`, verified externally reachable before this
+/// shipped).
 pub const SIGIL_RELAY853_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("epsilon-relay853", "/ip4/89.149.241.126/tcp/853/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
+    ("happysrv-relay853", "/ip4/159.195.108.96/tcp/853/p2p/12D3KooWF5hYvjWRcGAmmwsFDLP69p39zgh3Yuxp2oQ989R57Din"),
 ];
 
 /// v0.57 (sync): well-known path where a sigil-node PRODUCER publishes its libp2p peer-id, so a
@@ -164,6 +177,21 @@ fn ip_tcp_endpoint(ma: &str) -> Option<String> {
     // ["", "ip4"|"ip6", "<ip>", "tcp", "<port>", ...]
     if p.len() >= 5 && (p[1] == "ip4" || p[1] == "ip6") && p[3] == "tcp" {
         Some(format!("/{}/{}/tcp/{}", p[1], p[2], p[4]))
+    } else {
+        None
+    }
+}
+
+/// Host-only form of [`ip_tcp_endpoint`]: `/ip4/<ip>` with the port dropped.
+/// Used to recognise that two bootstrap entries (e.g. the direct `:9501` address
+/// and the firewall-friendly `:853` relay) are the SAME machine, so we never dial
+/// both in parallel. Deliberately IP-based, not peer-id-based: bootstrap nodes
+/// rotate their libp2p identity across restarts, which is exactly why the dial
+/// loop dedupes by endpoint rather than by id.
+fn ip_host(ma: &str) -> Option<String> {
+    let p: Vec<&str> = ma.split("/").collect();
+    if p.len() >= 3 && (p[1] == "ip4" || p[1] == "ip6") {
+        Some(format!("/{}/{}", p[1], p[2]))
     } else {
         None
     }
@@ -516,6 +544,19 @@ impl NetworkManager {
                             let connected_eps: std::collections::HashSet<String> =
                                 swarm.connected_peers().into_iter()
                                     .filter_map(|pi| ip_tcp_endpoint(&pi.multiaddr)).collect();
+                            // 2026-08-26 (rocky-win): also track which HOSTS we already reach.
+                            // The bootstrap list carries two addresses per machine - the direct
+                            // :9501 and the :853 relay - and endpoint-dedup treats them as two
+                            // different peers, so both got dialled every cycle. That is two
+                            // connections to ONE peer id; libp2p prunes the duplicate, and the
+                            // response in flight on the pruned connection dies with it. Measured
+                            // live: 4 connections to 2 peers, 12 disconnects per 4 min; blocking
+                            // :853 at the firewall cut that to 2 connections and 3 disconnects.
+                            // Skipping a host we already reach makes the relay a true FALLBACK:
+                            // a node that genuinely cannot reach :9501 has no connection to that
+                            // host, so it still dials :853 exactly as before.
+                            let connected_hosts: std::collections::HashSet<String> =
+                                connected_eps.iter().filter_map(|e| ip_host(e)).collect();
                             let pool_empty = connected_eps.is_empty();
                             let now = std::time::Instant::now();
                             for addr in &swarm.bootstrap_peers_cache.clone() {
@@ -524,6 +565,12 @@ impl NetworkManager {
                                     if connected_eps.contains(e) {
                                         bootstrap_retry.remove(e);
                                         continue; // already connected here
+                                    }
+                                    // Same machine already reached on another port (direct vs
+                                    // :853 relay) - do not open a second, duplicate connection.
+                                    if ip_host(e).is_some_and(|h| connected_hosts.contains(&h)) {
+                                        bootstrap_retry.remove(e);
+                                        continue;
                                     }
                                 }
                                 let target = ep.clone().unwrap_or_else(|| addr.to_string());
@@ -1320,6 +1367,28 @@ mod tests {
             "/ip4/1.1.1.1/tcp/1/p2p/a".to_string(),
             "/ip4/2.2.2.2/tcp/2/p2p/b".to_string(),
         ]);
+    }
+
+    #[test]
+    fn ip_host_collapses_direct_and_relay_to_one_machine() {
+        // The bootstrap list carries BOTH the direct :9501 address and the :853
+        // relay for the same machine. Endpoint-dedup sees two distinct entries and
+        // used to dial both in parallel => two connections to one peer id => libp2p
+        // prunes one => an in-flight backfill response dies with it. ip_host is what
+        // lets the dial loop recognise them as the same host.
+        let direct = "/ip4/89.149.241.126/tcp/9501";
+        let relay = "/ip4/89.149.241.126/tcp/853";
+        assert_eq!(ip_host(direct).as_deref(), Some("/ip4/89.149.241.126"));
+        assert_eq!(ip_host(direct), ip_host(relay), "direct and relay must collapse to one host");
+
+        // A DIFFERENT machine must stay distinct, or we would starve the mesh.
+        let other = "/ip4/159.195.108.96/tcp/853";
+        assert_ne!(ip_host(direct), ip_host(other));
+
+        // ip6 works; non-ip transports yield nothing (never accidentally collapse).
+        assert_eq!(ip_host("/ip6/::1/tcp/9501").as_deref(), Some("/ip6/::1"));
+        assert_eq!(ip_host("/dns4/example.com/tcp/9501"), None);
+        assert_eq!(ip_host("/ip4"), None);
     }
 
     #[test]

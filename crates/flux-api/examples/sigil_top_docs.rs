@@ -369,23 +369,47 @@ fn render_sigil_docsite(openapi: &serde_json::Value, eps: &[ApiEndpoint]) -> Str
         ));
         for e in in_group {
             let m = method_str(&e.method);
-            let runnable = matches!(e.method, HttpMethod::GET) && group != "signing";
+            // A run button is offered only for a GET that READS. Two exclusions, both
+            // learned the hard way:
+            //
+            //  * the signing surface spends the mining seed — a docs page must never fire it;
+            //  * `/api/v1/use-wallet` is a GET that MUTATES (it repoints mining rewards).
+            //    Being a GET does not make it safe, and a reader who pressed "run" after
+            //    typing an address would silently change where their own rewards land.
+            //
+            // Anything that changes state is documented, never executed from here.
+            let mutating = e.path.ends_with("/use-wallet");
+            let runnable = matches!(e.method, HttpMethod::GET) && group != "signing" && !mutating;
             body.push_str(&format!("<section class=\"ep\"><div class=\"eph\">\
                 <span class=\"m m-{}\">{}</span><span class=\"path\">{}</span>{}</div>",
                 m.to_lowercase(), m, esc(&e.path),
                 if runnable {
                     format!("<button class=\"run\" data-path=\"{}\">run</button>", esc(&e.path))
+                } else if mutating {
+                    "<span class=\"nrun\" title=\"changes state — documented, not runnable from here\">mutates</span>".to_string()
                 } else { std::string::String::new() }));
             body.push_str(&format!("<p class=\"sum\">{}</p>", ticks(&e.summary)));
 
             if !e.parameters.is_empty() {
                 body.push_str("<div class=\"lbl\">query</div>");
                 for p in &e.parameters {
+                    // On a runnable endpoint the parameter is EDITABLE, not just described.
+                    // Calling a bare path whose `q` is required just returns
+                    // `HTTP 400 missing field q`, which teaches the reader nothing about the
+                    // endpoint and everything about the docs page being wrong.
+                    let input = if runnable {
+                        format!(
+                            "<input class=\"pin\" data-name=\"{}\" placeholder=\"{}\" />",
+                            esc(&p.name),
+                            if p.required { "required" } else { "optional" }
+                        )
+                    } else { std::string::String::new() };
                     body.push_str(&format!(
                         "<div class=\"f\"><span class=\"fk\">{}</span><span class=\"ft\">{}</span>{}\
-                         <span class=\"fd\">{}</span></div>",
+                         {}<span class=\"fd\">{}</span></div>",
                         esc(&p.name), type_label(&p.schema),
                         if p.required { "<span class=\"req\">required</span>" } else { "" },
+                        input,
                         esc(&p.description)));
                 }
             }
@@ -440,6 +464,11 @@ h2{{margin:38px 0 4px;font-size:14px;color:#8b5cf6;letter-spacing:2px;text-trans
  color:#c4b5fd;font-family:inherit;font-size:10px;letter-spacing:1px;text-transform:uppercase;
  padding:4px 12px;border-radius:6px;cursor:pointer}}
 .run:hover{{background:rgba(139,92,246,.25);color:#ede9fe}}
+.nrun{{margin-left:auto;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#6b7280;
+ border:1px solid rgba(107,114,128,.35);border-radius:6px;padding:3px 9px}}
+.pin{{background:#0a0a1a;border:1px solid rgba(139,92,246,.3);color:#ede9fe;font-family:inherit;
+ font-size:11px;padding:3px 8px;border-radius:5px;min-width:190px}}
+.pin:focus{{outline:none;border-color:#8b5cf6}}
 .sum{{color:#c8b8e8;font-size:12.5px;margin:10px 0 4px;max-width:82ch}}
 .sum code,code{{background:rgba(139,92,246,.13);color:#c4b5fd;padding:1px 5px;border-radius:4px;font-size:11.5px}}
 .lbl{{margin:13px 0 5px;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6d28d9}}
@@ -490,12 +519,29 @@ async function probe() {{
 probe(); setInterval(probe, 5000);
 document.querySelectorAll('.run').forEach(function(b) {{
   b.addEventListener('click', async function() {{
-    var pre = b.closest('.ep').querySelector('.out');
-    pre.hidden = false; pre.className = 'out'; pre.textContent = 'calling ' + b.dataset.path + ' …';
+    var ep = b.closest('.ep');
+    var pre = ep.querySelector('.out');
+    // Collect whatever the reader typed into this endpoint's parameter boxes. Without this
+    // a required-parameter endpoint answers `HTTP 400 missing field q`, which looks like a
+    // broken API and is really a broken docs page.
+    var qs = [], missing = [];
+    ep.querySelectorAll('.pin').forEach(function(i) {{
+      var v = (i.value || '').trim();
+      if (v) qs.push(encodeURIComponent(i.dataset.name) + '=' + encodeURIComponent(v));
+      else if (i.placeholder === 'required') missing.push(i.dataset.name);
+    }});
+    if (missing.length) {{
+      pre.hidden = false; pre.className = 'out err';
+      pre.textContent = 'needs ' + missing.join(', ') + ' — fill the box above, then run.';
+      return;
+    }}
+    var url = b.dataset.path + (qs.length ? '?' + qs.join('&') : '');
+    pre.hidden = false; pre.className = 'out'; pre.textContent = 'calling ' + url + ' …';
     try {{
-      var r = await fetch(BASE + b.dataset.path);
+      var r = await fetch(BASE + url);
       var t = await r.text();
       try {{ t = JSON.stringify(JSON.parse(t), null, 1); }} catch (_) {{}}
+      if (!r.ok) pre.className = 'out err';
       pre.textContent = 'HTTP ' + r.status + '\n' + t;
     }} catch (e) {{
       pre.className = 'out err';

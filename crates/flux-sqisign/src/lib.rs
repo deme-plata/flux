@@ -16,6 +16,36 @@ pub fn keygen() -> (Vec<u8>, Vec<u8>) {
     (sk.to_bytes().unwrap(), pk.to_bytes().to_vec())
 }
 
+/// Domain separator for wallet-derived SQIsign keys. Changing it changes every derived
+/// key, so it is frozen.
+const SQI_SEED_DOMAIN: &[u8] = b"flux-sqisign-wallet-key-v1";
+
+/// Derive a SQIsign L5 keypair DETERMINISTICALLY from a 32-byte wallet seed.
+///
+/// [`keygen`] draws from `OsRng`, which is right for a fresh identity and wrong for a
+/// wallet: a wallet's SQIsign key must be recoverable from the same seed phrase that
+/// recovers everything else, or it becomes a second secret the owner has to back up
+/// separately — and on this chain, losing it means permanent lockout from the shielded
+/// ramps, because a registered key has no removal path.
+///
+/// The seed is domain-separated through BLAKE3 before it reaches the RNG, so this key is
+/// independent of every other key derived from the same wallet seed (spend key, note
+/// blinding, X25519 delivery key). Learning one must not yield another.
+///
+/// ChaCha20 rather than `StdRng`: `StdRng`'s algorithm is explicitly allowed to change
+/// between `rand` releases, which for KEY DERIVATION means a routine dependency bump
+/// silently hands the user a different key and locks them out. ChaCha20Rng's stream is
+/// specified.
+pub fn keygen_from_seed(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+    use rand::SeedableRng;
+    let mut h = blake3::Hasher::new();
+    h.update(SQI_SEED_DOMAIN);
+    h.update(seed);
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(*h.finalize().as_bytes());
+    let (pk, sk): (PublicKey<Level5>, SigningKey<Level5>) = generate::<Level5>(&mut rng);
+    (sk.to_bytes().unwrap(), pk.to_bytes().to_vec())
+}
+
 pub fn sign(msg: &[u8], sk_bytes: &[u8], pk_bytes: &[u8]) -> Result<Vec<u8>, String> {
     // SEC-010: enforce the Level-5 public-key length before from_bytes so a
     // shorter (downgraded-level) key can't slip through.
@@ -155,6 +185,43 @@ pub fn benchmark(iterations: usize) -> BenchmarkResult {
 
 #[cfg(test)]
 mod tests {
+
+    /// A wallet key must be RECOVERABLE. If this ever fails, everyone who registered a
+    /// derived key is locked out of the shielded ramps — there is no removal path.
+    #[test]
+    fn seed_derivation_is_deterministic_and_seed_separated() {
+        let seed_a = [7u8; 32];
+        let mut seed_b = [7u8; 32];
+        seed_b[31] = 8;
+
+        let (sk1, pk1) = keygen_from_seed(&seed_a);
+        let (sk2, pk2) = keygen_from_seed(&seed_a);
+        assert_eq!(pk1, pk2, "same seed must yield the SAME public key, every time");
+        assert_eq!(sk1, sk2, "and the same secret key");
+
+        let (_, pk_other) = keygen_from_seed(&seed_b);
+        assert_ne!(pk1, pk_other, "a different seed must yield a different key");
+
+        assert_eq!(pk1.len(), public_key_size(), "derived key must be Level 5");
+
+        // And it must actually work as a key, not merely be the right shape.
+        let msg = b"shielded ramp authorization";
+        let sig = sign(msg, &sk1, &pk1).expect("derived key signs");
+        assert!(verify(msg, &sig, &pk1).unwrap_or(false), "derived key verifies its own signature");
+        assert_eq!(sig.len(), signature_size(), "Level 5 signature size");
+    }
+
+    /// The derived key must be INDEPENDENT of the raw seed bytes — domain separation is
+    /// what stops one compromised derived key from revealing the others (spend key, note
+    /// blinding, X25519 delivery key) that come from the same wallet seed.
+    #[test]
+    fn derived_key_is_not_the_raw_seed() {
+        let seed = [0x42u8; 32];
+        let (sk, pk) = keygen_from_seed(&seed);
+        assert!(!sk.windows(32).any(|w| w == seed), "seed must not appear verbatim in the secret key");
+        assert!(!pk.windows(32).any(|w| w == seed), "nor in the public key");
+    }
+
     use super::*;
     #[test] fn test_roundtrip() { let (sk,pk)=keygen(); let s=sign(b"hi",&sk,&pk).unwrap(); assert!(verify(b"hi",&s,&pk).unwrap()); }
     #[test] fn test_wrong_msg() { let (sk,pk)=keygen(); let s=sign(b"a",&sk,&pk).unwrap(); assert!(!verify(b"b",&s,&pk).unwrap()); }

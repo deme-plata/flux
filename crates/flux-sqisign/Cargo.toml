@@ -11,5 +11,11 @@ flux-cache = { path = "../flux-cache" }
 flux-db = { path = "../flux-db" }
 serde = { version = "1", features = ["derive"] }
 rand = "0.8"
+# Deterministic key derivation needs an RNG whose output stream is STABLE across
+# releases. `rand::rngs::StdRng` is explicitly documented as NOT that — its algorithm
+# may change between rand versions — so deriving a wallet's signing key from it would
+# silently produce a DIFFERENT key after a dependency bump and lock the owner out of
+# their own account. ChaCha20Rng is specified and reproducible.
+rand_chacha = "0.3"
 ed25519-dalek = "2"
 blake3 = "1"

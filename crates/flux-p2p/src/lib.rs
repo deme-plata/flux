@@ -980,6 +980,68 @@ impl NetworkManager {
     }
 
     /// Get SAP peer score for a given peer ID.
+    /// Record the outcome of ONE range/backfill request against a peer.
+    ///
+    /// Until 2026-08-27 the SAP table was declared, weighted, tuned by `flux_tune`, and
+    /// reported by `flux_sap_status` — while nothing outside `flux-webcam` ever wrote a
+    /// score into it. Every peer therefore sat at its default, `correlate_with_sap` had no
+    /// callers, and X-Algo's "Peer Consensus" component had no consensus to measure. The
+    /// numbers moved when you tuned the weights and meant nothing, which is worse than
+    /// having no score at all: a dial that looks like a measurement.
+    ///
+    /// The sync layer already knows all of this per peer and was throwing it away:
+    ///
+    /// * `blocks` — what the peer actually DELIVERED, which is contribution. An empty
+    ///   reply (`blocks == 0`) is a peer that answered without helping; on this network
+    ///   that was 28 of 38 requests while the frontier sat frozen, and no score noticed.
+    /// * `latency_ms` — how long it took, which is the only component meaningful with a
+    ///   single peer.
+    /// * `accepted` — whether OUR store took the blocks. A peer serving well-formed but
+    ///   unlinkable data is not an honest fast peer, and only this distinguishes them.
+    ///
+    /// EMA-smoothed inside `ScoreTable::update`, so one bad response does not condemn a
+    /// peer and one good one does not redeem it.
+    pub fn observe_peer_response(
+        &self,
+        peer_id: &str,
+        blocks: u64,
+        latency_ms: f64,
+        accepted: bool,
+    ) {
+        if !self.config.sap_enabled {
+            return;
+        }
+        let peer = sap::PeerId::from(peer_id);
+        let mut inner = self.inner.write();
+        // Contribution saturates at a full chunk: a peer that serves 10k blocks is not
+        // "ten times better" than one serving 1k, it is simply doing the job.
+        let contribution = (blocks as f64 / 10_000.0).clamp(0.0, 1.0);
+        // 1.0 under 100 ms, decaying to 0 at 1 s — the same shape `update_latency`
+        // documents, kept here so a caller sees one consistent scale.
+        let latency = (1.0 - ((latency_ms - 100.0) / 900.0)).clamp(0.0, 1.0);
+        // Accuracy is about HONESTY, not speed: did what arrived actually splice?
+        let accuracy = if accepted { 1.0 } else { 0.0 };
+        let prev = inner.sap_scores.get_full(&peer).map(|s| s.components.clone());
+        let uptime = prev.as_ref().map(|c| (c.uptime + 0.05).min(1.0)).unwrap_or(0.1);
+        let stake = prev.as_ref().map(|c| c.stake).unwrap_or(0.0);
+        inner.sap_scores.update(
+            peer,
+            sap::SAPComponents { contribution, latency, stake, accuracy, uptime },
+        );
+    }
+
+    /// Every peer's current SAP score, highest first — the real table, for a status
+    /// surface that until now had nothing genuine to show.
+    pub fn sap_top_peers(&self, n: usize) -> Vec<(String, f64, sap::SAPComponents)> {
+        let inner = self.inner.read();
+        inner
+            .sap_scores
+            .top_peers(n)
+            .into_iter()
+            .map(|s| (s.peer.0.clone(), s.total, s.components.clone()))
+            .collect()
+    }
+
     pub fn sap_score(&self, peer_id: &str) -> Option<f64> {
         let inner = self.inner.read();
         inner.sap_scores.get(&sap::PeerId::from(peer_id))

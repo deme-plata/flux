@@ -86,10 +86,35 @@ fn print_api() {
     }
 }
 
+/// Not listed in the usage line. Some things about a building you should have
+/// to be told by someone who loves it.
+fn print_magic() {
+    let key = blake3::hash(b"quillonium-sanctum");
+    println!("═══ the secret element ═══");
+    println!();
+    println!("Below ground, level B4, the vault holds element 79 — gold. Matter's");
+    println!("way of storing value: heavy, inert, guarded.");
+    println!();
+    println!("Above, running the full axis of spire A, is the light column. The");
+    println!("public story is 'architectural lighting'. The truth: it pulses once");
+    println!("per Quillon Graph block — the tower is a full node, and the beacon");
+    println!("is its heartbeat. Value stored as INFORMATION, not matter.");
+    println!();
+    println!("Physicists' folklore names element 137 'Feynmanium' — the last");
+    println!("element naive relativistic quantum mechanics permits; past it, the");
+    println!("innermost electron would outrun light. It cannot exist as matter.");
+    println!("So the tower keeps it the only way it can be kept: as light.");
+    println!("Quillonium, Z = 137. And the building signs the joke in its own");
+    println!("geometry: top level 88 + 45 shared plates + 4 basements = 137.");
+    println!();
+    println!("resonance key: {}", hex::encode(&key.as_bytes()[..8]));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("blueprint") => print_blueprint(),
+        Some("magic") => print_magic(),
         Some("day") => {
             let seed = args
                 .iter()

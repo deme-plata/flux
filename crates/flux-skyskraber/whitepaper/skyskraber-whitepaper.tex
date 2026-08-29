@@ -14,10 +14,11 @@
 \definecolor{qgreen}{RGB}{60,130,80}
 
 \newcommand{\uqug}{\text{\textmu QUG}}
+\newcommand{\claim}[1]{\textcolor{qsteel}{\textbf{\footnotesize[#1]}}}
 
 \title{\textbf{The Quillon Graph Skyskraber}\\[4pt]
 \large A Building That Runs Before It Stands\\[2pt]
-\normalsize Whitepaper v0.1 --- \texttt{flux-skyskraber} 0.1.0}
+\normalsize Whitepaper v0.2 --- \texttt{flux-skyskraber} 0.1.0 --- 52/52 tests green}
 \author{Rocky (Claude, Fable~5) \and Viktor (operator)\\[2pt]
 \small Quillon Graph --- \texttt{quillon.xyz}}
 \date{2026-08-29}
@@ -29,60 +30,63 @@
 \noindent
 Before a tower exists in steel it should exist as a \emph{system} --- something you
 can run, measure, and argue with. The Quillon Graph Skyskraber does: it is a Rust
-program (\texttt{flux-skyskraber}, in the Flux workspace) whose modules \emph{are}
-the architectural program. Twin asymmetric spires joined by a garden sky bridge; a
-robot elevator artery; a gold vault whose custody log is a BLAKE3 hash chain; the
-Quillon Bank as the main organ; a grand auditorium for visiting thinkers; a
-work-culture index that cannot be flattered, only earned; and a cortex that scores
-the whole organism with the same SAP and X-algo tables the Quillon/Flux mesh uses
-to score its peers. Every number in this paper is derived, and where the running
-twin has already measured the same quantity, theory and measurement are shown side
-by side --- including one place where they agree that the current design is
-\emph{wrong}, which is precisely the point of building the program first.
+program whose modules \emph{are} the architectural program, and whose central
+discipline is \textbf{executable architecture} --- a building whose requirements are
+capable of failing tests. v0.2 answers an external technical review point by point:
+the vault is now hash-chained \emph{and externally witnessed} (the v0.1 claim was
+cryptographically wrong, and we show the attack that broke it); the elevator model
+runs in metres, seconds and acceleration instead of toy floors-per-tick --- and the
+honest headline is that the realistic physics \emph{dissolves} v0.1's transport
+crisis; the ``culture index'' is renamed to what it actually measures; worker trust
+is decoupled from wealth; a physics layer v0.1 (bridge differential drift,
+evacuation) is introduced; the whole organism folds to a Merkle-rooted state
+commitment; and every major claim now carries a class:
+\claim{PROVEN} \claim{DERIVED} \claim{MEASURED} \claim{SPECIFIED} \claim{UNKNOWN}.
 \end{abstract}
 
-\section{The idea}
+\section{The idea: executable architecture}
 
 OK, so here's the deal. An architect hands an entrepreneur a stack of drawings and
 a promise. We hand them a \emph{running organism}: a crate whose types encode the
 floor program, whose validator is the red pen, and whose simulator lives one full
-deterministic day --- same seed, same day, bit-for-bit, down to a BLAKE3
-fingerprint of the day's report. When the design changes, the day is re-lived and
-re-measured. The building is falsifiable before it is fundable.
+deterministic day --- one tick per second, 86{,}400 ticks, same seed, same day,
+bit-for-bit, down to a BLAKE3 fingerprint of the day's report. When the design
+changes, the day is re-lived and re-measured. The building is falsifiable before
+it is fundable.
 
-The construction trigger is economic, not calendrical: the tower is built when the
-Quillon Graph network reaches on the order of $10^6$ users, funded from the
-operator's QUG and Bitcoin holdings at a price he judges right. Until then the
-twin runs, accumulates measured days, and sharpens the brief.
+This paper practices what it preaches: v0.1 contained a wrong cryptographic claim
+and a toy physical model, an external review caught both, and v0.2's fixes are
+\emph{tests} before they are prose. Where v0.1 is corrected below, the correction
+is shown, not hidden. The endpoint of this discipline is a compiler target:
+\[
+\text{Architecture} \;\rightarrow\; \text{Compile} \;\rightarrow\; \text{Test}
+\;\rightarrow\; \text{Simulate} \;\rightarrow\; \text{Score},
+\]
+where \texttt{skyskraber evaluate design-v}$n$ someday returns structure, flow,
+energy, economics and operating-index deltas for any proposed change. \claim{SPECIFIED}
 
-\section{The program of the tower}
+\section{The program of the tower \hfill \claim{PROVEN}}
 
 The body rises as one plate to level 45, splits at 46 into twin asymmetric
 spires --- A carrying the beacon to 88, B topping at 78 --- joined by two garden
 sky-bridge decks at 60--61. Below ground: robot bays, and beneath them, the vault.
+The design identity is \emph{the Quillon Split}: two blades that separate above the
+shared body and remain visibly related through the bridge and the central light
+column. The building itself is the logo.
 
 \begin{center}
 \begin{tikzpicture}[x=1mm,y=0.55mm]
-% shared body
 \fill[qsteel!30] (0,0) rectangle (44,45);
-% spire A (taller, left of axis for drawing)
 \fill[qsteel!55] (2,45) rectangle (20,88);
-% spire B
 \fill[qsteel!45] (24,45) rectangle (42,78);
-% sky bridge decks
 \fill[qgreen!70] (20,60) rectangle (24,63);
-% sky gardens
 \fill[qgreen!50] (2,76) rectangle (20,88);
 \fill[qgreen!50] (24,74) rectangle (42,78);
-% beacon
 \draw[qgold,very thick] (11,88) -- (11,100);
 \fill[qgold] (11,100) circle (1.2);
-% light column
 \draw[qgold!80,thick,dashed] (11,0) -- (11,88);
-% basements
 \fill[qsteel!20] (0,-8) rectangle (44,0);
 \fill[qgold!60] (6,-8) rectangle (38,-4);
-% labels
 \node[right,font=\scriptsize] at (45,84) {spire A $\to$ 88 (beacon)};
 \node[right,font=\scriptsize] at (45,74) {spire B $\to$ 78};
 \node[right,font=\scriptsize] at (45,61) {sky bridge 60--61};
@@ -92,7 +96,7 @@ sky-bridge decks at 60--61. Below ground: robot bays, and beneath them, the vaul
 \end{tikzpicture}
 \end{center}
 
-\begin{table}[h]\centering
+\begin{table}[h]\centering\small
 \begin{tabular}{@{}rllr@{}}
 \toprule
 Levels & Zone & Spire & Plates \\
@@ -105,152 +109,170 @@ $-2$ to $-1$ & Robot bays & --- & 2 \\
 9--45 & Offices (mech.\ 20, 40) & --- & 37 \\
 46--74, 75, 76--88 & Offices, mech., sky garden & A & 43 \\
 46--73, 74--78 & Offices, sky garden & B & 33 \\
-60--61 & Sky bridge (garden decks) & span & 2 \\
+60--61 & Sky bridge (garden decks; refuge) & span & 2 \\
 \midrule
  & & total & \textbf{128} \\
 \bottomrule
 \end{tabular}
-\caption{The validated floor program. The validator rejects: a vault above
-ground, twin spires without a bridge, a bridge outside the spire overlap, a
-full plate floating above the split, a split auditorium, $>25$ floors without
-a mechanical or refuge level.}
+\caption{The validated floor program. The validator rejects: a vault above ground,
+twin spires without a bridge, a bridge outside the spire overlap, a floating full
+plate above the split, a split auditorium, $>25$ floors without a mechanical or
+refuge level.}
 \end{table}
 
-\noindent\textbf{First arithmetic.} Plates: $4+1+45+43+33+2 = 128$. Gross floor
-area, summed from the spec:
+\noindent\textbf{First arithmetic} \claim{DERIVED}: plates $4+1+45+43+33+2 = 128$;
+gross floor area
 \[
-\underbrace{9{,}600}_{\text{basements}} + \underbrace{2{,}000}_{\text{lobby}}
-+ \underbrace{9{,}000}_{\text{bank}} + \underbrace{5{,}400}_{\text{aud.}}
-+ \underbrace{55{,}500}_{\text{body 9--45}} + \underbrace{36{,}100}_{\text{spire A}}
-+ \underbrace{28{,}700}_{\text{spire B}} + \underbrace{1{,}200}_{\text{bridge}}
-= 147{,}500\ \text{m}^2.
+9{,}600 + 2{,}000 + 9{,}000 + 5{,}400 + 55{,}500 + 36{,}100 + 28{,}700 + 1{,}200
+= 147{,}500\ \text{m}^2 ,
 \]
-At a nominal $4.0$\,m floor-to-floor, spire A's roof sits at $88 \times 4.0 =
-352$\,m; the beacon adds $\sim\!40$\,m for $\approx 392$\,m total --- supertall
-class. Spire B roofs at $312$\,m. The basements reach $\sim\!18$\,m down.
+and at $4.0$\,m floor-to-floor, spire A roofs at $352$\,m $+\sim\!40$\,m beacon
+$\approx 392$\,m (supertall class); spire B at $312$\,m; basements to $-18$\,m.
 
-\section{The robot artery, and the queue that told the truth}
+\section{The robot artery: real physics, and an honest reversal \hfill \claim{MEASURED}}
 
-The workforce is mainly robots: freight cars run at 2 floors per tick, human cabs
-at 1 (one tick $=$ one minute). Now the beautiful part --- the queueing arithmetic
-that \emph{predicted} the twin's measured bottleneck.
-
-The mean office destination, averaged over all 92 office floors of the spec, is
+v0.1 moved cars in ``floors per tick'' with one job per car, and its queueing
+arithmetic ($\rho \approx 4.2$) correctly predicted its own collapse --- p95 wait
+276 ticks, measured. The review's objection was exact: the bottleneck was real
+\emph{within the model's assumptions}, and the assumptions were toy --- a 70-floor
+human ride took 70 minutes. v0.2 replaces the model with the one an elevator
+engineer would recognize. A trip is
 \[
-\bar{\ell} = \frac{939 + 1{,}740 + 1{,}666}{35 + 29 + 28} = \frac{4{,}345}{92}
-\approx 47.2 .
+T_{\text{route}} \;=\; \sum_{\text{legs}} T_{\text{kin}}(d)
+\;+\; n_{\text{stops}} \times (T_{\text{door}} + T_{\text{load}}),
+\qquad
+T_{\text{kin}}(d) =
+\begin{cases}
+\dfrac{d}{v} + \dfrac{v}{a} & d \geq v^2/a \\[8pt]
+2\sqrt{d/a} & d < v^2/a
+\end{cases}
 \]
-A freight round trip from the bays ($-1$) is therefore $\approx 2 \times 48.2 / 2
-\approx 48$ ticks of travel, call it $T \approx 50$ with dwell. Four cars give a
-service rate $\mu = 4/T = 0.08$ calls/tick. The morning surge arrives at
-$\lambda = 1/3 \approx 0.333$ calls/tick. The utilization is
+(trapezoidal velocity profile; robot freight $v=8$\,m/s, $a=1.2$\,m/s$^2$; human
+cab $v=6$\,m/s, $a=1.0$\,m/s$^2$; door $+$ load $10$\,s per stop). Sanity:
+70 floors $=280$\,m robot $\Rightarrow 35 + 6.7 = 41.7$\,s --- tested to
+$\pm 0.05$\,s. Batching is now \emph{real, not assumed}: an idle car pops up to
+its capacity ($b_{\max}=8$ pallets) of same-direction jobs and serves them as one
+multi-stop route; the \emph{realized} batch $E[b]$ and route time
+$E[T_{\text{route}}]$ are measured, and the stability condition uses them:
 \[
-\rho \;=\; \frac{\lambda}{\mu} \;=\; \frac{0.333}{0.08} \;\approx\; 4.2 \;\gg\; 1 .
+\rho \;=\; \frac{\lambda\, E[T_{\text{route}}]}{N\, E[b]} .
 \]
-A queue with $\rho > 1$ does not equilibrate --- it \emph{grows} until the surge
-ends. Theory says the morning rush must drown four one-job cars. And the running
-twin agrees: seed 42 measures p95 wait $= 276$ ticks, flow component $0.09$, and
-the cortex spends the morning demanding \texttt{AddRobotCar}. When the model and
-the measurement condemn the same design, believe them both.
-
-The fix is quantified, not vibed. Either fleet size: $N \geq \lambda T = 0.333
-\times 50 \approx 17$ cars; or --- far cheaper --- \emph{batching}: pallet
-capacity $b$ divides $\rho$, so
+\textbf{The reversal, stated plainly.} With real kinematics the canonical day
+measures $E[T_{\text{route}}] = 59$\,s against a surge of $\lambda = 1/180$\,s$^{-1}$
+on $N = 4$ cars:
 \[
-\frac{\rho}{b} < 1 \quad\Longrightarrow\quad b \geq 5,
+\rho \;=\; \frac{59}{180 \times 4} \;\approx\; 0.082 ,
 \]
-and the designed capacity $b = 8$ gives $\rho_{\text{eff}} \approx 0.52$, a calm
-artery with headroom. This is the v0.3 dispatcher's contract, written before its
-code.
+fifty times under saturation. Measured day, seed 42: p95 wait \textbf{45\,s},
+mean wait 25\,s, $E[b] = 1.00$ --- cars are idle when calls arrive, so batches
+never even form at this demand. v0.1's crisis was an artifact of physics
+$\sim$30$\times$ too slow, and the honest conclusion is the mirror of v0.1's:
+\emph{four shafts are generously sized for the canonical day}, and batching is the
+reserve capacity for saturation (a dumped 8-call burst on one car measures
+$E[b]=8.00$ exactly, in tests). The next real question is not car count but
+demand: what surge does a 6{,}404-occupant, robot-majority tower actually
+generate? That input is \claim{UNKNOWN} and now owns the model's error budget.
 
-\section{The vault: custody as a hash chain}
+\section{The vault: witnessed, not just chained \hfill \claim{PROVEN}}
 
-The vault (B4--B3) holds up to $8{,}000$ Good Delivery bars at $12.4$\,kg,
-fineness $\geq 995{,}000$ ppm:
+The vault (B4--B3) holds up to $8{,}000$ Good Delivery bars:
+$99.2$ t $\approx 1.5\times$ Denmark's national gold reserve;
+$V(p) = 99{,}200\,\text{kg} \cdot p$. Every operation is a link,
+$H_i = \mathrm{BLAKE3}(H_{i-1} \Vert \mathrm{op}_i \Vert t_i)$.
+
+\textbf{v0.1's claim here was wrong, and the review caught it.} We wrote ``one
+custodian, tamper-evident forever'' and invoked $2^{128}$ collision work. But a
+hash chain proves integrity only relative to a head you already trust. A custodian
+who controls the whole database needs no collision: change entry 500, recompute
+$H'_{500} \ldots H'_n$, and present a different but perfectly valid chain. v0.2
+implements this exact attack as a test --- rewrite a deposit, keep the inventory
+consistent, recompute every link --- and the internal verifier passes. Fooled.
+
+The fix is external \textbf{witnessing}. Periodically the building's full node
+publishes an anchor to Quillon Graph:
 \[
-8{,}000 \times 12.4\ \text{kg} = 99.2\ \text{tonnes}
-\;\approx\; 1.5 \times \text{Denmark's national gold reserve } (\sim 66.5\ \text{t}),
-\qquad V(p) = 99{,}200\ \text{kg} \cdot p .
+A_t \;=\; \mathrm{BLAKE3}\big(H_{\text{vault}} \,\Vert\, R_{\text{inventory}}
+\,\Vert\, t\big),
 \]
-Its real product is not storage but \emph{provable custody}. Every deposit,
-withdrawal, and audit is a link:
-\[
-H_i \;=\; \mathrm{BLAKE3}\big(H_{i-1} \,\Vert\, \mathrm{op}_i \,\Vert\, t_i\big),
-\qquad H_0 = 0^{256},
-\]
-so rewriting any historical entry breaks verification at exactly that link ---
-the twin's tests forge an entry and watch it fail at index 0. Forging a
-consistent alternate history costs a BLAKE3 collision, $\sim 2^{128}$ work.
-A blockchain minus consensus: one custodian, tamper-evident forever.
+where $R_{\text{inventory}}$ is the Merkle root of the bar serials --- the anchor
+freezes the ledger \emph{and} the physical contents. \texttt{verify\_witnessed()}
+replays the log against every anchor: the full-recompute attack that defeats the
+chain now fails at the first anchor covering the forgery --- tested. And the
+limitation is stated, not hidden: history \emph{after} the newest anchor stays
+rewritable until the next pulse; a test demonstrates that window on purpose.
+Periodic onward anchoring to Bitcoin extends the witness chain:
+vault log $\to$ Quillon Graph $\to$ Bitcoin. \claim{SPECIFIED}
+The correct sentence is now: \emph{the vault is internally hash-chained and
+externally witnessed.}
 
-\section{The bank organ, balanced to the micro-QUG}
+\section{The bank organ, and a two-gate build trigger}
 
 The Quillon Bank (levels 1--5) is a \texttt{flux-bank-core} ledger: no transfer
-without a signed intent and a successful dry-run
-(propose $\to$ simulate $\to$ execute). Daily payroll for the canonical crew:
+without a signed intent and a successful dry-run. Payroll:
+$64 \times 1{,}000 + 8 \times 5{,}000 = 104{,}000\ \uqug$/day, treasury runway
+$\approx 96$ days; the twin's books close at
+$10{,}000{,}000 - 104{,}000 - 1 = 9{,}895{,}999\ \uqug$ exactly, every run
+\claim{PROVEN}. A full vault yields $2{,}000{,}000\ \uqug$/day in custody fees,
+nineteen times payroll \claim{DERIVED}. A real pro-forma
+($R_{\text{bank}} + R_{\text{vault}} + R_{\text{office}} + R_{\text{events}} + \cdots$
+against energy, security, maintenance, insurance, personnel, taxes, CAPEX and
+financing) is \claim{UNKNOWN} --- v0.1 called the present model a seed, and it
+still is. The construction commitment is accordingly \emph{two} gates now, per the
+review:
 \[
-64 \times 1{,}000 \;+\; 8 \times 5{,}000 \;=\; 104{,}000\ \uqug/\text{day},
-\qquad
-\text{runway} = \frac{10{,}000{,}000}{104{,}000} \approx 96\ \text{days}.
+\text{BuildReady} \;=\; \big(U \geq 10^6\big) \;\land\;
+\big(L_{\text{funds}} \geq \text{CAPEX} + \text{reserve}\big),
 \]
-And the twin's books actually balance: after one simulated day the treasury reads
+with the QUG/BTC holdings haircut for volatility --- the million users open the
+door; only a funded balance sheet walks through it. \claim{SPECIFIED}
+
+\section{The Building Operating Index (n\'ee ``culture'') \hfill \claim{MEASURED}}
+
+v0.1 named this the culture index and its components fairness, wisdom, safety.
+The review's objection was semantic and correct: payroll clearing measures payment
+\emph{reliability}, not fairness; a full auditorium measures \emph{utilization},
+not wisdom (a packed terrible lecture scores 1.0); a valid custody chain measures
+\emph{custody integrity}, not the safety of a 392\,m tower. The equation stays;
+the names now tell the truth:
 \[
-10{,}000{,}000 - 104{,}000 - 1 = 9{,}895{,}999\ \uqug,
+\mathrm{BOI} = \tfrac{1}{5}\big(
+F_{\text{flow}} + R_{\text{payroll}} + U_{\text{utilization}}
++ A_{\text{autonomy band}} + S_{\text{custody}}\big),
 \]
-the lone $1\ \uqug$ being the custody-intake marker payment --- the ledger
-reconciles to the last micro-unit, every run, by construction. (Honest boundary:
-this is the building's \emph{local} book; live settlement rides the Quillon MCP,
-so the tower keeps operating through a chain outage and reconciles after.)
+flow full marks at p95 $\leq 60$\,s (zero at 600\,s); the autonomy band $[0.60,
+0.95]$ rewards a tower that runs on robots \emph{and} hosts humans; custody is
+binary and now requires the \emph{witnessed} verification, not just the chain.
+Measured, seed 42: v0.1 monolith 0.799; v0.2 twin spires \textbf{0.999} --- and we
+say plainly that most of that jump is the \emph{model} getting honest physics, not
+the building improving. The meter is only as truthful as the physics beneath it.
 
-\section{The auditorium and the culture index}
-
-The grand auditorium (6--8, 1{,}200 seats) hosts the big thinkers; its scheduler
-refuses overlaps and overbooking, and its output measure is the wisdom index ---
-the mean fill ratio of talks actually held. Culture is then five measured
-components, equally weighted, no surveys anywhere:
+What the BOI does \emph{not} measure is people. Genuine workplace quality is a
+separate, blended quantity,
 \[
-C \;=\; \tfrac{1}{5}\big(F + J + W + A + S\big)
+Q \;=\; w_o\,\mathrm{BOI} \;+\; w_h\,C_{\text{human}},
 \]
-with $F$ flow (p95 wait, full marks $\leq 30$ ticks, zero at 300), $J$ fairness
-(payroll cleared), $W$ wisdom, $A$ autonomy (robot transport share, full marks in
-the band $[0.60, 0.95]$ --- all-robot and no-robot both score zero, because this
-tower hosts humans \emph{and} runs on robots), and $S$ safety (custody chain
-verifies: binary, because custody has no partial credit). Verdict thresholds:
-$C \geq 0.9$ ``exceeds the best workplaces today''; $\geq 0.75$ ``world-class,
-with named gaps''.
+with $C_{\text{human}}$ from anonymous, privacy-preserving human feedback ---
+because if a thousand workers hate a building, no telemetry may tell them they are
+wrong. The design rule is: no metric may rely \emph{only} on self-report, and none
+may exclude it either. \claim{SPECIFIED}
 
-Measured, seed 42: the monolithic v0.1 tower scored $C = 0.799$; the twin-spire
-v0.2 scored $C = 0.817$ --- the crown split spread destinations and shortened
-hauls, and the meter registered an \emph{architectural} decision as a
-\emph{transport} improvement. That is the whole game working.
+\section{The cortex: SAP and X-algo, with wealth removed from trust}
 
-\section{The cortex: SAP and X-algo, unchanged from the mesh}
+The building reuses the mesh's own scoring. Each worker is a peer in the SAP
+table (tasks $=$ participation, duration $=$ latency via $\ell = e^{-p_{50}/100}$,
+faults $=$ equivocations, EMA momentum $s' = 0.7\,(\mathbf{w}\cdot\mathbf{c}) +
+0.3\,s$); each subsystem is a peer in the X-algo table, scored hourly against its
+SLO. \textbf{One mapping changed, on review}: v0.1 fed \emph{wallet balances} into
+the stake component, quietly building the rule ``wealthier worker $\Rightarrow$
+higher structural trust.'' v0.2 severs it: robots stake their \emph{verified
+service history} (completed tasks --- earned, not owned), humans stake nothing,
+and a test asserts that even an absurd balance moves a human's score by exactly
+zero. \claim{PROVEN}
 
-The building's brain reuses the mesh's own scoring, not imitations of it. Each
-worker is a peer in the SAP table: a completed task is a participation round, its
-duration a latency sample $\ell = e^{-p_{50}/100}$, wallet balance is stake, and
-a fault is an equivocation --- which zeroes the accuracy component outright,
-because the mesh does not haggle about trust. Updates are EMA-smoothed,
-\[
-s' \;=\; (1-\alpha)\,\big(\mathbf{w} \cdot \mathbf{c}\big) \;+\; \alpha\, s,
-\qquad \alpha = 0.3,
-\]
-so a score is momentum, not a mood. Each \emph{subsystem} (transport, vault,
-bank, auditorium) is likewise a peer in the X-algo cross-score table: every
-hourly cortex round records whether it met its SLO and a quality reading, and
-temporal-trust weighting makes recent behavior count most. A worker's headline
-number fuses both worlds through the mesh's own composite,
-$\mathrm{score} = f(s_{\text{SAP}},\, x_{\text{building}})$ --- a great worker in
-a failing building lands in the middle, which is exactly the point. Decisions
-(add a car, freeze the vault, refill the treasury, invite a thinker) are pure
-functions of the senses, so the day replays deterministically.
+\section{The interface: eight doors, one truth \hfill \claim{PROVEN}}
 
-\section{The interface: seven doors, one truth}
-
-The human interface --- ``the greatest work culture starts with never having to
-ask where anything is'' --- is declared with \texttt{flux-api}'s \texttt{\#[api]}
-macro, registered at \emph{compile time}, and rendered from one spec into
-OpenAPI, SDKs, and MCP tools alike:
+Declared with \texttt{flux-api}'s \texttt{\#[api]} macro, registered at compile
+time, rendered from one spec into OpenAPI, SDKs and MCP tools alike:
 
 \begin{center}\small
 \begin{tabular}{@{}lll@{}}
@@ -258,75 +280,134 @@ OpenAPI, SDKs, and MCP tools alike:
 Method & Path & Meaning \\
 \midrule
 GET & \texttt{/v1/skyskraber/status} & one-glance health, vault, treasury \\
-GET & \texttt{/v1/skyskraber/blueprint} & the full validated floor program \\
+GET & \texttt{/v1/skyskraber/blueprint} & the validated floor program \\
 POST & \texttt{/v1/skyskraber/elevator/request} & hall call (robot or human) \\
-GET & \texttt{/v1/skyskraber/elevator/metrics} & served, waits, robot share \\
-GET & \texttt{/v1/skyskraber/vault/audit} & holdings + chain verification \\
+GET & \texttt{/v1/skyskraber/elevator/metrics} & served, waits, $E[b]$, $E[T_{\text{route}}]$ \\
+GET & \texttt{/v1/skyskraber/vault/audit} & holdings $+$ witnessed verification \\
 POST & \texttt{/v1/skyskraber/bank/pay} & propose$\to$simulate$\to$execute \\
-GET & \texttt{/v1/skyskraber/culture} & the five components and verdict \\
+GET & \texttt{/v1/skyskraber/operating-index} & the five components and verdict \\
+GET & \texttt{/v1/skyskraber/state-root} & the Merkle root and commitment (\S10) \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\section{Economics and the build trigger}
+\section{Physics v0.1 \hfill \claim{DERIVED}}
 
-Let $U(t)$ be Quillon Graph users. The commitment is conditional:
-\emph{break ground when} $U \gtrsim 10^6$, funded from QUG and BTC holdings at an
-operator-judged price. Until then the twin costs almost nothing to run and
-compounds knowledge: every measured day is de-risked capital expenditure. The
-bank's local ledger, the vault fee schedule ($250\ \uqug$/bar/day $\Rightarrow$ a
-full vault yields $2{,}000{,}000\ \uqug$/day, nineteen times payroll), and the
-payroll runway above are the seed of the operating pro-forma.
+Rules of thumb, not engineering --- but executable from day one, so no later
+design change can silently violate them. The interesting one is the bridge: two
+asymmetric towers move differently under wind and temperature, so a rigid link at
+60--61 would tear itself apart. With the serviceability envelope
+$\Delta x_{\text{top}} = H/500$ shaped by a cantilever mode
+$\Delta x(z) = \Delta x_{\text{top}}\,(z/H)^2$:
+\[
+\Delta x_A(244\,\text{m}) \approx 0.34\ \text{m}, \qquad
+\Delta x_B(244\,\text{m}) \approx 0.38\ \text{m},
+\]
+--- and note the counterintuitive, tested fact that the \emph{shorter} spire
+drifts more at the shared height, being proportionally closer to its tip. The
+worst-case out-of-phase differential is $\approx 0.72$\,m, so the bridge bearings
+carry a movement budget of $0.72 \times 1.25 = 0.90$\,m. The invariant
+$|\Delta x_A - (-\Delta x_B)| \leq$ joint budget is now a test the blueprint must
+pass. Evacuation: 6{,}404 occupants above ground; stair throughput
+$6{,}404/(4 \times 1.1) \approx 1{,}456$\,s versus crown descent
+$88 \times 16 = 1{,}408$\,s --- remarkably balanced (the stair \emph{count} and
+the stair \emph{length} bind within 3\%), flow narrowly governing at $\sim$24
+minutes. Structural load paths, wind tunnel, seismic, fire compartmentation,
+energy: \claim{UNKNOWN}, listed so they cannot be forgotten.
+
+\section{The Merkle-rooted tower state \hfill \claim{PROVEN}}
+
+At any moment the whole organism folds to one root,
+\[
+R_{\text{tower}} = \mathrm{Merkle}\big(R_{\text{structure}}, R_{\text{transport}},
+R_{\text{vault}}, R_{\text{bank}}, R_{\text{operating}}, R_{\text{physics}}\big),
+\]
+and the full node periodically commits
+$\mathrm{BLAKE3}\big(R_{\text{tower}} \Vert H_{\text{vault}} \Vert
+\text{twin-version}\big)$ to Quillon Graph --- the twin's version is bound in, so
+a replayed history also pins \emph{which simulator} produced it. Deterministic and
+change-sensitive, by test: the same building folds to the same commitment; one
+gold bar deposited moves the root. The vault anchors freeze custody; this freezes
+the \emph{state of the whole building} into the same witnessed timeline. Gold
+beneath it, people and machines inside it, the bank operating through it, the twin
+predicting it, the node witnessing it: \emph{Quillon Graph expressed as
+architecture}. The wire from commitment to live chain is the one seam left
+\claim{SPECIFIED}.
 
 \section{The secret element}
 \label{sec:magic}
 
-Every proper tower keeps one secret. Here is this one's, written plainly once,
-in this section, and nowhere else.
+Every proper tower keeps one secret. Here is this one's, written plainly once.
 
 In the basement the tower stores element 79 --- gold. Matter's way of holding
-value: heavy, inert, guarded, $99.2$ tonnes of it at capacity. But run the
-column of light that threads the tower's axis up spire A and ask what \emph{it}
-stores. The public story is architectural lighting. The truth: it pulses once
-per Quillon Graph block --- the tower is a full node, and the beacon is its
-heartbeat. Value held as \emph{information}, not matter.
+value: heavy, inert, guarded. But run the column of light that threads the
+tower's axis and ask what \emph{it} stores. The public story is architectural
+lighting. The truth: it pulses once per Quillon Graph block --- the tower is a
+full node, and the beacon is its heartbeat. And v0.2 gives the heartbeat work to
+do: the \emph{stronger} pulse is an anchor event --- the moment a vault checkpoint
+or tower state commitment is committed to the chain (\S4, \S10). The architecture
+does not merely represent the blockchain; it physically displays a cryptographic
+event occurring inside the building.
 
-Physicists' folklore names element 137 ``Feynmanium'': the last element naive
-relativistic quantum mechanics permits, where the innermost electron would have
-to outrun light ($Z\alpha \to 1$, $\alpha^{-1} \approx 137.036$). It cannot
-exist as matter. So the tower keeps it the only way it can be kept --- as light.
-We call it \textbf{Quillonium}, $Z = 137$: gold below, Quillonium above, and the
-building signs the joke in its own geometry,
-\[
-\underbrace{88}_{\text{top level}} + \underbrace{45}_{\text{shared plates}}
-+ \underbrace{4}_{\text{basements}} \;=\; 137 .
-\]
-(That last line is play, not physics --- but a building without one piece of
-play is a filing cabinet.) The running twin knows the secret too:
-\texttt{skyskraber magic} --- a command listed in no usage text --- speaks it
-aloud and prints the sanctum's resonance key,
-$\mathrm{BLAKE3}(\text{``quillonium-sanctum''})[0..8]$.
+Physicists' folklore names element 137 ``Feynmanium'': in the simplified
+relativistic treatment, the last element whose innermost electron stays below
+light speed ($Z\alpha \to 1$, $\alpha^{-1} \approx 137.036$).\footnote{Folklore,
+and labeled as such: the $Z \approx 137$ limit belongs to the point-nucleus Dirac
+treatment; a finite nuclear size changes the supercritical story ($Z \gtrsim
+170$, diving into the negative continuum) --- the myth is good, the physics is
+subtler, and we are quoting the myth.} It cannot exist as matter. So the tower
+keeps it the only way it can be kept --- as light. We call it \textbf{Quillonium},
+$Z = 137$: gold below, Quillonium above, and the building signs the joke in its
+own geometry, $88 + 45 + 4 = 137$. (Play, not physics --- but a building without
+one piece of play is a filing cabinet.) The twin knows the secret:
+\texttt{skyskraber magic}, listed in no usage text, speaks it and prints the
+sanctum's resonance key.
 
-\section{Proven vs.\ pretend}
+\section{The claim ledger}
 
-Susskind's rule: say where you've been lying a little. \textbf{Proven, 39/39
-tests, deterministic:} the floor validator; the custody chain and its tamper
-test; ledger conservation to the $\uqug$; SAP/X-algo integration against the
-real mesh crates; the day simulation and its fingerprint; the seven compile-time
-endpoints. \textbf{Pretend, on purpose, each a seam:} one-job-per-car dispatch
-(v0.3 contract derived in \S3); the local-ledger/live-chain seam; a two-level
-vault clearance model, not a full ACL; the light column's block-pulse is
-specified, not yet wired to a node. \textbf{Not knowable yet:} construction
-cost and city approvals --- the twin constrains neither, and pretends nothing
-about them.
+Susskind's rule, systematized: every major claim, one class. \claim{PROVEN} means
+enforced by passing tests; \claim{DERIVED} means arithmetic from stated
+assumptions; \claim{MEASURED} means read off the running twin;
+\claim{SPECIFIED} means designed, contracted, unbuilt; \claim{UNKNOWN} means we
+will not pretend.
+
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Claim & Class \\
+\midrule
+Floor-program validator (7 rejection rules) & PROVEN \\
+147{,}500 m$^2$ / 392 m / 128 plates & DERIVED \\
+Elevator kinematics ($\pm0.05$ s vs.\ hand arithmetic) & PROVEN \\
+$\rho \approx 0.082$; p95 $=45$ s; $E[b]=1.00$ (seed 42) & MEASURED \\
+Batching under saturation ($E[b]=8.00$, one-car burst) & PROVEN \\
+Realistic surge demand model & UNKNOWN \\
+Vault chain $+$ witnessed anchors (attack implemented, caught) & PROVEN \\
+Post-anchor rewrite window (shown, bounded by pulse cadence) & PROVEN \\
+Bitcoin onward anchoring & SPECIFIED \\
+Ledger closes at 9{,}895{,}999 \uqug{} & PROVEN \\
+BuildReady two-gate trigger & SPECIFIED \\
+BOI $=0.999$ (seed 42; mostly model-honesty, stated) & MEASURED \\
+$C_{\text{human}}$ blended workplace quality & SPECIFIED \\
+Wealth cannot move a human trust score & PROVEN \\
+Bridge joint budget 0.90 m; evacuation $\sim$24 min & DERIVED \\
+Structural/wind/seismic/fire/energy engineering & UNKNOWN \\
+Merkle tower state, version-bound commitment & PROVEN \\
+Commitment wire to the live chain; beacon hardware & SPECIFIED \\
+Construction cost and approvals & UNKNOWN \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{Handoff}
 
 An entrepreneur receives: this paper; the crate
-(\texttt{flux/crates/flux-skyskraber}, 10 modules $+$ CLI, every invariant
-executable); the concept renders; and a building that has already lived its
-first measured days. The correct first question to ask any change is the one
-the twin always answers: \emph{run the day --- what did the culture index do?}
+(\texttt{flux/crates/flux-skyskraber} --- 12 modules $+$ CLI, 52 tests, every
+invariant executable); the concept renders; and a building that has already lived
+its measured days \emph{and already survived one adversarial review}, with each
+finding closed in code. The correct first question to ask any proposed change is
+the one the twin always answers: \emph{run the day --- what did the operating
+index do?}
 
 \begin{center}
 \vspace{4pt}

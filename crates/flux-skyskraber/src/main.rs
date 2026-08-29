@@ -51,6 +51,13 @@ fn print_blueprint() {
             spec.levels_of(Zone::SkyBridge),
         );
     }
+    if let Some(bm) = flux_skyskraber::physics::bridge_movement(&spec) {
+        let ev = flux_skyskraber::physics::evacuation(&spec);
+        println!(
+            "physics v0.1: bridge differential {:.2} m → joint budget {:.2} m · evacuation ~{:.0} min ({} occupants)\n",
+            bm.differential_m, bm.joint_budget_m, ev.estimate_s / 60.0, ev.occupants,
+        );
+    }
     let mut floors = spec.floors.clone();
     floors.sort_by_key(|f| (-f.level, f.spire));
     let mut last: Option<(Zone, Option<Spire>)> = None;
@@ -65,17 +72,21 @@ fn print_blueprint() {
 fn print_day(seed: u64) {
     let r = sim::run_day(seed);
     println!("═══ one day in {} (seed {seed}) ═══", r.tower);
-    println!("  transport  {} rides · avg wait {:.1} · p95 {} ticks · robot share {:.0}%",
-        r.transport.served, r.transport.avg_wait_ticks, r.transport.p95_wait_ticks, r.transport.robot_share * 100.0);
-    println!("  vault      {} bars · chain intact: {} · head {}…", r.vault_bars, r.vault_chain_intact, &r.vault_head[..16]);
+    println!("  transport  {} rides · avg wait {:.1}s · p95 {}s · robot share {:.0}% · E[b] {:.2} · E[T_route] {:.0}s",
+        r.transport.served, r.transport.avg_wait_s, r.transport.p95_wait_s,
+        r.transport.robot_share * 100.0, r.transport.mean_batch, r.transport.mean_route_s);
+    println!("  vault      {} bars · witnessed: {} ({} anchors) · head {}…",
+        r.vault_bars, r.vault_witnessed, r.vault_anchors, &r.vault_head[..16]);
     println!("  bank       treasury {} uQUG · payroll {}/{} paid", r.treasury_uqug, r.payroll_paid, r.payroll_paid + r.payroll_failed);
     println!("  auditorium {} talk(s) held", r.talks_held);
-    println!("  culture    {:.3} — {}", r.culture.total, r.culture.verdict);
-    println!("    flow {:.2} · fairness {:.2} · wisdom {:.2} · autonomy {:.2} · safety {:.2}",
-        r.culture.components.flow, r.culture.components.fairness, r.culture.components.wisdom,
-        r.culture.components.autonomy, r.culture.components.safety);
+    println!("  operating  {:.3} — {}", r.operating.total, r.operating.verdict);
+    println!("    flow {:.2} · payroll {:.2} · utilization {:.2} · autonomy {:.2} · custody {:.2}",
+        r.operating.components.flow, r.operating.components.payroll_reliability,
+        r.operating.components.utilization, r.operating.components.autonomy_band,
+        r.operating.components.custody_integrity);
     println!("  cortex     {} rounds · decisions: {:?}", r.cortex_rounds,
         r.decisions.iter().take(6).collect::<Vec<_>>());
+    println!("  state      commitment {}…", &r.state_commitment[..16]);
     println!("  fingerprint {}", r.report_hash);
 }
 

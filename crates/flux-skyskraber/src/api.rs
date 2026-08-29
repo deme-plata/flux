@@ -13,7 +13,7 @@
 
 use crate::bank::QuillonBank;
 use crate::cortex::BuildingCortex;
-use crate::culture::CultureReport;
+use crate::culture::OperatingReport;
 use crate::elevator::{CarKind, ElevatorBank, HallCall, TransportMetrics};
 use crate::tower::TowerSpec;
 use crate::vault::Vault;
@@ -119,9 +119,26 @@ pub fn post_bank_pay(bank: &mut QuillonBank, req: PayRequest) -> PayResponse {
     }
 }
 
-#[api(GET, "/v1/skyskraber/culture", summary = "The work-culture index and its five measured components")]
-pub fn get_culture(report: &CultureReport) -> CultureReport {
+#[api(GET, "/v1/skyskraber/operating-index", summary = "The Building Operating Index: five measured components + verdict")]
+pub fn get_operating_index(report: &OperatingReport) -> OperatingReport {
     report.clone()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StateRootResponse {
+    pub root: String,
+    pub commitment: String,
+    pub twin_version: String,
+}
+
+#[api(GET, "/v1/skyskraber/state-root", summary = "Merkle-rooted tower state + the commitment the full node publishes")]
+pub fn get_state_root(b: &crate::Building) -> StateRootResponse {
+    let c = crate::state_root::tower_state(b);
+    StateRootResponse {
+        root: hex::encode(c.root),
+        commitment: hex::encode(c.commitment),
+        twin_version: c.twin_version.to_string(),
+    }
 }
 
 /// Every endpoint this crate registered, straight from the inventory registry.
@@ -137,15 +154,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_seven_endpoints_are_registered_at_compile_time() {
+    fn all_eight_endpoints_are_registered_at_compile_time() {
         let eps = registered_endpoints();
-        assert_eq!(eps.len(), 7, "expected 7 registered endpoints, got {}", eps.len());
+        assert_eq!(eps.len(), 8, "expected 8 registered endpoints, got {}", eps.len());
         let paths: Vec<&str> = eps.iter().map(|e| e.path).collect();
         assert!(paths.contains(&"/v1/skyskraber/status"));
         assert!(paths.contains(&"/v1/skyskraber/vault/audit"));
         assert!(paths.contains(&"/v1/skyskraber/bank/pay"));
+        assert!(paths.contains(&"/v1/skyskraber/operating-index"));
+        assert!(paths.contains(&"/v1/skyskraber/state-root"));
         let posts = eps.iter().filter(|e| e.method == "POST").count();
         assert_eq!(posts, 2);
+    }
+
+    #[test]
+    fn state_root_endpoint_folds_the_building() {
+        let b = crate::Building::quillon_default().unwrap();
+        let r = get_state_root(&b);
+        assert_eq!(r.root.len(), 64);
+        assert_eq!(r.commitment.len(), 64);
     }
 
     #[test]

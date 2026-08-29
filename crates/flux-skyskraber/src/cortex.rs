@@ -19,18 +19,19 @@ use serde::{Deserialize, Serialize};
 
 pub const SUBSYSTEMS: [&str; 4] = ["transport", "vault", "bank", "auditorium"];
 
-/// SLO thresholds the cortex holds the building to.
-pub const SLO_P95_WAIT_TICKS: u64 = 60;
+/// SLO thresholds the cortex holds the building to (seconds).
+pub const SLO_P95_WAIT_S: u64 = 90;
 
 /// One round of readings from the building.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubsystemSenses {
-    pub p95_wait_ticks: u64,
+    pub p95_wait_s: u64,
     pub pending_calls: u64,
-    pub vault_chain_intact: bool,
+    /// Chain verifies AND every external anchor recomputes.
+    pub vault_witnessed: bool,
     pub payroll_failures: u32,
     pub treasury_uqug: u128,
-    pub wisdom_index: f64,
+    pub utilization_index: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,25 +62,25 @@ impl BuildingCortex {
     /// X-algo table, return the decisions the senses demand.
     pub fn tick(&mut self, senses: &SubsystemSenses) -> Vec<CortexDecision> {
         self.round += 1;
-        let transport_ok = senses.p95_wait_ticks <= SLO_P95_WAIT_TICKS;
-        let transport_q = 1.0 - (senses.p95_wait_ticks.min(300) as f64 / 300.0);
+        let transport_ok = senses.p95_wait_s <= SLO_P95_WAIT_S;
+        let transport_q = 1.0 - (senses.p95_wait_s.min(600) as f64 / 600.0);
         self.systems.record_round(XPeerId::from("transport"), self.round, transport_ok, transport_q);
 
-        let vault_q = if senses.vault_chain_intact { 1.0 } else { 0.0 };
-        self.systems.record_round(XPeerId::from("vault"), self.round, senses.vault_chain_intact, vault_q);
+        let vault_q = if senses.vault_witnessed { 1.0 } else { 0.0 };
+        self.systems.record_round(XPeerId::from("vault"), self.round, senses.vault_witnessed, vault_q);
 
         let bank_ok = senses.payroll_failures == 0;
         let bank_q = if bank_ok { 1.0 } else { 0.3 };
         self.systems.record_round(XPeerId::from("bank"), self.round, bank_ok, bank_q);
 
-        let aud_ok = senses.wisdom_index > 0.3;
-        self.systems.record_round(XPeerId::from("auditorium"), self.round, aud_ok, senses.wisdom_index.clamp(0.0, 1.0));
+        let aud_ok = senses.utilization_index > 0.3;
+        self.systems.record_round(XPeerId::from("auditorium"), self.round, aud_ok, senses.utilization_index.clamp(0.0, 1.0));
 
         let mut decisions = Vec::new();
         if !transport_ok || senses.pending_calls > 50 {
             decisions.push(CortexDecision::AddRobotCar);
         }
-        if !senses.vault_chain_intact {
+        if !senses.vault_witnessed {
             decisions.push(CortexDecision::FreezeVaultAndAudit);
         }
         if senses.payroll_failures > 0 || senses.treasury_uqug < 100_000 {
@@ -128,12 +129,12 @@ mod tests {
 
     fn healthy() -> SubsystemSenses {
         SubsystemSenses {
-            p95_wait_ticks: 20,
+            p95_wait_s: 40,
             pending_calls: 0,
-            vault_chain_intact: true,
+            vault_witnessed: true,
             payroll_failures: 0,
             treasury_uqug: 5_000_000,
-            wisdom_index: 0.8,
+            utilization_index: 0.8,
         }
     }
 
@@ -151,10 +152,10 @@ mod tests {
         let wf = Workforce::quillon_default(2, 1);
         let mut cortex = BuildingCortex::new(&wf);
         let mut senses = healthy();
-        senses.p95_wait_ticks = 200;
-        senses.vault_chain_intact = false;
+        senses.p95_wait_s = 400;
+        senses.vault_witnessed = false;
         senses.payroll_failures = 3;
-        senses.wisdom_index = 0.0;
+        senses.utilization_index = 0.0;
         let decisions = cortex.tick(&senses);
         assert!(decisions.contains(&CortexDecision::AddRobotCar));
         assert!(decisions.contains(&CortexDecision::FreezeVaultAndAudit));
@@ -169,7 +170,7 @@ mod tests {
         let mut good = BuildingCortex::new(&wf);
         let mut bad = BuildingCortex::new(&wf);
         let mut miss = healthy();
-        miss.p95_wait_ticks = 290;
+        miss.p95_wait_s = 580;
         for _ in 0..10 {
             good.tick(&healthy());
             bad.tick(&miss);

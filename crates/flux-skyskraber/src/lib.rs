@@ -12,12 +12,14 @@
 //! |---|---|
 //! | [`tower`] | The building program: 88 floors + 4 basements, zoned and validated |
 //! | [`elevator`] | Robot elevator transport — freight shafts for the robot workforce, cabs for the few humans |
-//! | [`vault`] | The basement gold vault — BLAKE3 hash-chained custody log, tamper-evident |
+//! | [`vault`] | The basement gold vault — hash-chained AND externally witnessed (anchors) |
 //! | [`bank`] | **Quillon Bank, the main organ** — a `flux-bank-core` ledger doing payroll, rent, vault fees |
 //! | [`workforce`] | Robots (mostly) + humans (few), scored with the real `flux-p2p` SAP table |
 //! | [`auditorium`] | The grand auditorium — big thinkers, wisdom sessions, conflict-free scheduling |
-//! | [`culture`] | The work-culture index — the meter for "exceeding the best workplaces" |
+//! | [`culture`] | The Building Operating Index — measured operating health, never self-report |
 //! | [`cortex`] | The building cortex — sense → score (SAP + X-algo) → decide → act |
+//! | [`physics`] | Physics v0.1 — bridge differential drift, evacuation envelopes |
+//! | [`state_root`] | The Merkle-rooted tower state, committed via the full node |
 //! | [`api`] | The MCP/HTTP surface, declared with `flux-api`'s `#[api]` macro |
 //! | [`sim`] | A deterministic day-in-the-life: same seed, same day, same report hash |
 //!
@@ -36,7 +38,9 @@ pub mod bank;
 pub mod cortex;
 pub mod culture;
 pub mod elevator;
+pub mod physics;
 pub mod sim;
+pub mod state_root;
 pub mod tower;
 pub mod vault;
 pub mod workforce;

@@ -88,10 +88,21 @@ impl Workforce {
         self.scores.update_latency(&peer, duration_ticks as f64, duration_ticks as f64 * 1.5);
     }
 
-    /// Wallet balance feeds the stake component — skin in the building.
-    pub fn record_stake(&mut self, worker_id: &str, balance_uqug: u128) {
-        let peer = SapPeerId::from(worker_id);
-        self.scores.update_stake(&peer, balance_uqug.min(u64::MAX as u128) as u64);
+    /// v0.2: the stake component is SERVICE COLLATERAL, never money.
+    /// v0.1 fed wallet balances in here, which quietly built the rule
+    /// "wealthier worker ⇒ higher structural trust" — wrong for people,
+    /// wrong even for robots. Now: robots stake their verified service
+    /// history (completed tasks — earned, not owned); humans stake nothing,
+    /// and their score rests entirely on contribution, latency, accuracy
+    /// and uptime.
+    pub fn record_service_collateral(&mut self, worker_id: &str, completed_tasks: u64) {
+        let is_robot = self
+            .workers
+            .iter()
+            .any(|w| w.id == worker_id && w.kind == WorkerKind::Robot);
+        if is_robot {
+            self.scores.update_stake(&SapPeerId::from(worker_id), completed_tasks);
+        }
     }
 
     /// A dropped pallet, a missed shift, a falsified log: SAP calls all of
@@ -139,6 +150,21 @@ mod tests {
         let good = wf.score_of("robot-000").unwrap();
         let bad = wf.score_of("robot-001").unwrap();
         assert!(good > bad, "good={good} bad={bad}");
+    }
+
+    #[test]
+    fn money_never_raises_a_human_score() {
+        let mut wf = Workforce::quillon_default(1, 1);
+        wf.record_task_done("robot-000", 40);
+        wf.record_task_done("human-00", 40);
+        let before = wf.score_of("human-00").unwrap();
+        // Even an absurd "collateral" number is ignored for humans…
+        wf.record_service_collateral("human-00", u64::MAX);
+        assert_eq!(wf.score_of("human-00").unwrap(), before);
+        // …while a robot's earned service history does count as stake.
+        let robot_before = wf.score_of("robot-000").unwrap();
+        wf.record_service_collateral("robot-000", 500);
+        assert!(wf.score_of("robot-000").unwrap() >= robot_before);
     }
 
     #[test]

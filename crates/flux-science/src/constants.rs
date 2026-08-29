@@ -53,6 +53,17 @@ pub fn hubble_si() -> f64 {
     HUBBLE_CONSTANT * 1000.0 / 3.085677581e22 // km/s/Mpc → s^-1
 }
 
+/// Inverse fine-structure constant, CODATA 2022: α⁻¹ = 137.035999177(21).
+pub const FINE_STRUCTURE_INV: f64 = 137.035999177;
+
+/// Fine-structure constant α, CODATA 2022.
+pub fn fine_structure() -> f64 {
+    1.0 / FINE_STRUCTURE_INV
+}
+
+/// Standard acceleration of gravity (m/s²), exact by definition (CGPM 1901).
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +76,14 @@ mod tests {
         assert!(lp > 1e-36 && lp < 1e-34);
         assert!(tp > 1e-45 && tp < 1e-43);
         assert!(mp > 1e-9 && mp < 1e-7);
+    }
+
+    #[test]
+    fn test_fine_structure_codata_2022() {
+        // α ≈ 7.297352564e-3; the folklore Z≈137 element sits at 1/α.
+        let a = fine_structure();
+        assert!((a - 7.2973525643e-3).abs() < 1e-11, "alpha = {a}");
+        assert!(FINE_STRUCTURE_INV > 137.0 && FINE_STRUCTURE_INV < 137.04);
     }
 
     #[test]

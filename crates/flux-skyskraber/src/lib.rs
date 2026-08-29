@@ -39,6 +39,7 @@ pub mod cortex;
 pub mod culture;
 pub mod elevator;
 pub mod physics;
+pub mod science;
 pub mod sim;
 pub mod state_root;
 pub mod tower;

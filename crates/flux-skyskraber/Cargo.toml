@@ -19,7 +19,12 @@ flux-p2p = { path = "../flux-p2p" }             # sap::ScoreTable + x_algo::Cros
 flux-bank-core = { path = "../flux-bank-core" } # Ledger / TransferProposal / SignedIntent
 flux-api = { path = "../flux-api" }             # #[api] endpoint registry → OpenAPI/MCP
 flux-api-macros = { path = "../flux-api-macros" }
+flux-science = { path = "../flux-science" }     # CODATA constants for the science annex
 
 [[bin]]
 name = "skyskraber"
 path = "src/main.rs"
+
+[[bin]]
+name = "skyskraber-whitepaper"
+path = "src/bin/whitepaper.rs"

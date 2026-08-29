@@ -4,7 +4,7 @@
 //!   skyskraber day [--seed N]   run one deterministic day, print the report
 //!   skyskraber api              list the registered MCP/HTTP endpoints
 
-use flux_skyskraber::tower::{TowerSpec, Zone};
+use flux_skyskraber::tower::{Spire, TowerSpec, Zone};
 use flux_skyskraber::{api, sim};
 
 fn zone_glyph(z: Zone) -> &'static str {
@@ -16,7 +16,16 @@ fn zone_glyph(z: Zone) -> &'static str {
         Zone::Auditorium => "🎓 GRAND AUDITORIUM",
         Zone::Offices => "💼 offices",
         Zone::Mechanical => "⚙️  mechanical",
+        Zone::SkyBridge => "🌉 SKY BRIDGE (garden deck)",
         Zone::SkyGarden => "🌿 SKY GARDEN",
+    }
+}
+
+fn spire_tag(s: Option<Spire>) -> &'static str {
+    match s {
+        Some(Spire::A) => "  [spire A ▲]",
+        Some(Spire::B) => "  [spire B]",
+        None => "",
     }
 }
 
@@ -24,14 +33,31 @@ fn print_blueprint() {
     let spec = TowerSpec::quillon_default();
     spec.validate().expect("canonical blueprint validates");
     println!("═══ {} ═══", spec.name);
-    println!("levels {}..{} · {} human shafts · {} robot shafts\n", spec.bottom_level(), spec.top_level(), spec.human_shafts, spec.robot_shafts);
+    println!(
+        "levels {}..{} · {} human shafts · {} robot shafts · facade: {}{}{}\n",
+        spec.bottom_level(),
+        spec.top_level(),
+        spec.human_shafts,
+        spec.robot_shafts,
+        spec.facade.emblem,
+        if spec.facade.light_column { " + light column" } else { "" },
+        if spec.waterfront { " · waterfront plaza" } else { "" },
+    );
+    if let Some(split) = spec.split_level() {
+        println!(
+            "twin spires from level {split}: A tops at {} (beacon), B at {} · sky bridge at {:?}\n",
+            spec.spire_top(Spire::A).unwrap_or(split),
+            spec.spire_top(Spire::B).unwrap_or(split),
+            spec.levels_of(Zone::SkyBridge),
+        );
+    }
     let mut floors = spec.floors.clone();
-    floors.sort_by_key(|f| -f.level);
-    let mut last: Option<Zone> = None;
+    floors.sort_by_key(|f| (-f.level, f.spire));
+    let mut last: Option<(Zone, Option<Spire>)> = None;
     for f in &floors {
-        if last != Some(f.zone) {
-            println!("  {:>4} │ {}", f.level, zone_glyph(f.zone));
-            last = Some(f.zone);
+        if last != Some((f.zone, f.spire)) {
+            println!("  {:>4} │ {}{}", f.level, zone_glyph(f.zone), spire_tag(f.spire));
+            last = Some((f.zone, f.spire));
         }
     }
 }

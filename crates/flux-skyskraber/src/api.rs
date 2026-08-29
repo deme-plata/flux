@@ -153,7 +153,8 @@ mod tests {
         let b = crate::Building::quillon_default().unwrap();
         let s = get_status(&b.spec, &b.cortex, &b.vault, &b.bank);
         assert_eq!(s.tower, "Quillon Graph Skyskraber");
-        assert_eq!(s.floors, 93); // 88 above ground + 4 basements + lobby
+        // 4 basements + lobby + 45 shared plates + 43 spire-A + 33 spire-B + 2 bridge decks
+        assert_eq!(s.floors, 128);
         assert!(s.treasury_uqug > 0);
     }
 

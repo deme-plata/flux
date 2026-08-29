@@ -15,6 +15,7 @@ use crate::cortex::{CortexDecision, SubsystemSenses};
 use crate::culture::{self, CultureInputs, CultureReport};
 use crate::elevator::{CarKind, HallCall, TransportMetrics};
 use crate::auditorium::Talk;
+use crate::tower::Zone;
 use crate::vault::{Clearance, GoldBar};
 use crate::Building;
 use rand::{Rng, SeedableRng};
@@ -65,7 +66,9 @@ fn fingerprint(r: &DayReport) -> String {
 pub fn run_day(seed: u64) -> DayReport {
     let mut b = Building::quillon_default().expect("canonical blueprint validates");
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let office_floors: Vec<i32> = (9..=80).filter(|l| l % 20 != 0).collect();
+    // Destinations come from the blueprint itself — if the tower changes shape,
+    // the day's traffic follows.
+    let office_floors: Vec<i32> = b.spec.levels_of(Zone::Offices);
 
     // 13:00 wisdom session, booked before the day starts.
     b.auditorium

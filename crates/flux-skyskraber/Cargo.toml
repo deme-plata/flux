@@ -1,0 +1,25 @@
+[package]
+name = "flux-skyskraber"
+version = "0.1.0"
+edition = "2021"
+description = "Quillon Graph Skyskraber — digital twin of the tower: robot elevator transport, basement gold vault, Quillon bank organ, grand auditorium, SAP/X-algo scored building cortex, flux-api MCP surface."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+inventory = "0.3"
+
+# The building stands on real Flux organs, not imagined ones:
+flux-p2p = { path = "../flux-p2p" }             # sap::ScoreTable + x_algo::CrossScoreTable
+flux-bank-core = { path = "../flux-bank-core" } # Ledger / TransferProposal / SignedIntent
+flux-api = { path = "../flux-api" }             # #[api] endpoint registry → OpenAPI/MCP
+flux-api-macros = { path = "../flux-api-macros" }
+
+[[bin]]
+name = "skyskraber"
+path = "src/main.rs"

@@ -44,6 +44,10 @@ pub struct DayReport {
     pub payroll_failed: u32,
     pub talks_held: usize,
     pub operating: OperatingReport,
+    /// Emanation-security posture as the tower stands today (EMSEC Doctrine v0).
+    pub emsec: crate::emsec::EmsecPosture,
+    /// The posture the same blueprint reaches once hardened to doctrine.
+    pub emsec_hardened_total: f64,
     pub cortex_rounds: u64,
     pub decisions: Vec<CortexDecision>,
     /// The tower's Merkle state commitment at end of day (hex).
@@ -68,14 +72,30 @@ fn fingerprint(r: &DayReport) -> String {
     h.update(&r.payroll_paid.to_le_bytes());
     h.update(&(r.talks_held as u64).to_le_bytes());
     h.update(&(r.operating.total * 1e6).round().to_bits().to_le_bytes());
+    h.update(&(r.emsec.total * 1e6).round().to_bits().to_le_bytes());
     h.update(r.state_commitment.as_bytes());
     h.update(serde_json::to_string(&r.decisions).unwrap().as_bytes());
     hex::encode(&h.finalize().as_bytes()[..16])
 }
 
-/// Run one full day and return the fingerprinted report.
+/// Run one full day on the canonical (as-it-stands) tower.
 pub fn run_day(seed: u64) -> DayReport {
-    let mut b = Building::quillon_default().expect("canonical blueprint validates");
+    run_day_inner(seed, false)
+}
+
+/// Run one full day on the guardian-ring tower, born to EMSEC Doctrine v0 — the
+/// building AND its emanations config both hardened, so the posture reads 1.000.
+pub fn run_day_hardened(seed: u64) -> DayReport {
+    run_day_inner(seed, true)
+}
+
+/// Run one full day and return the fingerprinted report.
+fn run_day_inner(seed: u64, hardened: bool) -> DayReport {
+    let mut b = if hardened {
+        Building::quillon_hardened().expect("guardian-ring blueprint validates")
+    } else {
+        Building::quillon_default().expect("canonical blueprint validates")
+    };
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     // Destinations come from the blueprint itself — if the tower changes
     // shape, the day's traffic follows.
@@ -200,6 +220,20 @@ pub fn run_day(seed: u64) -> DayReport {
     });
     let commitment = state_root::tower_state(&b);
 
+    // The tower's emanation-security posture is blueprint-derived, so it does
+    // not vary with the day's seed — but it belongs in the day's record. A
+    // hardened building is scored under the hardened config it was built for;
+    // the canonical building is scored honestly as it stands. Either way the
+    // hardened target shows what the doctrine buys.
+    let emsec_cfg = if hardened {
+        crate::emsec::EmsecConfig::doctrine_v0_hardened()
+    } else {
+        crate::emsec::EmsecConfig::doctrine_v0()
+    };
+    let emsec = crate::emsec::assess(&b.spec, &emsec_cfg);
+    let emsec_hardened_total =
+        crate::emsec::assess(&b.spec, &crate::emsec::EmsecConfig::doctrine_v0_hardened()).total;
+
     let mut report = DayReport {
         tower: b.spec.name.clone(),
         seed,
@@ -214,6 +248,8 @@ pub fn run_day(seed: u64) -> DayReport {
         payroll_failed,
         talks_held: b.auditorium.talks_held(),
         operating,
+        emsec,
+        emsec_hardened_total,
         cortex_rounds: b.cortex.rounds(),
         decisions: all_decisions,
         state_commitment: hex::encode(commitment.commitment),
@@ -256,6 +292,31 @@ mod tests {
         assert_eq!(r.cortex_rounds, 24);
         assert!(r.operating.total > 0.85, "operating={}", r.operating.total);
         assert_eq!(r.state_commitment.len(), 64);
+    }
+
+    #[test]
+    fn the_day_records_an_honest_emsec_posture() {
+        let r = run_day(7);
+        // Present, bounded, and the unmasked beacon keeps it porous today…
+        assert!(r.emsec.total > 0.0 && r.emsec.total < 1.0);
+        assert!(!r.emsec.findings.is_empty());
+        // …while the hardened target is meaningfully higher.
+        assert!(r.emsec_hardened_total > r.emsec.total + 0.3);
+        assert!(r.emsec_hardened_total >= 0.9);
+    }
+
+    #[test]
+    fn the_guardian_ring_day_scores_a_perfect_posture() {
+        let r = run_day_hardened(7);
+        assert!((r.emsec.total - 1.0).abs() < 1e-9, "total={}", r.emsec.total);
+        assert!(r.emsec.findings.is_empty(), "findings: {:?}", r.emsec.findings);
+        assert!((r.emsec.components.red_black_separation - 1.0).abs() < 1e-9);
+        assert!((r.emsec.components.inspectable_space - 1.0).abs() < 1e-9);
+        assert!((r.emsec.components.averaging_resistance - 1.0).abs() < 1e-9);
+        assert!((r.emsec.components.fail_closed - 1.0).abs() < 1e-9);
+        // The building still runs the same excellent day.
+        assert_eq!(r.payroll_paid, 72);
+        assert!(r.vault_witnessed);
     }
 
     #[test]

@@ -164,6 +164,34 @@ impl TowerSpec {
         }
     }
 
+    /// The **guardian-ring** blueprint — [`Self::quillon_default`] hardened to
+    /// EMSEC Doctrine v0 without moving a single load-bearing number.
+    ///
+    /// In the canonical tower the RED bank hall (the signing organ) stands
+    /// skin-to-skin with the public lobby below it and the grand auditorium
+    /// above — two bare RED faces onto BLACK, the exact leak path the handbook
+    /// warns of. Here the two floors AT those faces (levels 1 and 5) become GRAY
+    /// guardian decks — mechanical / security refuges — so no RED floor ever
+    /// presents a bare face to a BLACK zone. The signing core keeps three RED
+    /// floors (2–4), now ringed by guardians above and below.
+    ///
+    /// Nothing the tower is *known by* changes: top level 88, the 4 basements,
+    /// the shared plates — the **137 geometry** — the twin spires, the sky
+    /// bridge, and the beacon all stand exactly as before. The gold vault
+    /// (element 79) was already earth-guarded below grade; now the signing core
+    /// has its ring of heroes too.
+    pub fn quillon_hardened() -> Self {
+        let mut spec = Self::quillon_default();
+        spec.name = "Quillon Graph Skyskraber (guardian ring)".into();
+        for f in spec.floors.iter_mut() {
+            if (f.level == 1 || f.level == 5) && f.zone == Zone::BankHall {
+                f.zone = Zone::Mechanical;
+                f.design_occupancy = 4;
+            }
+        }
+        spec
+    }
+
     pub fn top_level(&self) -> i32 {
         self.floors.iter().map(|f| f.level).max().unwrap_or(0)
     }
@@ -292,6 +320,23 @@ mod tests {
         assert_eq!(spec.levels_of(Zone::SkyBridge), vec![60, 61]);
         assert!(spec.waterfront);
         assert!(spec.facade.light_column);
+    }
+
+    #[test]
+    fn guardian_ring_validates_and_preserves_the_137_geometry() {
+        let spec = TowerSpec::quillon_hardened();
+        assert_eq!(spec.validate(), Ok(()));
+        // The numbers the tower is known by do not move.
+        assert_eq!(spec.top_level(), 88);
+        assert_eq!(spec.bottom_level(), -4);
+        assert_eq!(spec.floors.len(), TowerSpec::quillon_default().floors.len());
+        assert_eq!(spec.levels_of(Zone::GoldVault), vec![-4, -3]);
+        assert_eq!(spec.levels_of(Zone::Auditorium), vec![6, 7, 8]);
+        assert_eq!(spec.split_level(), Some(46));
+        // The signing core is now levels 2–4, ringed by guardian decks at 1 & 5.
+        assert_eq!(spec.levels_of(Zone::BankHall), vec![2, 3, 4]);
+        assert!(spec.levels_of(Zone::Mechanical).contains(&1));
+        assert!(spec.levels_of(Zone::Mechanical).contains(&5));
     }
 
     #[test]

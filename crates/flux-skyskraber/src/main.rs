@@ -1,9 +1,12 @@
 //! `skyskraber` — the tower in your terminal.
 //!
-//!   skyskraber blueprint        print the validated floor program
-//!   skyskraber day [--seed N]   run one deterministic day, print the report
-//!   skyskraber api              list the registered MCP/HTTP endpoints
+//!   skyskraber blueprint          print the validated floor program
+//!   skyskraber day [--seed N]     run one deterministic day, print the report
+//!   skyskraber day --hardened     run the guardian-ring tower's day (perfect posture)
+//!   skyskraber emsec              the emanations-security posture: porous → perfect
+//!   skyskraber api                list the registered MCP/HTTP endpoints
 
+use flux_skyskraber::emsec::{self, EmsecConfig, EmsecPosture};
 use flux_skyskraber::tower::{Spire, TowerSpec, Zone};
 use flux_skyskraber::{api, sim};
 
@@ -69,8 +72,8 @@ fn print_blueprint() {
     }
 }
 
-fn print_day(seed: u64) {
-    let r = sim::run_day(seed);
+fn print_day(seed: u64, hardened: bool) {
+    let r = if hardened { sim::run_day_hardened(seed) } else { sim::run_day(seed) };
     println!("═══ one day in {} (seed {seed}) ═══", r.tower);
     println!("  transport  {} rides · avg wait {:.1}s · p95 {}s · robot share {:.0}% · E[b] {:.2} · E[T_route] {:.0}s",
         r.transport.served, r.transport.avg_wait_s, r.transport.p95_wait_s,
@@ -84,10 +87,58 @@ fn print_day(seed: u64) {
         r.operating.components.flow, r.operating.components.payroll_reliability,
         r.operating.components.utilization, r.operating.components.autonomy_band,
         r.operating.components.custody_integrity);
+    println!("  emsec      {:.3} — {}", r.emsec.total, r.emsec.verdict);
+    println!("    red/black {:.2} · inspectable-space {:.2} · averaging-resist {:.2} · fail-closed {:.2}",
+        r.emsec.components.red_black_separation, r.emsec.components.inspectable_space,
+        r.emsec.components.averaging_resistance, r.emsec.components.fail_closed);
+    for f in &r.emsec.findings {
+        println!("      ⚠ {f}");
+    }
+    println!("    hardened target: {:.3} (HSM + masked beacon + 30 m standoff + integrity gaps closed)",
+        r.emsec_hardened_total);
     println!("  cortex     {} rounds · decisions: {:?}", r.cortex_rounds,
         r.decisions.iter().take(6).collect::<Vec<_>>());
     println!("  state      commitment {}…", &r.state_commitment[..16]);
     println!("  fingerprint {}", r.report_hash);
+}
+
+fn posture_block(title: &str, p: &EmsecPosture) {
+    println!("── {title} ──");
+    println!("  posture {:.3} — {}", p.total, p.verdict);
+    println!(
+        "  P1 red/black {:.2} · P2 inspectable-space {:.2} · P3 averaging-resist {:.2} · P4 fail-closed {:.2}",
+        p.components.red_black_separation,
+        p.components.inspectable_space,
+        p.components.averaging_resistance,
+        p.components.fail_closed,
+    );
+    if p.findings.is_empty() {
+        println!("  ✓ no findings — every principle at full strength");
+    } else {
+        for f in &p.findings {
+            println!("  ⚠ {f}");
+        }
+    }
+}
+
+fn print_emsec() {
+    println!("═══ SIGIL Nation EMSEC Doctrine — the tower's emanations posture ═══\n");
+    let before = emsec::assess(&TowerSpec::quillon_default(), &EmsecConfig::doctrine_v0());
+    let after = emsec::assess(&TowerSpec::quillon_hardened(), &EmsecConfig::doctrine_v0_hardened());
+    posture_block("BEFORE — the tower as it stands (canonical, config v0)", &before);
+    println!();
+    posture_block("AFTER — the guardian-ring tower, doctrine-hardened", &after);
+    println!();
+    println!("── the four heroes standing guard ──");
+    println!("  P1  guardian ring   — bank hall re-zoned to RED 2–4, GRAY refuge decks at 1 & 5;");
+    println!("                        + signing key in an HSM (RED/BLACK power+cabling isolation)");
+    println!("  P2  earth & water   — gold (#79) below grade; ≥30 m standoff + waterfront on the RED faces");
+    println!("  P3  masked beacon   — the light column (#137) still pulses every block, but JITTERED:");
+    println!("                        the heartbeat lives, the phase-lock an eavesdropper needs dies");
+    println!("  P4  fail-closed     — producer-signature verification ON, cross-node integrity verified");
+    println!();
+    println!("  137 preserved: top 88 + 45 shared plates + 4 basements — untouched by the hardening.");
+    println!("  #79 gold and #137 light are guarded on all four principles. Nothing gets in.");
 }
 
 fn print_api() {
@@ -133,11 +184,13 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(42);
-            print_day(seed);
+            let hardened = args.iter().any(|a| a == "--hardened");
+            print_day(seed, hardened);
         }
+        Some("emsec") => print_emsec(),
         Some("api") => print_api(),
         _ => {
-            println!("usage: skyskraber <blueprint | day [--seed N] | api>");
+            println!("usage: skyskraber <blueprint | day [--seed N] [--hardened] | emsec | api>");
         }
     }
 }

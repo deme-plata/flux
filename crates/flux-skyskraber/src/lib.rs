@@ -18,6 +18,7 @@
 //! | [`auditorium`] | The grand auditorium — big thinkers, wisdom sessions, conflict-free scheduling |
 //! | [`culture`] | The Building Operating Index — measured operating health, never self-report |
 //! | [`cortex`] | The building cortex — sense → score (SAP + X-algo) → decide → act |
+//! | [`emsec`] | Emanations Security posture — the SIGIL Nation EMSEC Doctrine v0, scored |
 //! | [`physics`] | Physics v0.1 — bridge differential drift, evacuation envelopes |
 //! | [`state_root`] | The Merkle-rooted tower state, committed via the full node |
 //! | [`api`] | The MCP/HTTP surface, declared with `flux-api`'s `#[api]` macro |
@@ -38,6 +39,7 @@ pub mod bank;
 pub mod cortex;
 pub mod culture;
 pub mod elevator;
+pub mod emsec;
 pub mod physics;
 pub mod science;
 pub mod sim;
@@ -71,6 +73,23 @@ impl Building {
     /// default robot-heavy workforce, funded treasury.
     pub fn quillon_default() -> Result<Self, tower::TowerError> {
         let spec = tower::TowerSpec::quillon_default();
+        spec.validate()?;
+        let transport = elevator::ElevatorBank::for_spec(&spec);
+        let vault = vault::Vault::new(vault::VAULT_CAPACITY_BARS);
+        let mut bank = bank::QuillonBank::new();
+        let workforce = workforce::Workforce::quillon_default(64, 8);
+        bank.bootstrap_accounts(&workforce);
+        let auditorium = auditorium::Auditorium::grand();
+        let cortex = cortex::BuildingCortex::new(&workforce);
+        Ok(Self { spec, transport, vault, bank, workforce, auditorium, cortex })
+    }
+
+    /// The same building, born to EMSEC Doctrine v0: the guardian-ring blueprint
+    /// (see [`tower::TowerSpec::quillon_hardened`]) with everything else
+    /// identical. Paired with the hardened emanations config it scores a perfect
+    /// posture on all four principles.
+    pub fn quillon_hardened() -> Result<Self, tower::TowerError> {
+        let spec = tower::TowerSpec::quillon_hardened();
         spec.validate()?;
         let transport = elevator::ElevatorBank::for_spec(&spec);
         let vault = vault::Vault::new(vault::VAULT_CAPACITY_BARS);

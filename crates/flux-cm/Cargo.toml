@@ -1,0 +1,15 @@
+[package]
+name = "flux-cm"
+version.workspace = true
+edition.workspace = true
+description = "Flux Community Manager — human-capital registry, work assignment and append-only timeline for the community managers of Quillon Graph and SIGIL. Terms agreed up front, payment recorded after delivery, every step on the timeline."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

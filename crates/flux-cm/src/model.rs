@@ -4,10 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Which network a CM serves or a work item belongs to.
+///
+/// `Polygon` covers the external-venue work around wSIGIL — the Uniswap
+/// wSIGIL/USDC pool and NFT drops live there, not on a centralized broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Chain {
     Quillon,
     Sigil,
+    Polygon,
 }
 
 impl Chain {
@@ -15,6 +19,7 @@ impl Chain {
         match self {
             Chain::Quillon => "Quillon Graph",
             Chain::Sigil => "SIGIL",
+            Chain::Polygon => "Polygon",
         }
     }
 }

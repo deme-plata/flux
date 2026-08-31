@@ -373,6 +373,53 @@ see \S11 for exactly how much the play flatters the truth.) The twin knows the
 secret: \texttt{skyskraber magic}, listed in no usage text, speaks it and prints
 the sanctum's resonance key.
 
+\section{EMSEC: why the walls sing \hfill \claim{MEASURED}}
+
+A tower can pass every operating check and still fail at the one thing a bank
+most needs: keeping its secrets inside its walls. Every wire that carries a
+signal is a small radio station whether it wants to be or not; every computation
+radiates. Privacy is a physics problem before it is a legal one. So the twin now
+scores its own \emph{emanation security} against the SIGIL Nation EMSEC
+Doctrine's four principles, taken straight from the TEMPEST handbook
+(NSTISSAM TEMPEST/2-91):
+
+\begin{itemize}
+\item \textbf{P1 --- RED/BLACK separation:} the signing organ must not sit
+skin-to-skin with public floors.
+\item \textbf{P2 --- inspectable space:} security bought in metres --- how close
+an adversary can stand to the leak.
+\item \textbf{P3 --- signal averaging:} a perfectly periodic public reference
+lets an eavesdropper average other emanations down to certainty.
+\item \textbf{P4 --- fail-closed:} an emanation attack leaves no trace, so
+equipment that loses its safe state must shout and stop.
+\end{itemize}
+
+As it stands the tower scores \textbf{@@EMSEC_BEFORE@@} --- porous: the RED bank
+hall is wedged between the lobby and the auditorium, the keys are in software,
+and the light column pulses on a fixed cadence
+($P_1 = @@EMSEC_P1B@@$, $P_2 = @@EMSEC_P2B@@$, $P_3 = @@EMSEC_P3B@@$,
+$P_4 = @@EMSEC_P4B@@$). Config hardening alone --- an HSM, $\geq 30$\,m standoff,
+the two integrity controls switched on --- reaches \textbf{@@EMSEC_CONFIG@@}, but
+cannot close $P_1$: the bank hall still presents a bare RED face to BLACK. The
+\emph{guardian ring} closes it --- the two floors on the RED faces become GRAY
+refuge decks --- and with it the tower reaches a perfect \textbf{@@EMSEC_AFTER@@}
+on all four principles ($P_1 = @@EMSEC_P1A@@$, $P_2 = @@EMSEC_P2A@@$,
+$P_3 = @@EMSEC_P3A@@$, $P_4 = @@EMSEC_P4A@@$) --- and not one load-bearing number
+moves: the $137$ geometry (\S\ref{sec:magic}) is untouched.
+
+The beacon is where $P_3$ bites. A light column locked to the block cadence
+\emph{is} that periodic reference: at $\sim@@BEACON_PULSES@@$ pulses/day an
+eavesdropper phase-locks and averages to near-certainty. The fix keeps the
+heartbeat and kills only its exploitability --- each pulse is offset by a
+\emph{cryptographically unpredictable} jitter (a CSPRNG, not a public PRNG the
+attacker can recompute). The required window, derived from the code, is
+$\geq @@JITTER_MS@@$\,ms per pulse --- comfortably inside the block interval, and
+enough to drive the coherently averageable pulse count from
+$@@BEACON_PULSES@@$ to one. It runs today as the soft light column on
+\texttt{quillon.xyz}: honestly, a glow on a screen is a symbolic leak, but the
+jitter source is a real CSPRNG and the pulse is genuinely decoupled from cadence
+--- the doctrine made visible.
+
 \section{The claim ledger}
 
 \claim{PROVEN} enforced by passing tests · \claim{DERIVED} arithmetic from
@@ -404,6 +451,9 @@ CODATA science annex (recomputed at every generation) & DERIVED \\
 This paper generated from the twin --- no pasted figures & PROVEN \\
 Structural/wind/seismic/fire/energy engineering & UNKNOWN \\
 Merkle tower state, version-bound commitment & PROVEN \\
+EMSEC posture @@EMSEC_BEFORE@@ $\to$ guardian ring @@EMSEC_AFTER@@ (seed 42) & MEASURED \\
+Beacon VRF-jitter $\geq @@JITTER_MS@@$ ms decouples $P_3$ from cadence & DERIVED \\
+Real RF / hardware emanation shielding (screen glow is symbolic) & UNKNOWN \\
 Commitment wire to the live chain; beacon hardware & SPECIFIED \\
 Construction cost and approvals & UNKNOWN \\
 \bottomrule
@@ -413,7 +463,7 @@ Construction cost and approvals & UNKNOWN \\
 \section{Handoff}
 
 An entrepreneur receives: this paper (regenerable from source at will); the
-crate (\texttt{flux/crates/flux-skyskraber} --- 13 modules $+$ CLI $+$ this
+crate (\texttt{flux/crates/flux-skyskraber} --- 14 modules $+$ CLI $+$ this
 paper's generator, every invariant executable); the concept renders; and a
 building that has already lived its measured days \emph{and survived one
 adversarial review}, with each finding closed in code. The correct first

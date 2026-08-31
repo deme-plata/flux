@@ -8,6 +8,7 @@
 //!   skyskraber-whitepaper [output.tex]     (default: skyskraber-whitepaper.tex)
 
 use flux_skyskraber::elevator::{leg_time_s, CarKind};
+use flux_skyskraber::emsec::{self, EmsecConfig};
 use flux_skyskraber::physics;
 use flux_skyskraber::science;
 use flux_skyskraber::sim;
@@ -64,6 +65,14 @@ fn main() {
     let bridge = physics::bridge_movement(&spec).expect("twin spires have a bridge");
     let evac = physics::evacuation(&spec);
     let annex = science::annex(&spec);
+
+    // EMSEC posture, computed three ways: the tower as it stands (day.emsec =
+    // canonical × config v0), config-hardening alone (still can't fix P1
+    // geometry), and the guardian-ring blueprint × hardened config (perfect).
+    let em_perfect = emsec::assess(&TowerSpec::quillon_hardened(), &EmsecConfig::doctrine_v0_hardened());
+    let em_config = emsec::assess(&spec, &EmsecConfig::doctrine_v0_hardened());
+    let req_jitter_ms = emsec::required_jitter_window_s(&EmsecConfig::doctrine_v0()) * 1000.0;
+    let beacon_pulses = EmsecConfig::doctrine_v0().beacon_pulses_per_day;
 
     // Areas, summed live from the spec — the paper's GFA equation is real.
     let area = |f: &dyn Fn(&flux_skyskraber::tower::Floor) -> bool| -> u64 {
@@ -128,6 +137,19 @@ fn main() {
         ("@@RS_PLANCK@@", sci(annex.vault_rs_planck_lengths, 1)),
         ("@@ALPHA_INV@@", format!("{:.9}", annex.alpha_inv)),
         ("@@FLATTERY_PCT@@", format!("{:.3}", annex.joke_flattery_rel * 100.0)),
+        ("@@EMSEC_BEFORE@@", format!("{:.3}", day.emsec.total)),
+        ("@@EMSEC_CONFIG@@", format!("{:.3}", em_config.total)),
+        ("@@EMSEC_AFTER@@", format!("{:.3}", em_perfect.total)),
+        ("@@EMSEC_P1B@@", format!("{:.2}", day.emsec.components.red_black_separation)),
+        ("@@EMSEC_P2B@@", format!("{:.2}", day.emsec.components.inspectable_space)),
+        ("@@EMSEC_P3B@@", format!("{:.2}", day.emsec.components.averaging_resistance)),
+        ("@@EMSEC_P4B@@", format!("{:.2}", day.emsec.components.fail_closed)),
+        ("@@EMSEC_P1A@@", format!("{:.2}", em_perfect.components.red_black_separation)),
+        ("@@EMSEC_P2A@@", format!("{:.2}", em_perfect.components.inspectable_space)),
+        ("@@EMSEC_P3A@@", format!("{:.2}", em_perfect.components.averaging_resistance)),
+        ("@@EMSEC_P4A@@", format!("{:.2}", em_perfect.components.fail_closed)),
+        ("@@JITTER_MS@@", format!("{:.0}", req_jitter_ms)),
+        ("@@BEACON_PULSES@@", thou(beacon_pulses)),
     ];
 
     let mut out = TEMPLATE.replace(

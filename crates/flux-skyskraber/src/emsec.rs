@@ -54,6 +54,26 @@ pub fn classify(zone: Zone) -> SecurityZone {
     }
 }
 
+/// How #137's light-column beacon is timed. A beacon locked to the block
+/// cadence is a perfectly periodic public reference an eavesdropper phase-locks
+/// to; jitter decouples the pulse from that cadence.
+///
+/// The subtle, load-bearing rule: **jitter only helps if the attacker cannot
+/// predict it.** A jitter drawn from a public PRNG (or from the block hash the
+/// attacker already sees) is no jitter at all — they recompute it and align
+/// anyway. Security comes from a *cryptographically unpredictable* offset (a VRF
+/// / secret-keyed CSPRNG) that is also larger than the attacker's timing
+/// resolution. Below that resolution the smear is invisible and buys nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeaconJitter {
+    /// Peak-to-peak timing spread applied to each pulse, in seconds. 0.0 = the
+    /// pulse is locked to the block cadence (worst case).
+    pub window_s: f64,
+    /// Is the offset cryptographically unpredictable to the attacker (VRF /
+    /// secret CSPRNG)? A known/derivable offset is treated as no jitter at all.
+    pub unpredictable: bool,
+}
+
 /// What has actually been built, versus what the doctrine wants. The posture is
 /// blueprint × this config — so hardening is visible as a number, not a claim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,12 +84,15 @@ pub struct EmsecConfig {
     /// Is the signing key in an HSM with RED/BLACK power+cabling isolation, or
     /// are keys software-held and sharing infrastructure with BLACK? (P1)
     pub hsm_red_black_isolated: bool,
-    /// Is the light-column beacon jittered / decoupled from block cadence, or a
-    /// raw once-per-block pulse an attacker can phase-lock to? (P3)
-    pub beacon_masked: bool,
+    /// How the beacon is timed — locked to cadence, or jittered off it. (P3)
+    pub beacon_jitter: BeaconJitter,
     /// How many times the beacon fires per day (once per block). Live SIGIL
     /// cadence ≈ 0.83 blk/s ⇒ ~71.7k pulses/day of averaging reference.
     pub beacon_pulses_per_day: u64,
+    /// The attacker's timing resolution (s): how tightly they can bin pulse
+    /// arrival times. A well-equipped SDR adversary ≈ 1 µs. Jitter smaller than
+    /// this is invisible to them.
+    pub attacker_timing_resolution_s: f64,
     /// Adversary's per-pulse bit-error Q. 0.49 = a leak that *looks like* pure
     /// noise in a single shot — and still averages to certainty over the day.
     pub eavesdropper_bit_error: f64,
@@ -89,8 +112,10 @@ impl EmsecConfig {
         Self {
             standoff_m: 18.0,
             hsm_red_black_isolated: false,
-            beacon_masked: false,
+            // The beacon fires locked to the block cadence — the worst case.
+            beacon_jitter: BeaconJitter { window_s: 0.0, unpredictable: false },
             beacon_pulses_per_day: 71_700,
+            attacker_timing_resolution_s: 1e-6,
             eavesdropper_bit_error: 0.49,
             producer_sig_active: false,
             crossnode_integrity_verified: false,
@@ -103,13 +128,40 @@ impl EmsecConfig {
         Self {
             standoff_m: 30.0,
             hsm_red_black_isolated: true,
-            beacon_masked: true,
+            // Crypto-unpredictable ±50 ms (100 ms peak-to-peak) offset per pulse
+            // — comfortably above both the µs attacker resolution and the
+            // required-to-mask window, and far inside the ~1.2 s block interval.
+            beacon_jitter: BeaconJitter { window_s: 0.100, unpredictable: true },
             beacon_pulses_per_day: 71_700,
+            attacker_timing_resolution_s: 1e-6,
             eavesdropper_bit_error: 0.49,
             producer_sig_active: true,
             crossnode_integrity_verified: true,
         }
     }
+}
+
+/// The smallest jitter window that fully defeats coherent averaging for this
+/// config: spread the pulses across at least `beacon_pulses_per_day`
+/// unpredictable timing slots, so no two reliably share a bin. Below this the
+/// attacker still stacks multiple pulses per bin.
+pub fn required_jitter_window_s(cfg: &EmsecConfig) -> f64 {
+    cfg.beacon_pulses_per_day as f64 * cfg.attacker_timing_resolution_s
+}
+
+/// How many pulses the attacker can actually average *coherently*, given the
+/// jitter. Locked / predictable / sub-resolution jitter ⇒ they align every
+/// pulse (all `beacon_pulses_per_day` of them). Crypto-unpredictable jitter of
+/// window W spreads the pulses over W / resolution random bins; only pulses that
+/// land in the same bin by chance can be stacked, so the coherent count drops to
+/// `pulses / bins`, flooring at 1 (a lone, unalignable pulse).
+pub fn effective_averageable_pulses(cfg: &EmsecConfig) -> u64 {
+    let j = &cfg.beacon_jitter;
+    if !j.unpredictable || j.window_s <= cfg.attacker_timing_resolution_s {
+        return cfg.beacon_pulses_per_day;
+    }
+    let bins = j.window_s / cfg.attacker_timing_resolution_s;
+    ((cfg.beacon_pulses_per_day as f64 / bins).ceil() as u64).max(1)
 }
 
 /// The four principles, each scored 0–1.
@@ -290,22 +342,36 @@ pub fn assess(spec: &TowerSpec, cfg: &EmsecConfig) -> EmsecPosture {
 
     // ── P3: signal-averaging resistance ──────────────────────────────────────
     // With no beacon there is nothing periodic to phase-lock to (full credit).
-    // A masked beacon defeats averaging (effective N = 1). A raw per-block pulse
-    // hands the attacker `beacon_pulses_per_day` reference cycles — the residual
-    // collapses toward zero and the day's other emanations average out with it.
+    // Otherwise the attacker averages however many pulses they can coherently
+    // align: crypto-unpredictable jitter wider than their timing resolution
+    // collapses that count toward 1 (no averaging gain); a locked or predictable
+    // pulse hands them all `beacon_pulses_per_day` cycles and the residual — and
+    // the day's other emanations along with it — averages down to certainty.
     let q = cfg.eavesdropper_bit_error;
     let single_shot = averaging_residual(q, 1); // = q, the no-averaging baseline
     let averaging_resistance = if !spec.facade.light_column {
         1.0
-    } else if cfg.beacon_masked {
-        1.0
     } else {
-        let residual = averaging_residual(q, cfg.beacon_pulses_per_day);
+        let eff_n = effective_averageable_pulses(cfg);
+        let residual = averaging_residual(q, eff_n);
         let r = if single_shot > 0.0 { residual / single_shot } else { 0.0 };
-        findings.push(format!(
-            "P3: the light column fires ~{} unmasked pulses/day — a periodic public reference; attacker residual error collapses {:.2}→{:.1e}, i.e. averaging wins. Jitter the beacon or decouple it from block cadence",
-            cfg.beacon_pulses_per_day, single_shot, residual
-        ));
+        if r < 0.999 {
+            let j = &cfg.beacon_jitter;
+            let why = if !j.unpredictable {
+                if j.window_s > 0.0 {
+                    "its jitter is predictable (a public/derivable offset) — the attacker recomputes it and aligns anyway"
+                } else {
+                    "it is locked to the block cadence — a perfectly periodic public reference"
+                }
+            } else {
+                "its jitter window is below the attacker's timing resolution — invisible smear"
+            };
+            findings.push(format!(
+                "P3: the light column fires ~{} pulses/day and {why}; the attacker still averages {} of them, residual error collapses {:.2}→{:.1e}. Apply ≥{:.0} ms of crypto-unpredictable jitter to decouple it",
+                cfg.beacon_pulses_per_day, eff_n, single_shot, residual,
+                required_jitter_window_s(cfg) * 1000.0
+            ));
+        }
         clamp01(r)
     };
 
@@ -434,6 +500,55 @@ mod tests {
         let guardian = assess(&TowerSpec::quillon_hardened(), &EmsecConfig::doctrine_v0_hardened());
         assert!(canonical.components.red_black_separation < 1.0);
         assert!((guardian.components.red_black_separation - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn required_jitter_window_matches_hand_arithmetic() {
+        let cfg = EmsecConfig::doctrine_v0();
+        // 71_700 pulses/day × 1 µs attacker resolution = 0.0717 s ≈ 72 ms.
+        assert!((required_jitter_window_s(&cfg) - 0.0717).abs() < 1e-9);
+    }
+
+    #[test]
+    fn locked_beacon_lets_the_attacker_average_everything() {
+        let cfg = EmsecConfig::doctrine_v0();
+        assert_eq!(effective_averageable_pulses(&cfg), cfg.beacon_pulses_per_day);
+        let p = assess(&TowerSpec::quillon_default(), &cfg);
+        assert!(p.components.averaging_resistance < 0.01);
+    }
+
+    #[test]
+    fn predictable_jitter_is_no_jitter() {
+        // A wide jitter window that the attacker can RECOMPUTE buys nothing —
+        // this is the load-bearing honesty of the model.
+        let mut cfg = EmsecConfig::doctrine_v0();
+        cfg.beacon_jitter = BeaconJitter { window_s: 10.0, unpredictable: false };
+        assert_eq!(effective_averageable_pulses(&cfg), cfg.beacon_pulses_per_day);
+        let p = assess(&TowerSpec::quillon_default(), &cfg);
+        assert!(p.components.averaging_resistance < 0.01);
+        assert!(p.findings.iter().any(|f| f.contains("predictable")));
+    }
+
+    #[test]
+    fn sub_resolution_jitter_buys_nothing() {
+        // Unpredictable, but smaller than what the attacker can time: invisible.
+        let mut cfg = EmsecConfig::doctrine_v0();
+        cfg.beacon_jitter = BeaconJitter { window_s: 1e-9, unpredictable: true };
+        assert_eq!(effective_averageable_pulses(&cfg), cfg.beacon_pulses_per_day);
+    }
+
+    #[test]
+    fn sufficient_crypto_jitter_defeats_averaging() {
+        let mut cfg = EmsecConfig::doctrine_v0();
+        // Just over the required window, and unpredictable → coherent count → 1.
+        cfg.beacon_jitter = BeaconJitter {
+            window_s: required_jitter_window_s(&cfg) * 1.5,
+            unpredictable: true,
+        };
+        assert_eq!(effective_averageable_pulses(&cfg), 1);
+        let p = assess(&TowerSpec::quillon_default(), &cfg);
+        assert!((p.components.averaging_resistance - 1.0).abs() < 1e-9);
+        assert!(!p.findings.iter().any(|f| f.starts_with("P3")));
     }
 
     #[test]

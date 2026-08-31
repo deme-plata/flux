@@ -133,7 +133,9 @@ fn print_emsec() {
     println!("  P1  guardian ring   — bank hall re-zoned to RED 2–4, GRAY refuge decks at 1 & 5;");
     println!("                        + signing key in an HSM (RED/BLACK power+cabling isolation)");
     println!("  P2  earth & water   — gold (#79) below grade; ≥30 m standoff + waterfront on the RED faces");
-    println!("  P3  masked beacon   — the light column (#137) still pulses every block, but JITTERED:");
+    let req_ms = emsec::required_jitter_window_s(&EmsecConfig::doctrine_v0()) * 1000.0;
+    println!("  P3  masked beacon   — the light column (#137) still pulses every block, but JITTERED by");
+    println!("                        ≥{req_ms:.0} ms of CRYPTO-UNPREDICTABLE offset (a VRF, not a public PRNG):");
     println!("                        the heartbeat lives, the phase-lock an eavesdropper needs dies");
     println!("  P4  fail-closed     — producer-signature verification ON, cross-node integrity verified");
     println!();

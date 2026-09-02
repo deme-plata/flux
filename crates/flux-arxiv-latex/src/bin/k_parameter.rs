@@ -407,7 +407,7 @@ fn main() {
         ("serving one syncing peer", 0.01, 0.98, 0.0, 0.0, h0.round()),
         ("peer churn 50\\%", 0.01, 0.10, 0.5, 0.0, h0.round()),
         ("mining rejection 30\\%", 0.30, 0.10, 0.0, 0.0, h0.round()),
-        ("production stall (2 blocks/window)", 0.01, 0.10, 0.0, 0.0, 2.0),
+        ("production stall (2 blk/window)", 0.01, 0.10, 0.0, 0.0, 2.0),
         ("5\\% behind network height", 0.01, 0.10, 0.0, 0.05, h0.round()),
         ("everything at once", 0.30, 0.98, 0.5, 0.05, 2.0),
     ];
@@ -415,6 +415,8 @@ fn main() {
     let mut scen_rows = String::new();
     let mut blind_corrected: Vec<&str> = vec![];
     let mut fires_defined: Vec<&str> = vec![];
+    let mut misses_defined: Vec<&str> = vec![];
+    let mut shipped_labels: Vec<(&str, &str)> = vec![];
     for (name, rej, asym, churn, sync, h) in scen.iter() {
         let dh = rej + asym + churn;
         let ds_ship = sync + (h - g_tau).abs() / g_tau;
@@ -429,11 +431,22 @@ fn main() {
         if stressed && phase_of(kd) != "stable" {
             fires_defined.push(name);
         }
+        if stressed && phase_of(kd) == "stable" {
+            misses_defined.push(name);
+        }
+        shipped_labels.push((name, phase_of(ks)));
         scen_rows.push_str(&format!(
             "{} & {:.2} & {:.2} & \\texttt{{{}}} & {:.2} & \\texttt{{{}}} & {:.2} & \\texttt{{{}}} \\\\\n",
             name, dh, ks, phase_of(ks), kc, phase_of(kc), kd, phase_of(kd)
         ));
     }
+    let healthy_label = shipped_labels.get(1).map(|x| x.1).unwrap_or("?");
+    let confused: Vec<String> = shipped_labels
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, lab))| *i >= 2 && *lab == healthy_label)
+        .map(|(_, (n, _))| format!("``{}''", n))
+        .collect();
     let scenario_block = format!(
         "A referee's next question is whether fixing the constant leaves a gauge that still fires. Seven deterministic \
          scenarios at the chain's observed nominal rate ($h_0={:.1}$ blocks per window), scored three ways: as shipped; \
@@ -441,21 +454,26 @@ fn main() {
          of the proposer distribution rather than a deviation. For the last column we use the smallest non-trivial \
          proposer entropy, $\\ln 2$ (two equiprobable proposers), plus the corrected deviation; that floor is \
          illustrative, not measured. All three use the $\\times100$ enhancement that is constant on this chain.\n\n\
-         \\begin{{center}}\\footnotesize\\begin{{tabular}}{{lccccccc}}\\toprule\n\
-         scenario & $\\Delta H$ & $K_{{\\text{{enh}}}}$ shipped & phase & corrected & phase & as defined & phase \\\\\\midrule\n\
+         \\begin{{center}}\\scriptsize\\begin{{tabular}}{{lccccccc}}\\toprule\n\
+         scenario & $\\Delta H$ & shipped & phase & corrected & phase & as defined & phase \\\\\\midrule\n\
          {}\\bottomrule\\end{{tabular}}\\end{{center}}\n\n\
-         Two things to read off. The shipped gauge cannot tell scenario 2 (a healthy supernode doing its job) from \
-         scenarios 3, 4 and 7 (real trouble): all are ``critical''. The corrected gauge fixes the false alarm but goes \
-         \\emph{{blind}} to {} --- because $K\\propto\\sqrt{{\\Delta H\\cdot\\Delta s}}$ is a product, and a correctly \
+         Three things to read off. The shipped gauge scores scenario 2 (a healthy supernode doing its job) as \
+         \\texttt{{{}}}, the same label it gives {} --- it cannot tell a job from a fault. The corrected gauge fixes \
+         the false alarm but goes \\emph{{blind}} to {} --- because $K\\propto\\sqrt{{\\Delta H\\cdot\\Delta s}}$ is a product, and a correctly \
          calibrated deviation is \\emph{{zero}} on a chain producing at its nominal rate, so no amount of $\\Delta H$ \
          can move it. That is the third defect \\texttt{{flux-kgauge}} reported (Eq.~25 inert at $K_{{\\text{{base}}}}=0$), \
          now visible one level down. The as-defined column restores sensitivity to {}: an entropy of proposers is never \
-         zero while more than one party can propose, so the product never dies. The implementation's substitution of a \
+         zero while more than one party can propose, so the product never dies. It still misses {}: the mirror-image \
+         blindness, a quiet $\\Delta H$ suppressing a real $\\Delta s$ event, which is the product form's remaining cost \
+         and the argument for reporting the two factors beside the gauge. The implementation's substitution of a \
          block-rate deviation for the proposer entropy was the change that broke Kristensen's gauge, not the gauge.",
         h0,
         scen_rows,
+        healthy_label,
+        if confused.is_empty() { "no fault scenario".to_string() } else { confused.join(", ") },
         if blind_corrected.is_empty() { "nothing".to_string() } else { blind_corrected.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") },
-        if fires_defined.is_empty() { "nothing".to_string() } else { fires_defined.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") }
+        if fires_defined.is_empty() { "nothing".to_string() } else { fires_defined.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") },
+        if misses_defined.is_empty() { "nothing".to_string() } else { misses_defined.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") }
     );
 
     // ------------------------------------------------------------ LaTeX

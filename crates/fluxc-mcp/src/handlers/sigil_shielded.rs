@@ -274,7 +274,8 @@ fn recover(seed: [u8; 32], pool: &Pool, opts: &ScanOpts) -> Wallet {
             continue;
         }
         if let Ok(pt) = try_open_note(&NoteCiphertext(c.clone()), &enc) {
-            if store.receive(pt.value, pt.blinding) {
+            let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
+            if store.receive_with_memo(pt.value, pt.blinding, memo) {
                 origins.push("received");
             }
         }
@@ -355,6 +356,7 @@ impl Wallet {
                     "leaf_position": n.position,
                     "spendable": n.position.is_some() && !n.spent && !self.is_spent(i),
                     "origin": self.origins.get(i).copied().unwrap_or("unknown"),
+                    "memo": n.memo,
                 })
             })
             .collect()
@@ -418,6 +420,7 @@ fn prove_and_seal(
     public_value: u64,
     to_amount: u64,
     recipient: &ShieldedAddress,
+    memo: &str,
 ) -> Result<(SpendBundle, Vec<Value>), String> {
     let recipient_pk = recipient
         .shield_key()
@@ -439,14 +442,28 @@ fn prove_and_seal(
     let cts: Vec<Value> = (0..2)
         .map(|i| {
             let (v, b) = bundle.out_preimages[i];
-            match seal_note(&NotePlaintext { value: v, blinding: b }, targets[i]) {
+            // The memo goes to the recipient only; the change note back to ourselves
+            // carries none (we wrote it, we do not need to be told).
+            let pt = if i == 0 {
+                match NotePlaintext::new(v, b).with_memo(memo) {
+                    Ok(p) => p,
+                    Err(_) => return Value::Null,
+                }
+            } else {
+                NotePlaintext::new(v, b)
+            };
+            match seal_note(&pt, targets[i]) {
                 Ok(ct) => json!(ct.0),
                 Err(_) => Value::Null,
             }
         })
         .collect();
     if cts[0].is_null() {
-        return Err("could not seal the recipient's note ciphertext — check pk_encrypt".into());
+        return Err(format!(
+            "could not seal the recipient's note ciphertext — check pk_encrypt, and that the \
+             memo is at most {} bytes",
+            sigil_shield::note_cipher::MEMO_LEN
+        ));
     }
     Ok((bundle, cts))
 }
@@ -523,7 +540,8 @@ pub fn register(registry: &mut ToolRegistry) {
                       no recipient and no amount on chain. Args: seed (hex, the SENDER), \
                       amount (integer raw base units), and ONE of: to_address \
                       (sigil1s:<pk_shield>:<pk_encrypt>) | pk_shield+pk_encrypt | to (64-hex \
-                      wallet that has registered a shielded address). broadcast (default \
+                      wallet that has registered a shielded address). memo (optional, \
+                      max 512 UTF-8 bytes) rides sealed inside the recipient's note. broadcast (default \
                       FALSE) — a dry run returns the plan and stops BEFORE proving; pass true \
                       to actually move value. The fee is fixed at 100000 raw and is not \
                       selectable (a chosen fee is a fingerprint).",
@@ -532,6 +550,7 @@ pub fn register(registry: &mut ToolRegistry) {
             "to":{"type":"string"},"to_address":{"type":"string"},
             "pk_shield":{"type":"string"},"pk_encrypt":{"type":"string"},
             "broadcast":{"type":"boolean","default":false},
+            "memo":{"type":"string","description":"Optional private message (UTF-8, max 512 bytes) sealed to the recipient with the note; only they can read it, and every ciphertext is padded so its presence leaks nothing."},
             "index_scan":{"type":"integer"},"coinbase_window":{"type":"integer"},"height":{"type":"integer"}
         },"required":["seed","amount"]}),
     }, shielded_send_full);
@@ -655,6 +674,14 @@ fn shielded_send_full(a: &Value) -> String {
         Ok(r) => r,
         Err(e) => return err(e),
     };
+    let memo = arg_str(a, "memo", "");
+    if memo.len() > sigil_shield::note_cipher::MEMO_LEN {
+        return err(format!(
+            "memo is {} bytes; the limit is {} (UTF-8 bytes, not characters)",
+            memo.len(),
+            sigil_shield::note_cipher::MEMO_LEN
+        ));
+    }
     let pool = match fetch_pool() {
         Ok(p) => p,
         Err(e) => return err(e),
@@ -693,7 +720,7 @@ fn shielded_send_full(a: &Value) -> String {
         .to_string();
     }
 
-    let (bundle, cts) = match prove_and_seal(&mut w, &seed, &pool, pos, SHIELDED_FEE, amount, &recipient) {
+    let (bundle, cts) = match prove_and_seal(&mut w, &seed, &pool, pos, SHIELDED_FEE, amount, &recipient, &memo) {
         Ok(x) => x,
         Err(e) => return err(e),
     };
@@ -761,7 +788,7 @@ fn unshield_full(a: &Value) -> String {
     // Both outputs stay ours: the change, and a zero note that keeps the output
     // count fixed at N_OUTS (a variable output count would itself leak).
     let self_addr = w.acct.address(&seed);
-    let (bundle, cts) = match prove_and_seal(&mut w, &seed, &pool, pos, amount, 0, &self_addr) {
+    let (bundle, cts) = match prove_and_seal(&mut w, &seed, &pool, pos, amount, 0, &self_addr, "") {
         Ok(x) => x,
         Err(e) => return err(e),
     };
@@ -943,7 +970,7 @@ mod tests {
         let seed = [9u8; 32];
         let acct = ShieldedAccount::from_seed(seed);
         let enc = enc_identity_from_seed(&seed);
-        let pt = NotePlaintext { value: 4_242, blinding: acct.blinding(3) };
+        let pt = NotePlaintext::new(4_242, acct.blinding(3));
         let ct = seal_note(&pt, &acct.address(&seed)).expect("seal to self");
         let back = try_open_note(&ct, &enc).expect("own ciphertext must reopen");
         assert_eq!(back, pt);
@@ -956,7 +983,7 @@ mod tests {
     fn foreign_ciphertext_does_not_open() {
         let mine = ShieldedAccount::from_seed([1u8; 32]);
         let theirs = ShieldedAccount::from_seed([2u8; 32]);
-        let pt = NotePlaintext { value: 7, blinding: theirs.blinding(0) };
+        let pt = NotePlaintext::new(7, theirs.blinding(0));
         let ct = seal_note(&pt, &theirs.address(&[2u8; 32])).expect("seal");
         assert!(try_open_note(&ct, &enc_identity_from_seed(&[1u8; 32])).is_err());
         let _ = mine;
@@ -1028,7 +1055,7 @@ mod tests {
 
         let bob_addr = bob.address(&bob_seed);
         let (bundle, cts) =
-            prove_and_seal(&mut w, &alice_seed, &pool, pos, SHIELDED_FEE, 500, &bob_addr)
+            prove_and_seal(&mut w, &alice_seed, &pool, pos, SHIELDED_FEE, 500, &bob_addr, "")
                 .expect("prove");
 
         // The node's own door check. Same signature, same arguments.
@@ -1070,7 +1097,7 @@ mod tests {
         let mut w = recover(seed, &pool, &offline());
         let pos = w.select(SHIELDED_FEE).expect("note");
         let addr = acct.address(&seed);
-        let (bundle, _) = prove_and_seal(&mut w, &seed, &pool, pos, SHIELDED_FEE, 0, &addr).unwrap();
+        let (bundle, _) = prove_and_seal(&mut w, &seed, &pool, pos, SHIELDED_FEE, 0, &addr, "").unwrap();
 
         let mut bad = bundle.proof.clone();
         let n = bad.len() / 2;

@@ -11,11 +11,8 @@ use flux_arxiv_latex::doc::{Block, Document};
 use flux_arxiv_latex::{bibliography, latex_escape, parse_arxiv_json, related_work_section, ArxivPaper};
 use flux_science::constants::*;
 
-// CODATA 2022 values NOT yet carried by flux-science::constants (audit fix #2,
-// kappa-hep 2026-07-30). Supplied here, labelled, until the crate grows them.
-const ELECTRON_VOLT: f64 = 1.602_176_634e-19; // J, exact
-const PROTON_MASS: f64 = 1.672_621_925_95e-27; // kg, u_r 3.1e-10
-const ELECTRON_MASS: f64 = 9.109_383_713_9e-31; // kg, u_r 3.1e-10
+// eV, m_p, m_e now come from flux-science::constants (CODATA 2022 particle
+// block landed 2026-09-02, closing kappa-hep audit fix #2).
 
 /// Format a number for math mode: plain when small, \times10^{n} otherwise.
 fn sci(x: f64) -> String {
@@ -102,9 +99,9 @@ fn main() {
     let e_p = planck_energy();
     let e_p_gev = e_p / ELECTRON_VOLT / 1e9;
     let alpha = fine_structure();
-    let alpha_g_p = GRAVITATIONAL * PROTON_MASS.powi(2) / (PLANCK_REDUCED * SPEED_OF_LIGHT);
-    let alpha_g_e = GRAVITATIONAL * ELECTRON_MASS.powi(2) / (PLANCK_REDUCED * SPEED_OF_LIGHT);
-    let landauer_300 = BOLTZMANN * 300.0 * ln2;
+    let alpha_g_p = gravitational_coupling(PROTON_MASS);
+    let alpha_g_e = gravitational_coupling(ELECTRON_MASS);
+    let landauer_300 = landauer_bound(300.0);
     let landauer_mev = landauer_300 / ELECTRON_VOLT * 1e3;
     let phi = (1.0 + 5f64.sqrt()) / 2.0;
     let bits_per_round = 2.0 * phi.log2();
@@ -293,9 +290,9 @@ fn main() {
              $k_B$ & ${}$\\,J/K & exact \\\\\n\
              $G$ & ${}$\\,m$^3$kg$^{{-1}}$s$^{{-2}}$ & $u_r=2.2\\times10^{{-5}}$ \\\\\n\
              $\\alpha^{{-1}}$ & ${:.9}$ & $u_r=1.6\\times10^{{-10}}$ \\\\\n\
-             $e$ (1\\,eV) & ${}$\\,J & exact, supplied$^\\dagger$ \\\\\n\
-             $m_p$ & ${}$\\,kg & $u_r=3.1\\times10^{{-10}}$, supplied$^\\dagger$ \\\\\n\
-             $m_e$ & ${}$\\,kg & $u_r=3.1\\times10^{{-10}}$, supplied$^\\dagger$ \\\\\\midrule\n\
+             $e$ (1\\,eV) & ${}$\\,J & exact \\\\\n\
+             $m_p$ & ${}$\\,kg & $u_r=3.1\\times10^{{-10}}$ \\\\\n\
+             $m_e$ & ${}$\\,kg & $u_r=3.1\\times10^{{-10}}$ \\\\\\midrule\n\
              $\\ell_P$ & ${}$\\,m & derived \\\\\n\
              $t_P$ & ${}$\\,s & derived \\\\\n\
              $m_P$ & ${}$\\,kg & derived \\\\\n\
@@ -305,8 +302,8 @@ fn main() {
              $k_BT\\ln2$ at 300\\,K & ${}$\\,J $= {:.1}$\\,meV & derived \\\\\n\
              $2\\log_2\\varphi$ & ${:.5}$ bits/round & derived \\\\\\bottomrule\n\
              \\end{{tabular}}\\end{{center}}\n\
-             {{\\small $^\\dagger$\\,not yet in \\texttt{{flux-science::constants}} (open audit item); supplied from CODATA 2022 \
-             by this generator. The crate's one non-CODATA entry, $H_0=70$, is not used.}}\n\n",
+             {{\\small All values from \\texttt{{flux-science::constants}}; the particle block ($e$, $m_p$, $m_e$, $h$) was \
+             added on 2026-09-02, closing the July audit's open item. The crate's one non-CODATA entry, $H_0=70$, is not used.}}\n\n",
             sci(SPEED_OF_LIGHT),
             sci(PLANCK_REDUCED),
             sci(BOLTZMANN),

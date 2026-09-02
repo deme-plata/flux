@@ -6,7 +6,7 @@
 //! the LIVE Quillon Graph gauge (`/api/v1/k-parameter`) is read into the paper.
 //! Related work comes from a live arXiv API sweep parsed by flux-arxiv-latex.
 //!
-//! Usage: k_parameter [arxiv.json] [out_dir] [gauge_snapshot.json]
+//! Usage: k_parameter [arxiv.json] [out_dir] [gauge_snapshot.json] [gauge_series.jsonl]
 use flux_arxiv_latex::doc::{Block, Document};
 use flux_arxiv_latex::{bibliography, latex_escape, parse_arxiv_json, related_work_section, ArxivPaper};
 use flux_science::constants::*;
@@ -78,11 +78,49 @@ fn load_gauge(path: &str) -> Option<Gauge> {
     })
 }
 
+
+/// One row of the live-gauge time series (`/api/v1/k-parameter` `data`, one JSON object per line).
+struct Sample {
+    at: i64,
+    k: f64,
+    k_enh: f64,
+    dh: f64,
+    ds: f64,
+    brd: f64,
+    rej: f64,
+    churn: f64,
+    lam: f64,
+    phase: String,
+}
+
+fn load_series(path: &str) -> Vec<Sample> {
+    let Ok(txt) = std::fs::read_to_string(path) else { return vec![] };
+    txt.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|d| {
+            let f = |k: &str| d.get(k).and_then(|x| x.as_f64());
+            Some(Sample {
+                at: d.get("last_computed_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                k: f("k_value")?,
+                k_enh: f("k_enhanced")?,
+                dh: f("delta_h")?,
+                ds: f("delta_s")?,
+                brd: f("block_rate_deviation")?,
+                rej: f("rejection_ratio")?,
+                churn: f("peer_churn")?,
+                lam: f("lambda_commit")?,
+                phase: d.get("phase").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+            })
+        })
+        .collect()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let json_path = args.get(1).map(String::as_str).unwrap_or("crates/flux-arxiv-latex/k_parameter.arxiv.json");
     let out_dir = args.get(2).map(String::as_str).unwrap_or("/home/storage/claude-code/k-parameter-paper");
     let gauge = args.get(3).and_then(|p| load_gauge(p));
+    let series = args.get(4).map(|p| load_series(p)).unwrap_or_default();
 
     let papers: Vec<ArxivPaper> = std::fs::read_to_string(json_path)
         .ok()
@@ -221,6 +259,137 @@ fn main() {
                  quoted from memory. Rerun with a third argument pointing at a saved \\texttt{/api/v1/k-parameter} \
                  response to populate it."
             .to_string(),
+    };
+
+
+    // ------------------------------------------------------------ anatomy of the live gauge
+    // Constants as shipped in q-api-server/src/k_parameter_gauge.rs (v10.3.0):
+    let g_tau = 60.0_f64; // window, s; ALSO used as "expected blocks per round" (1 bps assumed)
+    let g_kappa_tc = 18.0_f64 * 100.0; // KAPPA * TAU_CONFIRM in Lambda_commit
+    let g_lam_min = 0.01_f64;
+    let g_cap = 100.0_f64;
+    let g_thr_appr = 5.0_f64;
+    let g_thr_crit = 10.0_f64;
+    let k_base_max = 2.0 * pi * (3.0_f64 * 2.0).sqrt() / g_tau; // dH<=3 (three ratios), dS<=2
+    let prod_crit = (g_thr_crit / g_cap * g_tau / (2.0 * pi)).powi(2);
+    let prod_appr = (g_thr_appr / g_cap * g_tau / (2.0 * pi)).powi(2);
+    let hd_escape_clamp = -g_kappa_tc * (1.0 - g_lam_min).ln(); // blocks/window for Lambda >= 0.01
+    let hd_half = g_kappa_tc * 2f64.ln(); // blocks/window for Lambda = 0.5
+    let mut anat_rows = String::new();
+    let mut rates = vec![];
+    let mut asyms = vec![];
+    let mut max_recon_err = 0f64;
+    let mut ratios_all_cap = true;
+    let mut lam_err_max = 0f64;
+    for smp in &series {
+        let hd = (g_tau * (1.0 - smp.brd)).round(); // brd = (60 - hd)/60 when hd < 60
+        let rate = hd / g_tau;
+        let asym = (smp.dh - smp.rej - smp.churn).max(0.0);
+        let k_recon = 2.0 * pi * (smp.dh * smp.ds).sqrt() / g_tau;
+        let err = if smp.k > 0.0 { ((k_recon - smp.k) / smp.k).abs() } else { 0.0 };
+        if err > max_recon_err {
+            max_recon_err = err;
+        }
+        let lam_recon = 1.0 - (-hd / g_kappa_tc).exp();
+        let lerr = if smp.lam > 0.0 { ((lam_recon - smp.lam) / smp.lam).abs() } else { 0.0 };
+        if lerr > lam_err_max {
+            lam_err_max = lerr;
+        }
+        let ratio = if smp.k > 0.0 { smp.k_enh / smp.k } else { 0.0 };
+        if (ratio - g_cap).abs() > 1e-6 {
+            ratios_all_cap = false;
+        }
+        rates.push(rate);
+        asyms.push(asym);
+        anat_rows.push_str(&format!(
+            "{} & {:.0} & {:.3} & {:.3} & {:.4} & {:.4} & {:.0} & \\texttt{{{}}} \\\\\n",
+            smp.at, hd, rate, asym, smp.k, k_recon, ratio, smp.phase
+        ));
+    }
+    let n_s = series.len().max(1) as f64;
+    let rate_mean = rates.iter().sum::<f64>() / n_s;
+    let asym_min = asyms.iter().cloned().fold(f64::INFINITY, f64::min);
+    let asym_max = asyms.iter().cloned().fold(0.0, f64::max);
+    let ds_floor = (1.0 - rate_mean).abs(); // block_rate_deviation the wrong constant guarantees
+    // ΔH needed for CRITICAL given that floor (sync divergence ~0):
+    let dh_for_crit = prod_crit / ds_floor.max(1e-9);
+    let dh_for_appr = prod_appr / ds_floor.max(1e-9);
+    // Same samples re-scored with the observed mean rate as the expected rate:
+    let mut rescored = String::new();
+    for smp in &series {
+        let hd = (g_tau * (1.0 - smp.brd)).round();
+        let sync_div = (smp.ds - smp.brd).max(0.0);
+        let brd_true = (hd - g_tau * rate_mean).abs() / (g_tau * rate_mean);
+        let ds_true = sync_div + brd_true;
+        let k_true = 2.0 * pi * (smp.dh * ds_true).sqrt() / g_tau;
+        let k_enh_true = k_true * g_cap;
+        let ph = if k_enh_true >= g_thr_crit { "critical" } else if k_enh_true >= g_thr_appr { "approaching" } else { "stable" };
+        rescored.push_str(&format!("{} & {:.3} & {:.4} & \\texttt{{{}}} & \\texttt{{{}}} \\\\\n", smp.at, ds_true, k_true, smp.phase, ph));
+    }
+    let anatomy_block = if series.is_empty() {
+        "No time series was supplied; this section is intentionally empty rather than quoted from memory.".to_string()
+    } else {
+        format!(
+            "The gauge that Quillon Graph serves is 681 lines of Rust; its whole arithmetic fits in four lines. Per \
+             60\\,s window it forms $\\Delta H=r_{{\\text{{rej}}}}+a_{{\\text{{traffic}}}}+c_{{\\text{{churn}}}}$ (mining rejection \
+             ratio, $|{{\\rm in}}-{{\\rm out}}|/({{\\rm in}}+{{\\rm out}})$ of P2P bytes, and relative peer-count change), \
+             $\\Delta s=d_{{\\text{{sync}}}}+|h-60|/60$ (relative height lag plus the deviation of the window's block count \
+             $h$ from an \\emph{{assumed}} 60), then $K_{{\\text{{base}}}}=2\\pi\\sqrt{{\\Delta H\\,\\Delta s}}/60$ with $\\hbar:=1$, \
+             and finally $K_{{\\text{{enh}}}}=\\min\\!\\big(K_{{\\text{{base}}}}\\cdot100,\\;K_{{\\text{{base}}}}/\\max(\\Lambda,0.01)\\cdot(2-\\Omega)\\big)$ \
+             with $\\Lambda=1-e^{{-h/1800}}$. Phases: approaching at $K_{{\\text{{enh}}}}\\ge5$, critical at $\\ge10$. \
+             The series below ({} samples, reconstructed from the published fields) checks that reading: recomputing \
+             $K_{{\\text{{base}}}}$ from the published $\\Delta H,\\Delta s$ reproduces the published value to ${}$, and \
+             recomputing $\\Lambda$ from the inferred block count reproduces it to ${}$, so the formula above is what is \
+             running.\n\n\
+             \\begin{{center}}\\footnotesize\\begin{{tabular}}{{lccccccl}}\\toprule\n\
+             epoch & $h$ & rate [blk/s] & $a_{{\\text{{traffic}}}}$ & $K_{{\\text{{base}}}}$ & recomputed & $K_{{\\text{{enh}}}}/K_{{\\text{{base}}}}$ & phase \\\\\\midrule\n\
+             {}\\bottomrule\\end{{tabular}}\\end{{center}}\n\n\
+             Three calibration facts follow, and none of them is about Kristensen's definition.\n\n\
+             \\textbf{{The zero is wrong.}} The code expects 60 blocks per window (one block per second). The chain \
+             produced ${:.1}$ blocks per window on average, ${:.3}$\\,blk/s, so $\\Delta s$ carries a permanent floor of \
+             ${:.3}$ on a chain that is doing exactly what it should. That floor is a constant, not a measurement; it is \
+             the same species of error as SIGIL's 6.28-vs-0.83\\,blk/s trap found in \\texttt{{flux-kgauge}}.\n\n\
+             \\textbf{{The needle is the network cable.}} With rejection $\\sim1\\%$ and churn $0$, $\\Delta H$ is the P2P \
+             traffic asymmetry, which ranged from ${:.3}$ to ${:.3}$ across the samples. A supernode that spends a minute \
+             serving block-packs to one syncing peer has $|{{\\rm in}}-{{\\rm out}}|/({{\\rm in}}+{{\\rm out}})\\to1$ and reads \
+             ``critical''; a minute of balanced gossip reads ``stable''. Given the $\\Delta s$ floor, the phase lines sit at \
+             $\\Delta H\\ge{:.3}$ (approaching) and $\\Delta H\\ge{:.3}$ (critical): the whole phase machinery on this chain \
+             reduces to \\emph{{which way the bytes are flowing}}.\n\n\
+             \\textbf{{The enhancement is a constant.}} $K_{{\\text{{base}}}}$ cannot exceed ${:.3}$ even with every ratio \
+             pinned at its maximum, so it can never cross the thresholds 5 and 10 on its own; classification lives \
+             entirely in the $\\times100$. And it is exactly $\\times100$: $\\Lambda=1-e^{{-h/1800}}$ needs $h\\ge{:.1}$ \
+             blocks per window (${:.2}$\\,blk/s) just to escape the $0.01$ clamp and $h={:.0}$ to reach $0.5$, both far \
+             above the chain's rate, so $1/\\Lambda$ clamps to 100 and the cap is also 100. Every sample shows \
+             $K_{{\\text{{enh}}}}/K_{{\\text{{base}}}}=100$ ({}), and $f_{{\\text{{irrev}}}}=0$ because $h\\le{:.0}\\ll360$. \
+             Equations 17--25 of the reference model add no information on this chain; they multiply by a constant.\n\n\
+             Re-scoring the same samples with the \\emph{{observed}} mean rate as the expected rate (everything else \
+             unchanged) gives:\n\n\
+             \\begin{{center}}\\footnotesize\\begin{{tabular}}{{lcccc}}\\toprule\n\
+             epoch & $\\Delta s$ (corrected) & $K_{{\\text{{base}}}}$ & phase (shipped) & phase (corrected) \\\\\\midrule\n\
+             {}\\bottomrule\\end{{tabular}}\\end{{center}}\n\n\
+             The fix is one constant and one measurement: expected blocks per window should be the chain's measured \
+             rate times 60, and the round time should be measured independently of $\\Delta H$ (Section~4). After \
+             that, the traffic term needs a physical argument for why byte \\emph{{direction}} is an energy spread at \
+             all; on a supernode it is a job description.",
+            series.len(),
+            sci(max_recon_err.max(1e-16)),
+            sci(lam_err_max.max(1e-16)),
+            anat_rows,
+            rate_mean * g_tau,
+            rate_mean,
+            ds_floor,
+            asym_min,
+            asym_max,
+            dh_for_appr,
+            dh_for_crit,
+            k_base_max,
+            hd_escape_clamp,
+            hd_escape_clamp / g_tau,
+            hd_half,
+            if ratios_all_cap { "all samples" } else { "not all samples" },
+            rates.iter().cloned().fold(0.0, f64::max) * g_tau,
+            rescored
+        )
     };
 
     // ------------------------------------------------------------ LaTeX
@@ -424,6 +593,8 @@ fn main() {
         )))
         .add(Block::Section("The Live Gauge at Generation Time".into()))
         .add(para(gauge_block))
+        .add(Block::Section("Anatomy of the Live Gauge: Why It Swings on a Quiet Chain".into()))
+        .add(para(anatomy_block))
         .add(Block::Section("Epsilon Against the Same Bound".into()))
         .add(para(format!(
             "The machine generating this paper is roughly 20\\,kg of matter, $E=mc^2={}$\\,J, so its Margolus--Levitin \

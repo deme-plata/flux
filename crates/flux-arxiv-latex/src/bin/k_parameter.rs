@@ -392,6 +392,72 @@ fn main() {
         )
     };
 
+
+    // ------------------------------------------------------------ scenario simulation
+    // Does a gauge with the expected-rate constant corrected still fire on real stress?
+    // Deterministic scenarios at the chain's observed nominal rate. Three scorings:
+    //   shipped   : Δs = sync + |h-60|/60
+    //   corrected : Δs = sync + |h-h0|/h0, h0 = observed mean blocks/window
+    //   as-defined: Δs = H_prop + corrected deviation, H_prop = ln 2 (two equiprobable
+    //               proposers — the smallest non-trivial proposer entropy; ILLUSTRATIVE)
+    let h0 = (rate_mean * g_tau).max(1.0);
+    let scen: [(&str, f64, f64, f64, f64, f64); 7] = [
+        // name, rejection, traffic asym, churn, sync divergence, blocks in window
+        ("quiet, balanced gossip", 0.01, 0.10, 0.0, 0.0, h0.round()),
+        ("serving one syncing peer", 0.01, 0.98, 0.0, 0.0, h0.round()),
+        ("peer churn 50\\%", 0.01, 0.10, 0.5, 0.0, h0.round()),
+        ("mining rejection 30\\%", 0.30, 0.10, 0.0, 0.0, h0.round()),
+        ("production stall (2 blocks/window)", 0.01, 0.10, 0.0, 0.0, 2.0),
+        ("5\\% behind network height", 0.01, 0.10, 0.0, 0.05, h0.round()),
+        ("everything at once", 0.30, 0.98, 0.5, 0.05, 2.0),
+    ];
+    let phase_of = |k_enh: f64| if k_enh >= g_thr_crit { "critical" } else if k_enh >= g_thr_appr { "approaching" } else { "stable" };
+    let mut scen_rows = String::new();
+    let mut blind_corrected: Vec<&str> = vec![];
+    let mut fires_defined: Vec<&str> = vec![];
+    for (name, rej, asym, churn, sync, h) in scen.iter() {
+        let dh = rej + asym + churn;
+        let ds_ship = sync + (h - g_tau).abs() / g_tau;
+        let ds_corr = sync + (h - h0).abs() / h0;
+        let ds_def = 2f64.ln() + ds_corr;
+        let k = |ds: f64| g_cap * 2.0 * pi * (dh * ds).sqrt() / g_tau;
+        let (ks, kc, kd) = (k(ds_ship), k(ds_corr), k(ds_def));
+        let stressed = *churn > 0.0 || *rej > 0.1 || *sync > 0.0 || *h < h0 / 2.0;
+        if stressed && phase_of(kc) == "stable" {
+            blind_corrected.push(name);
+        }
+        if stressed && phase_of(kd) != "stable" {
+            fires_defined.push(name);
+        }
+        scen_rows.push_str(&format!(
+            "{} & {:.2} & {:.2} & \\texttt{{{}}} & {:.2} & \\texttt{{{}}} & {:.2} & \\texttt{{{}}} \\\\\n",
+            name, dh, ks, phase_of(ks), kc, phase_of(kc), kd, phase_of(kd)
+        ));
+    }
+    let scenario_block = format!(
+        "A referee's next question is whether fixing the constant leaves a gauge that still fires. Seven deterministic \
+         scenarios at the chain's observed nominal rate ($h_0={:.1}$ blocks per window), scored three ways: as shipped; \
+         with the expected rate corrected to $h_0$; and \\emph{{as Kristensen defined it}}, with $\\Delta s$ an entropy \
+         of the proposer distribution rather than a deviation. For the last column we use the smallest non-trivial \
+         proposer entropy, $\\ln 2$ (two equiprobable proposers), plus the corrected deviation; that floor is \
+         illustrative, not measured. All three use the $\\times100$ enhancement that is constant on this chain.\n\n\
+         \\begin{{center}}\\footnotesize\\begin{{tabular}}{{lccccccc}}\\toprule\n\
+         scenario & $\\Delta H$ & $K_{{\\text{{enh}}}}$ shipped & phase & corrected & phase & as defined & phase \\\\\\midrule\n\
+         {}\\bottomrule\\end{{tabular}}\\end{{center}}\n\n\
+         Two things to read off. The shipped gauge cannot tell scenario 2 (a healthy supernode doing its job) from \
+         scenarios 3, 4 and 7 (real trouble): all are ``critical''. The corrected gauge fixes the false alarm but goes \
+         \\emph{{blind}} to {} --- because $K\\propto\\sqrt{{\\Delta H\\cdot\\Delta s}}$ is a product, and a correctly \
+         calibrated deviation is \\emph{{zero}} on a chain producing at its nominal rate, so no amount of $\\Delta H$ \
+         can move it. That is the third defect \\texttt{{flux-kgauge}} reported (Eq.~25 inert at $K_{{\\text{{base}}}}=0$), \
+         now visible one level down. The as-defined column restores sensitivity to {}: an entropy of proposers is never \
+         zero while more than one party can propose, so the product never dies. The implementation's substitution of a \
+         block-rate deviation for the proposer entropy was the change that broke Kristensen's gauge, not the gauge.",
+        h0,
+        scen_rows,
+        if blind_corrected.is_empty() { "nothing".to_string() } else { blind_corrected.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") },
+        if fires_defined.is_empty() { "nothing".to_string() } else { fires_defined.iter().map(|x| format!("``{}''", x)).collect::<Vec<_>>().join(", ") }
+    );
+
     // ------------------------------------------------------------ LaTeX
     let mut doc = Document::new("article")
         .option("11pt")
@@ -595,6 +661,8 @@ fn main() {
         .add(para(gauge_block))
         .add(Block::Section("Anatomy of the Live Gauge: Why It Swings on a Quiet Chain".into()))
         .add(para(anatomy_block))
+        .add(Block::Section("Does the Corrected Gauge Still Fire? Seven Scenarios".into()))
+        .add(para(scenario_block))
         .add(Block::Section("Epsilon Against the Same Bound".into()))
         .add(para(format!(
             "The machine generating this paper is roughly 20\\,kg of matter, $E=mc^2={}$\\,J, so its Margolus--Levitin \

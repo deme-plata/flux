@@ -1,0 +1,97 @@
+{
+ "papers": [
+  {
+   "id": "1705.08023",
+   "title": "Quantum speed limits: from Heisenberg's uncertainty principle to optimal quantum control",
+   "authors": [
+    "Sebastian Deffner",
+    "Steve Campbell"
+   ],
+   "summary": "One of the most widely known building blocks of modern physics is Heisenberg's indeterminacy principle. Among the different statements of this fundamental property of the full quantum mechanical nature of physical reality, the uncertainty relation for energy and time has a special place. Its interpretation and its consequences have inspired continued research efforts for almost a century. In its modern formulation, the uncertainty relation is understood as setting a fundamental bound on how fast any quantum system can evolve. In this Topical Review we describe important milestones, such as the",
+   "published": "2017-05-22",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/1705.08023"
+  },
+  {
+   "id": "2607.26122",
+   "title": "Qubit-qubit-qutrit quantum correlations in $H \\to f \\bar f V$",
+   "authors": [
+    "Micha\u0142 Banacki",
+    "Misaki Ohta",
+    "Abhyoudai S. Shaleena",
+    "Pawe\u0142 Caban",
+    "Micha\u0142 Eckstein",
+    "Kazuki Sakurai",
+    "Michael Spannowsky",
+    "Pawe\u0142 Horodecki"
+   ],
+   "summary": "We perform an extensive analysis of the quantum correlations carried by the qubit-qubit-qutrit pure state arising in the decay of a massive scalar into a fermion-antifermion pair and a massive gauge boson, $H \\to f \\bar f V$, specialising to the Higgs boson decay $h \\to \u03c4^- \u03c4^+ Z$. Working with the exact tree-level spin state and its systematic expansion around the massless-fermion limit, we obtain analytic control over the entire phase space: the bipartite entanglement measures, the genuine $2 \\otimes 2 \\otimes 3$ entanglement structure (the Miyake classification), as well as the Bell-inequal",
+   "published": "2026-07-28",
+   "categories": [
+    "quant-ph",
+    "hep-ex",
+    "hep-ph"
+   ],
+   "url": "https://arxiv.org/abs/2607.26122"
+  },
+  {
+   "id": "hep-th/0203101",
+   "title": "The holographic principle",
+   "authors": [
+    "Raphael Bousso"
+   ],
+   "summary": "There is strong evidence that the area of any surface limits the information content of adjacent spacetime regions, at 10^(69) bits per square meter. We review the developments that have led to the recognition of this entropy bound, placing special emphasis on the quantum properties of black holes. The construction of light-sheets, which associate relevant spacetime regions to any given surface, is discussed in detail. We explain how the bound is tested and demonstrate its validity in a wide range of examples. A universal relation between geometry and information is thus uncovered. It has yet ",
+   "published": "2002-03-12",
+   "categories": [
+    "hep-th",
+    "astro-ph",
+    "gr-qc",
+    "hep-ph",
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/hep-th/0203101"
+  },
+  {
+   "id": "quant-ph/9908043",
+   "title": "Ultimate physical limits to computation",
+   "authors": [
+    "Seth Lloyd"
+   ],
+   "summary": "Computers are physical systems: what they can and cannot do is dictated by the laws of physics. In particular, the speed with which a physical device can process information is limited by its energy and the amount of information that it can process is limited by the number of degrees of freedom it possesses. This paper explores the physical limits of computation as determined by the speed of light $c$, the quantum scale $\\hbar$ and the gravitational constant $G$. As an example, quantitative bounds are put to the computational power of an `ultimate laptop' with a mass of one kilogram confined t",
+   "published": "1999-08-13",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/9908043"
+  },
+  {
+   "id": "quant-ph/9710043",
+   "title": "The maximum speed of dynamical evolution",
+   "authors": [
+    "Norman Margolus",
+    "Lev B. Levitin"
+   ],
+   "summary": "We discuss the problem of counting the maximum number of distinct states that an isolated physical system can pass through in a given period of time---its maximum speed of dynamical evolution. Previous analyses have given bounds in terms of the standard deviation of the energy of the system; here we give a strict bound that depends only on E-E0, the system's average energy minus its ground state energy. We also discuss bounds on information processing rates implied by our bound on the speed of dynamical evolution. For example, adding one Joule of energy to a given computer can never increase i",
+   "published": "1997-10-17",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/9710043"
+  },
+  {
+   "id": "quant-ph/0110141",
+   "title": "Computational capacity of the universe",
+   "authors": [
+    "Seth Lloyd"
+   ],
+   "summary": "Merely by existing, all physical systems register information. And by evolving dynamically in time, they transform and process that information. The laws of physics determine the amount of information that a physical system can register (number of bits) and the number of elementary logic operations that a system can perform (number of ops). The universe is a physical system. This paper quantifies the amount of information that the universe can register and the number of elementary operations that it can have performed over its history. The universe can have performed no more than $10^{120}$ op",
+   "published": "2001-10-24",
+   "categories": [
+    "quant-ph"
+   ],
+   "url": "https://arxiv.org/abs/quant-ph/0110141"
+  }
+ ]
+}

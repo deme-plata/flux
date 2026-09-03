@@ -1,0 +1,30 @@
+[package]
+name = "flux-aqua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Aqua — the Water-Robot (WR-KoL) colony model, ported from Quillon Graph's void-walker: a deterministic droplet state machine, a species taxonomy, an accumulated-work bridge chain, Cortex-tuned gain weights and a REAL libp2p mesh"
+
+[features]
+default = []
+# Cortex-tuned gain weights. flux-cortex is a ~40-crate transitive closure
+# (architect + optimize + graph), so it is opt-in exactly as flux-p2p made its
+# own `cortex-optimizer` opt-in — the core colony model must stay cheap.
+cortex = ["dep:flux-cortex", "dep:flux-graph", "dep:flux-optimize"]
+# Real gossipsub transport. The crate this was ported FROM never sent a byte:
+# its `send_to_peer` was `debug!("Mock sending message to {}")`. This feature is
+# the fix.
+p2p = ["dep:flux-p2p"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+hex = { workspace = true }
+
+flux-cortex = { path = "../flux-cortex", optional = true }
+flux-graph = { path = "../flux-graph", optional = true }
+flux-optimize = { path = "../flux-optimize", optional = true }
+flux-p2p = { path = "../flux-p2p", optional = true }

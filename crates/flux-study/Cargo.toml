@@ -1,0 +1,14 @@
+[package]
+name = "flux-study"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Study — Viktor's study loop: goals with real deadlines, the next tasks by urgency, a repeating daily loop, and a SIGIL University ledger. Rust, dogfooded through fluxc."
+
+[[bin]]
+name = "flux-study"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

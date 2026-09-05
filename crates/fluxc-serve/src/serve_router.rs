@@ -2,7 +2,7 @@
 // Split from serve.rs god-file (1479LOC -> smaller) per legacy_plan + H&P (modularity for faster iteration).
 // Router dispatch is the hot path for every request; keeping it lean + in own module improves cache locality.
 
-use crate::serve::{LiveStats, Request, Response};
+use crate::serve::{FileBody, LiveStats, Request, Response};
 
 type Handler = fn(&Request, &LiveStats) -> Response;
 
@@ -103,6 +103,23 @@ fn content_type_for(path: &str) -> &'static str {
     else if lower.ends_with(".txt") || lower.ends_with(".md") { "text/plain; charset=utf-8" }
     else if lower.ends_with(".woff2") { "font/woff2" }
     else if lower.ends_with(".woff")  { "font/woff" }
+    // Media — correct Content-Type matters for <video>/<audio> playback and, with
+    // Accept-Ranges, for seek support. These are already-compressed containers, so
+    // this server never gzips them (no Content-Encoding is applied anywhere).
+    else if lower.ends_with(".mp4")  || lower.ends_with(".m4v") { "video/mp4" }
+    else if lower.ends_with(".webm") { "video/webm" }
+    else if lower.ends_with(".mkv")  { "video/x-matroska" }
+    else if lower.ends_with(".mov")  { "video/quicktime" }
+    else if lower.ends_with(".ogv")  { "video/ogg" }
+    else if lower.ends_with(".ts")   { "video/mp2t" }
+    else if lower.ends_with(".m3u8") { "application/vnd.apple.mpegurl" }
+    else if lower.ends_with(".mp3")  { "audio/mpeg" }
+    else if lower.ends_with(".m4a")  || lower.ends_with(".aac") { "audio/mp4" }
+    else if lower.ends_with(".ogg")  || lower.ends_with(".oga") { "audio/ogg" }
+    else if lower.ends_with(".opus") { "audio/opus" }
+    else if lower.ends_with(".wav")  { "audio/wav" }
+    else if lower.ends_with(".flac") { "audio/flac" }
+    else if lower.ends_with(".pdf")  { "application/pdf" }
     else { "application/octet-stream" }
 }
 
@@ -132,13 +149,19 @@ fn serve_static_file(req: &Request) -> Option<Response> {
     let dir_canon = dir_path.canonicalize().ok()?;
 
     // Resolve a candidate file under dir_path, confirming it stays inside (defends
-    // against absolute-path inputs / symlink escapes), then apply ETag/304 + Range.
+    // against absolute-path inputs / symlink escapes), then build a STREAMING
+    // response from metadata only. We deliberately never `std::fs::read` the whole
+    // file here: for a multi-GB movie that would pull the entire file into memory
+    // (and, with the old content-hash ETag, BLAKE3 it) on EVERY request — including
+    // each tiny seek/range. Metadata (len + mtime) is O(1); the bytes are streamed
+    // lazily by `write_response`.
     let try_file = |candidate: std::path::PathBuf| -> Option<Response> {
         let cand_canon = candidate.canonicalize().ok()?;
         if !cand_canon.starts_with(&dir_canon) { return None; }
-        let bytes = std::fs::read(&cand_canon).ok()?;
+        let meta = std::fs::metadata(&cand_canon).ok()?;
+        if !meta.is_file() { return None; }
         let ct = content_type_for(cand_canon.to_string_lossy().as_ref());
-        Some(static_file_response(req, bytes, ct))
+        Some(static_file_response(req, cand_canon, &meta, ct))
     };
 
     let direct = if rel.is_empty() || rel.ends_with('/') {
@@ -168,44 +191,115 @@ fn serve_static_file(req: &Request) -> Option<Response> {
     None
 }
 
-// Apply HTTP caching (ETag/If-None-Match → 304) and Range (bytes=a-b → 206) to a static file body.
-fn static_file_response(req: &Request, bytes: Vec<u8>, ct: &str) -> Response {
-    // Strong-ish ETag = first 16 hex of BLAKE3(content). Cheap, content-addressed.
-    let etag = format!("\"{}\"", &blake3::hash(&bytes).to_hex()[..16]);
+/// Parse a single HTTP byte-range spec ("start-end", "start-", or "-suffixlen")
+/// against a known total size. Returns the inclusive `(start, end)` to serve, or
+/// `None` if the range is empty, multi-range (comma), or unsatisfiable — in which
+/// case the caller falls back to a full 200 response. `total` must be > 0.
+fn parse_single_range(spec: &str, total: u64) -> Option<(u64, u64)> {
+    if spec.contains(',') || total == 0 { return None; } // multi-range unsupported
+    let (s, e) = spec.split_once('-')?;
+    let (s, e) = (s.trim(), e.trim());
+    let last = total - 1;
+    let (start, end) = if s.is_empty() {
+        // Suffix range: last N bytes.
+        let n: u64 = e.parse().ok()?;
+        if n == 0 { return None; }
+        (total.saturating_sub(n), last)
+    } else {
+        let start: u64 = s.parse().ok()?;
+        let end: u64 = if e.is_empty() { last } else { e.parse().ok()? };
+        (start, end.min(last))
+    };
+    if start <= end && start < total { Some((start, end)) } else { None }
+}
 
-    // Conditional GET: client already has this exact content.
+/// Apply HTTP caching (ETag/If-None-Match → 304) and Range (bytes=a-b → 206) to a
+/// static file, streaming the bytes from disk (never buffering the whole file).
+///
+/// The ETag is derived from file METADATA (size + mtime), not a content hash. The
+/// old content-hash ETag re-read and BLAKE3'd the entire file on every request —
+/// O(file size) per seek, which is fatal for large media. Size+mtime is what nginx
+/// and every production static server use; it changes whenever the file changes.
+fn static_file_response(req: &Request, path: std::path::PathBuf, meta: &std::fs::Metadata, ct: &str) -> Response {
+    let total = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let etag = format!("\"{:x}-{:x}\"", total, mtime_ns);
+
+    // Conditional GET: client already has this exact version — no read, no body.
     if let Some(inm) = header_value(req, "if-none-match") {
         if inm.split(',').any(|t| t.trim() == etag) {
-            let mut r = Response { status: 304, content_type: ct.into(), body: Vec::new(), events: None,
-                extra_headers: vec![("ETag".into(), etag.clone()), ("Cache-Control".into(), "no-cache".into())] };
-            r.extra_headers.push(("Accept-Ranges".into(), "bytes".into()));
-            return r;
+            return Response {
+                status: 304, content_type: ct.into(), body: Vec::new(), events: None, file: None,
+                extra_headers: vec![
+                    ("ETag".into(), etag),
+                    ("Accept-Ranges".into(), "bytes".into()),
+                    ("Cache-Control".into(), "no-cache".into()),
+                ],
+            };
         }
     }
 
-    let total = bytes.len();
-    // Range request: serve a single byte range as 206. Format "bytes=start-end" (end optional).
+    // Range request → stream exactly the requested window as 206.
     if let Some(rng) = header_value(req, "range").and_then(|h| h.strip_prefix("bytes=")) {
-        if let Some((s, e)) = rng.split_once('-') {
-            let start: usize = s.trim().parse().unwrap_or(0);
-            let end: usize = if e.trim().is_empty() { total.saturating_sub(1) } else { e.trim().parse().unwrap_or(total - 1) };
-            if start <= end && start < total {
-                let end = end.min(total - 1);
-                let slice = bytes[start..=end].to_vec();
-                return Response {
-                    status: 206, content_type: ct.into(), body: slice, events: None,
-                    extra_headers: vec![
-                        ("ETag".into(), etag),
-                        ("Accept-Ranges".into(), "bytes".into()),
-                        ("Content-Range".into(), format!("bytes {}-{}/{}", start, end, total)),
-                    ],
-                };
-            }
+        if let Some((start, end)) = parse_single_range(rng, total) {
+            return Response {
+                status: 206, content_type: ct.into(), body: Vec::new(), events: None,
+                file: Some(FileBody { path, offset: start, len: end - start + 1 }),
+                extra_headers: vec![
+                    ("ETag".into(), etag),
+                    ("Accept-Ranges".into(), "bytes".into()),
+                    ("Content-Range".into(), format!("bytes {}-{}/{}", start, end, total)),
+                ],
+            };
         }
     }
 
+    // Full body, streamed from disk in bounded chunks.
     Response {
-        status: 200, content_type: ct.into(), body: bytes, events: None,
+        status: 200, content_type: ct.into(), body: Vec::new(), events: None,
+        file: Some(FileBody { path, offset: 0, len: total }),
         extra_headers: vec![("ETag".into(), etag), ("Accept-Ranges".into(), "bytes".into())],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_single_range;
+
+    #[test]
+    fn open_ended_range_reaches_eof() {
+        // "bytes=0-" → whole file as one 206 window.
+        assert_eq!(parse_single_range("0-", 1000), Some((0, 999)));
+        // "bytes=500-" → from 500 to end.
+        assert_eq!(parse_single_range("500-", 1000), Some((500, 999)));
+    }
+
+    #[test]
+    fn closed_range_is_inclusive_and_clamped() {
+        assert_eq!(parse_single_range("0-99", 1000), Some((0, 99)));
+        // end past EOF is clamped to last byte.
+        assert_eq!(parse_single_range("990-100000", 1000), Some((990, 999)));
+    }
+
+    #[test]
+    fn suffix_range_takes_last_n_bytes() {
+        assert_eq!(parse_single_range("-500", 1000), Some((500, 999)));
+        // Suffix larger than the file → whole file.
+        assert_eq!(parse_single_range("-5000", 1000), Some((0, 999)));
+        // "-0" is not a valid suffix range.
+        assert_eq!(parse_single_range("-0", 1000), None);
+    }
+
+    #[test]
+    fn unsatisfiable_and_multirange_fall_through() {
+        assert_eq!(parse_single_range("2000-3000", 1000), None); // start past EOF
+        assert_eq!(parse_single_range("0-99,200-299", 1000), None); // multi-range
+        assert_eq!(parse_single_range("abc-def", 1000), None); // garbage
+        assert_eq!(parse_single_range("0-99", 0), None); // empty file
     }
 }

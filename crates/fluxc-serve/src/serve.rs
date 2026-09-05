@@ -44,6 +44,20 @@ pub struct Response {
     pub body: Vec<u8>,
     pub events: Option<Vec<SseEvent>>, // for SSE: multiple events
     pub extra_headers: Vec<(String, String)>, // ETag, Content-Range, Accept-Ranges, … (Fase 1)
+    /// Stream the body straight from a file instead of materializing it in `body`.
+    /// When `Some`, `write_response` opens the file, seeks to `offset`, and copies
+    /// `len` bytes to the socket in bounded chunks — so a multi-GB movie (or one
+    /// byte-range of it) never gets read into memory. `body` is ignored while this
+    /// is set. Content-Length is taken from `len`. This is what makes the static
+    /// file path usable for large media over slow links (e.g. Tor onions).
+    pub file: Option<FileBody>,
+}
+
+/// A byte range of an on-disk file to stream as the response body.
+pub struct FileBody {
+    pub path: std::path::PathBuf,
+    pub offset: u64,
+    pub len: u64,
 }
 
 pub struct SseEvent {
@@ -58,6 +72,7 @@ impl Response {
             content_type: "application/json".into(),
             body: body.as_bytes().to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -68,6 +83,7 @@ impl Response {
             content_type: "text/html; charset=utf-8".into(),
             body: body.as_bytes().to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -78,6 +94,7 @@ impl Response {
             content_type: "text/plain".into(),
             body: body.as_bytes().to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -88,6 +105,7 @@ impl Response {
             content_type: "application/json".into(),
             body: br#"{"status":"error","msg":"unauthorized"}"#.to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -98,6 +116,7 @@ impl Response {
             content_type: "text/plain".into(),
             body: b"404 Not Found\n".to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -109,6 +128,7 @@ impl Response {
             content_type: "application/json".into(),
             body: br#"{"status":"error","msg":"payload too large"}"#.to_vec(),
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -122,6 +142,7 @@ impl Response {
             content_type: content_type.into(),
             body,
             events: None,
+            file: None,
             extra_headers: Vec::new(),
         }
     }
@@ -482,6 +503,7 @@ fn handle_options(_req: &Request, _stats: &LiveStats) -> Response {
         content_type: "text/plain".into(),
         body: vec![],
         events: None,
+        file: None,
         extra_headers: Vec::new(),
     }
 }
@@ -881,14 +903,62 @@ fn mux_state_json(stats: &LiveStats) -> String {
     serde_json::to_string(&payload).unwrap_or_default()
 }
 
-fn handle_connection<S: Read + Write>(stream: &mut S, stats: &LiveStats, router: &Router, peer_ip: &str) {
-    let mut buf = [0u8; 8192];
-    let n = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
+/// Largest request body this server accepts, in bytes. `FLUX_SERVE_MAX_BODY` overrides.
+///
+/// The default is sized for what actually crosses this proxy: a SIGIL shielded spend is a
+/// zk-STARK proof and its body is ~210 KB for one input, roughly double for two. The old
+/// cap was 8 KiB — one read buffer — so every private payment posted through
+/// `sigilgraph.org/v1/shielded_send` was answered 413 while the same body sent straight to
+/// the node was accepted (measured 2026-09-05; the wallet showed "the node rejected this
+/// request" because a 413 carries no `error` field). A cap still exists, and still fails
+/// loud (SEC-008): it is just no longer smaller than the traffic the proxy is for.
+fn max_body_bytes() -> usize {
+    std::env::var("FLUX_SERVE_MAX_BODY").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(8 * 1024 * 1024)
+}
 
-    let raw = String::from_utf8_lossy(&buf[..n]);
+/// Read one HTTP request: the head up to the blank line, then exactly `Content-Length`
+/// bytes of body. One `read` used to be the whole request, which silently truncated any
+/// body larger than the buffer; a request is however many reads it takes.
+fn read_request<S: Read>(stream: &mut S, max_body: usize) -> Option<(String, Vec<u8>, usize, bool)> {
+    const MAX_HEAD: usize = 64 * 1024;
+    let mut data: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        if let Some(p) = data.windows(4).position(|w| w == b"\r\n\r\n") { break p + 4; }
+        if data.len() >= MAX_HEAD { return None; }
+        match stream.read(&mut chunk) {
+            Ok(n) if n > 0 => data.extend_from_slice(&chunk[..n]),
+            _ => {
+                // Peer closed before a blank line: treat what arrived as a bodiless head.
+                if data.is_empty() { return None; }
+                break data.len();
+            }
+        }
+    };
+    let head = String::from_utf8_lossy(&data[..head_end]).into_owned();
+    let content_length = head.lines().skip(1)
+        .find_map(|l| l.split_once(": ").filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length > max_body {
+        return Some((head, Vec::new(), content_length, true));
+    }
+    let mut body: Vec<u8> = data[head_end..].to_vec();
+    while body.len() < content_length {
+        match stream.read(&mut chunk) {
+            Ok(n) if n > 0 => body.extend_from_slice(&chunk[..n]),
+            _ => break,
+        }
+    }
+    body.truncate(content_length);
+    Some((head, body, content_length, false))
+}
+
+fn handle_connection<S: Read + Write>(stream: &mut S, stats: &LiveStats, router: &Router, peer_ip: &str) {
+    let (raw, body_bytes, content_length, too_large) = match read_request(stream, max_body_bytes()) {
+        Some(r) => r,
+        None => return,
+    };
     let mut lines = raw.lines();
     let first_line = lines.next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -901,36 +971,24 @@ fn handle_connection<S: Read + Write>(stream: &mut S, stats: &LiveStats, router:
     // CR/LF (reachable via a mid-line `\r`, which `str::lines()` does NOT strip)
     // so it cannot be smuggled into the reverse-proxy's reconstructed header block.
     let mut headers = Vec::new();
-    let mut content_length = 0usize;
     for line in lines.by_ref() {
         if line.is_empty() { break; }
         if let Some((k, v)) = line.split_once(": ") {
             if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
             headers.push((k.to_lowercase(), v.to_string()));
-            if k.eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().unwrap_or(0);
-            }
         }
     }
 
-    // SEC-008: this server reads exactly one ≤8 KiB buffer, so a body is already
-    // structurally capped — but a client claiming a larger Content-Length would
-    // get its body SILENTLY truncated. Fail loud with 413 instead of corrupting.
-    const MAX_BODY: usize = 8192;
-    if content_length > MAX_BODY {
+    // SEC-008: a declared Content-Length beyond the cap is refused loudly with 413
+    // rather than read partially — see `max_body_bytes` for how the cap is sized.
+    if too_large {
         let resp = Response::payload_too_large();
         access_log(peer_ip, &method, &path, resp.status, resp.body.len());
         write_response(stream, &resp);
         return;
     }
-
-    // Read body if present
-    let body_start = raw.find("\r\n\r\n").map(|p| p + 4).unwrap_or(raw.len());
-    let body = if body_start < n && content_length > 0 {
-        buf[body_start..n.min(body_start + content_length)].to_vec()
-    } else {
-        Vec::new()
-    };
+    let _ = content_length;
+    let body = body_bytes;
 
     let req = Request { method, path, headers, body };
 
@@ -958,7 +1016,8 @@ fn handle_connection<S: Read + Write>(stream: &mut S, stats: &LiveStats, router:
 
     // Dispatch to router
     let resp = router.dispatch(&req, stats);
-    access_log(peer_ip, &req.method, &req.path, resp.status, resp.body.len());
+    let logged_bytes = resp.file.as_ref().map(|f| f.len as usize).unwrap_or(resp.body.len());
+    access_log(peer_ip, &req.method, &req.path, resp.status, logged_bytes);
     write_response(stream, &resp);
 }
 
@@ -1108,14 +1167,47 @@ fn write_response<S: Write>(stream: &mut S, resp: &Response) {
     for (k, v) in &resp.extra_headers {
         header.push_str(&format!("{}: {}\r\n", k, v));
     }
-    // 304 Not Modified carries no body and (per spec) no Content-Length.
+    // Content-Length comes from the streamed file's byte range when present, else
+    // from the in-memory body. 304 Not Modified carries no body (per spec) either way.
+    let content_len = resp.file.as_ref().map(|f| f.len as usize).unwrap_or(resp.body.len());
     if resp.status != 304 {
-        header.push_str(&format!("Content-Length: {}\r\n", resp.body.len()));
+        header.push_str(&format!("Content-Length: {}\r\n", content_len));
     }
     header.push_str("\r\n");
-    let _ = stream.write_all(header.as_bytes());
-    if resp.status != 304 {
-        let _ = stream.write_all(&resp.body);
+    if stream.write_all(header.as_bytes()).is_err() { return; }
+    if resp.status == 304 { return; }
+    match &resp.file {
+        // Stream the file range from disk in bounded chunks — never buffers the
+        // whole (possibly multi-GB) file in memory.
+        Some(f) => stream_file_body(stream, f),
+        None => { let _ = stream.write_all(&resp.body); }
+    }
+}
+
+/// Copy `f.len` bytes starting at `f.offset` from the on-disk file to `stream`,
+/// using a fixed 256 KiB buffer so memory stays constant regardless of file size.
+/// Used for both full-file GETs and single-range (206) responses.
+fn stream_file_body<S: Write>(stream: &mut S, f: &FileBody) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(&f.path) {
+        Ok(x) => x,
+        Err(_) => return, // header + Content-Length already sent; best we can do is stop
+    };
+    if f.offset > 0 && file.seek(SeekFrom::Start(f.offset)).is_err() {
+        return;
+    }
+    let mut remaining = f.len;
+    let mut buf = vec![0u8; 256 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        match file.read(&mut buf[..want]) {
+            Ok(0) => break, // EOF earlier than expected (file shrank mid-stream)
+            Ok(n) => {
+                if stream.write_all(&buf[..n]).is_err() { return; }
+                remaining -= n as u64;
+            }
+            Err(_) => return,
+        }
     }
 }
 
@@ -1123,6 +1215,51 @@ fn write_response<S: Write>(stream: &mut S, resp: &Response) {
 
 #[cfg(test)]
 mod tests {
+    /// A shielded-spend-sized body (210 KB) must arrive whole. Before `read_request`
+    /// the server read one 8 KiB buffer and 413'd anything larger — every private
+    /// payment posted through sigilgraph.org, measured 2026-09-05.
+    #[test]
+    fn a_210kb_body_is_read_whole_across_many_reads() {
+        struct Trickle { data: Vec<u8>, pos: usize }
+        impl std::io::Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                // A network socket hands over whatever has arrived: never the whole body.
+                let n = (self.data.len() - self.pos).min(buf.len()).min(1400);
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let body = vec![b'x'; 210_720];
+        let mut data = format!("POST /v1/shielded_send HTTP/1.1\r\nhost: sigilgraph.org\r\ncontent-length: {}\r\n\r\n", body.len()).into_bytes();
+        data.extend_from_slice(&body);
+        let (head, got, len, too_large) = super::read_request(&mut Trickle { data, pos: 0 }, 8 * 1024 * 1024).expect("a request");
+        assert!(head.starts_with("POST /v1/shielded_send"));
+        assert_eq!(len, 210_720);
+        assert!(!too_large);
+        assert_eq!(got.len(), 210_720, "the body must not be truncated to one read buffer");
+        assert!(got.iter().all(|b| *b == b'x'));
+    }
+
+    /// The cap still exists and still fails loud (SEC-008).
+    #[test]
+    fn a_body_over_the_cap_is_flagged_not_truncated() {
+        let data = b"POST /v1/x HTTP/1.1\r\ncontent-length: 9000000\r\n\r\n".to_vec();
+        let (_, got, len, too_large) = super::read_request(&mut std::io::Cursor::new(data), 8 * 1024 * 1024).unwrap();
+        assert!(too_large);
+        assert_eq!(len, 9_000_000);
+        assert!(got.is_empty());
+    }
+
+    /// A small GET with no body — the common case — is unchanged.
+    #[test]
+    fn a_bodiless_request_parses() {
+        let data = b"GET /v1/health HTTP/1.1\r\nhost: x\r\n\r\n".to_vec();
+        let (head, got, len, too_large) = super::read_request(&mut std::io::Cursor::new(data), 1024).unwrap();
+        assert!(head.starts_with("GET /v1/health"));
+        assert_eq!((got.len(), len, too_large), (0, 0, false));
+    }
+
     use super::*;
 
     #[test]

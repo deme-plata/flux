@@ -104,6 +104,12 @@ fn post(path: &str, body: &str) -> Result<String, String> {
     body_of(ureq::post(&url).set("Content-Type", "application/json").send_string(body))
 }
 
+/// `GET`/`POST` against the live money API, shared with
+/// [`crate::handlers::sigil_shielded`] so the shielded tools cannot drift onto a
+/// different backend than the wallet reads.
+pub(crate) fn rpc_get(path: &str) -> String { get(path) }
+pub(crate) fn rpc_post(path: &str, body: &str) -> Result<String, String> { post(path, body) }
+
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(ToolDef {
         name: "flux_sigil_wallet_create",
@@ -209,8 +215,12 @@ pub fn register(registry: &mut ToolRegistry) {
     }, shield_submit);
 
     registry.register(ToolDef {
-        name: "flux_sigil_shielded_send",
-        description: "A PRIVATE shielded-to-shielded transfer. Carries no sender, no \
+        name: "flux_sigil_shielded_send_raw",
+        description: "RAW passthrough for a caller that ALREADY holds a proof. For the full \
+                      ceremony from a seed (scan, prove, seal, submit) use \
+                      flux_sigil_shielded_send instead — this name used to shadow it (both \
+                      registered under the same name; fixed 2026-09-05). A PRIVATE \
+                      shielded-to-shielded transfer. Carries no sender, no \
                       recipient and no amount — authorization is the STARK, not a wallet \
                       signature. 2026-08-24: now propagates via Dandelion++ (private \
                       point-to-point stem relay before gossip fluff) instead of being \

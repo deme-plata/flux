@@ -54,3 +54,11 @@ regex = "1"
 lazy_static = "1.4"
 flux-agora-stargate-mcp = { path = "../flux-agora-stargate-mcp" }
 sigil-dao-bridge-mcp = { path = "../sigil-dao-bridge-mcp" }
+# The SHIELDED money path. Transparent sends are dead network-wide, so this is the
+# only way an agent can move SIGIL — and the whole ceremony (note store, pool-tree
+# reconstruction, the STARK spend prover, note ciphertexts) lives here. Without it
+# `flux_sigil_shielded_send` could only accept a proof somebody else had already
+# built, which no MCP caller can do. Cross-workspace path dep, same direction
+# sigil-node/sigil-api already use for the flux crates.
+sigil-shield = { path = "../../../sigil/crates/sigil-shield" }
+flux-kgauge = { path = "../../../sigil/crates/flux-kgauge" }

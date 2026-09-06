@@ -311,6 +311,8 @@ pub mod crosscompile;
 pub mod sigil_combos;
 pub mod sigil_ops;
 pub mod sigil_wallet;
+pub mod sigil_shielded;
+pub mod sigil_kgauge;
 pub mod flux_error;
 pub mod molt;
 pub mod wallet_xray;

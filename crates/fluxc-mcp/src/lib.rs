@@ -35,6 +35,8 @@ fn build_registry() -> ToolRegistry {
     handlers::bank::register(&mut registry);
     handlers::sigil_cosmos::register(&mut registry);
     handlers::sigil_wallet::register(&mut registry);
+    handlers::sigil_shielded::register(&mut registry);
+    handlers::sigil_kgauge::register(&mut registry);
     handlers::agora_stargate::register(&mut registry);
     handlers::dao_vm_dex::register(&mut registry);
     handlers::zerox::register(&mut registry);

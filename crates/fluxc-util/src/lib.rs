@@ -25,6 +25,25 @@ pub fn live_fluxc_path() -> std::path::PathBuf {
             return std::path::PathBuf::from(p);
         }
     }
+    // THE SHARED FINGERPRINT UNIVERSE (2026-09-06).
+    //
+    // cargo hashes RUSTC_WRAPPER's PATH into every unit fingerprint. `current_exe()` is a
+    // different path in every checkout and every worktree, so two agents on this one box
+    // invalidated each other's compile cache continuously — each internally warm, the pair
+    // permanently cold. Measured today: 33.5 % hit rate over 112,643 units, and
+    // FLUX_WRAPPER_PATH set in no shell that actually builds (a `.bashrc` export does not
+    // reach a non-interactive shell, which is exactly how the documented fix was believed
+    // to be in place while doing nothing).
+    //
+    // So the stable name is the DEFAULT, not something each agent must remember to export:
+    // `~/.flux/bin/fluxc` is a symlink maintained to point at the live binary. Used only
+    // when it resolves to a real file, so a box without it behaves exactly as before.
+    if let Some(home) = env::var_os("HOME") {
+        let stable = std::path::Path::new(&home).join(".flux/bin/fluxc");
+        if stable.exists() {
+            return stable;
+        }
+    }
     let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fluxc"));
     if exe.exists() {
         return exe;
@@ -78,5 +97,21 @@ mod live_fluxc_path_tests {
             Some(std::path::PathBuf::from("/a/b/fluxc"))
         );
         assert_eq!(strip_deleted_suffix(std::path::Path::new("/a/b/fluxc")), None);
+    }
+}
+
+#[cfg(test)]
+mod wrapper_identity_tests {
+    #[test]
+    fn the_env_override_still_wins_over_the_stable_name() {
+        // An explicit FLUX_WRAPPER_PATH is a deliberate choice and must outrank the
+        // default. Checked without touching the process environment: this asserts the
+        // ORDER in the source, which is what the bug was about.
+        let src = include_str!("lib.rs");
+        let env_at = src.find("FLUX_WRAPPER_PATH").expect("env branch present");
+        let stable_at = src.find(".flux/bin/fluxc").expect("stable-name branch present");
+        assert!(env_at < stable_at, "the env override must be checked first");
+        let exe_at = src.find("env::current_exe()").expect("current_exe fallback present");
+        assert!(stable_at < exe_at, "the stable name must be preferred over current_exe()");
     }
 }

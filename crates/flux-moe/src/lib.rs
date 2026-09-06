@@ -35,6 +35,13 @@ pub mod goalroute;
 pub use goalroute::{route_from_consensus, route_from_goal_text, GoalRoutePlan};
 pub mod toolcorpus;
 pub mod trainer;
+/// Metering: what a local answer cost, priced, split (dev fee + commons + operator),
+/// accrued locally and PROPOSED for settlement. Never signs, never sends.
+pub mod meter;
+/// The scanner that runs BEFORE untrusted text reaches the model: skill packs and network
+/// payloads are checked for injection, exfiltration, destruction, credentials and
+/// obfuscation. Offline and local; nothing is uploaded.
+pub mod antivirus;
 
 use serde::Deserialize;
 use std::time::Duration;

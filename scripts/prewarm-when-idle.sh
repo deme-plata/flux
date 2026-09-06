@@ -38,8 +38,14 @@ load=$(cut -d' ' -f1 /proc/loadavg)
 cores=$(nproc)
 # Cores consumed by processes at normal-or-higher priority. `ps` %CPU is per-process and
 # can exceed 100 on a multithreaded one, which is exactly what we want to add up.
-competing=$(ps -eo ni,pcpu --no-headers 2>/dev/null \
-  | awk '$1 <= 0 { s += $2 } END { printf "%.1f", s/100 }')
+# 🪤 `ps` reports %CPU as CPU-time / LIFETIME, so a process that has existed for two
+# seconds and used two seconds of CPU reads as ~100 % — and a freshly spawned one can read
+# far higher across threads. Measured here: counting everything gave 41.1 cores, of which
+# 8 were processes younger than ten seconds, INCLUDING the `ps` doing the measuring. That
+# is the difference between refusing (>34) and proceeding, so the guard would have refused
+# on the strength of its own measurement. Only established processes count.
+competing=$(ps -eo etimes,ni,pcpu --no-headers 2>/dev/null \
+  | awk '$1 > 10 && $2 <= 0 { s += $3 } END { printf "%.1f", s/100 }')
 competing="${competing:-0}"
 ts=$(date -Is)
 

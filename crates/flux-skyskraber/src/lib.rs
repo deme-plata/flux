@@ -43,6 +43,10 @@ pub mod cortex;
 pub mod kdc;
 pub mod culture;
 pub mod elevator;
+/// Load sweep — drive the real elevator bank at a ladder of arrival rates and find
+/// where the artery actually saturates, checking the crate's own stability condition
+/// rho = lambda*E[T_route]/(N*E[b]) < 1 against the measured drain rather than asserting it.
+pub mod loadsweep;
 pub mod emsec;
 pub mod physics;
 pub mod science;

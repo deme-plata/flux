@@ -92,11 +92,28 @@ pub fn run() {
                 );
             }
         }
-        _ => r.warn(
-            "FLUX_WRAPPER_PATH",
-            "unset — sessions may live in different fingerprint universes",
-            "export FLUX_WRAPPER_PATH=$HOME/.flux/bin/fluxc (symlinked to the live binary)",
-        ),
+        // Unset is no longer a problem in itself. Since 2026-09-06 the wrapper DEFAULTS to
+        // the stable ~/.flux/bin/fluxc name, so the fleet shares one fingerprint universe
+        // without anyone exporting anything. Report what is EFFECTIVE rather than whether a
+        // variable happens to be set — a check that calls a solved problem broken is a
+        // check people learn to scroll past.
+        _ => {
+            let effective = crate::canonical_wrapper_path();
+            let stable = std::env::var_os("HOME")
+                .map(|h| Path::new(&h).join(".flux/bin/fluxc"))
+                .filter(|p| p.exists());
+            match stable {
+                Some(sp) if same_file(&effective, &sp) => r.ok(
+                    "wrapper identity",
+                    &format!("{} (shared by default — no env var needed)", effective.display()),
+                ),
+                _ => r.warn(
+                    "wrapper identity",
+                    &format!("{} — a per-checkout path, so other agents cannot share this cache", effective.display()),
+                    "ln -sf <ws>/target/debug/fluxc ~/.flux/bin/fluxc (then it is picked up automatically)",
+                ),
+            }
+        }
     }
 
     // 5. Shared content cache.

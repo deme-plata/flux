@@ -52,6 +52,16 @@ ts=$(date -Is)
 exec 9>"$LOCK" || exit 0
 flock -n 9 || { echo "$ts skip: another prewarm holds the lock" >> "$LOG"; exit 0; }
 
+# ONE BUILD OWNER AT A TIME. The nice<=0 test above deliberately ignores nice-19 work,
+# because such work yields — but OUR OWN builds are nice-19 too, so the test happily let a
+# prewarm start on top of a running release build. Observed 2026-09-06: a prewarm launched
+# beside an ARM64 release cross-build (17 rustc), and the two simply halved each other.
+# A build already in flight is the one thing a prewarm must never join.
+if pgrep -x rustc >/dev/null 2>&1 || pgrep -f "cargo (build|check|test)" >/dev/null 2>&1; then
+  echo "$ts skip: a build is already running — one build owner at a time" >> "$LOG"
+  exit 0
+fi
+
 if awk "BEGIN{exit !($competing > $COMPETING_MAX)}"; then
   echo "$ts skip: ${competing} of ${cores} cores taken by nice<=0 work (limit ${COMPETING_MAX}; load ${load}) — a prewarm would only thrash" >> "$LOG"
   exit 0
@@ -60,5 +70,11 @@ fi
 
 echo "$ts run: ${competing}/${cores} cores competing (load ${load}) — warming" >> "$LOG"
 # Niced hard: even when the box looks idle, a real build arriving mid-prewarm must win.
+# WARM_S is left at the script's own default. I raised it to 10 on the theory that
+# sigil-top's `lib` cell bottoms out at 9s and an 8s threshold marks it cold forever,
+# burning a third pass every run. MEASURED, and the theory was wrong: with the threshold
+# at 10 the run still took three passes, because the lib cells do not have a 9s floor —
+# they landed at 16s and 13s that run. They vary with contention, and sit above both
+# thresholds either way. Two observations of 9s were a favourable case, not a limit.
 timeout 3600 ionice -c3 nice -n19 "$SCRIPT" >> "$LOG" 2>&1
 echo "$ts done: rc=$? load now $(cut -d' ' -f1 /proc/loadavg)" >> "$LOG"

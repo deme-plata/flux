@@ -37,6 +37,10 @@ pub mod api;
 pub mod auditorium;
 pub mod bank;
 pub mod cortex;
+/// K_DC — the Kristensen Datacenter Coordination Gauge: where the build is stuck, when it
+/// becomes real, and coordination work as a producible unit. Scored with flux-p2p's own
+/// SAP + X-algo tables, gossiped over flux-p2p, remembered content-addressed.
+pub mod kdc;
 pub mod culture;
 pub mod elevator;
 pub mod emsec;
@@ -114,3 +118,6 @@ mod tests {
         assert!(b.workforce.workers.len() == 72);
     }
 }
+
+#[cfg(feature = "datacenter")]
+pub mod datacenter;

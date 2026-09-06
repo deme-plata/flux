@@ -46,6 +46,17 @@ pub fn route_from_goal_text(goal: &str) -> GoalRoutePlan {
     }
 }
 
+/// Route from the swarm's goal consensus.
+///
+/// Needs the `fluxc` feature (on by default): it reads `fluxc_serve`'s GoalStore, and that
+/// crate is Unix-only. Without the feature this returns `None` rather than not existing, so
+/// a portable build keeps the same surface and simply has no consensus to route from.
+#[cfg(not(feature = "fluxc"))]
+pub fn route_from_consensus() -> Option<GoalRoutePlan> {
+    None
+}
+
+#[cfg(feature = "fluxc")]
 pub fn route_from_consensus() -> Option<GoalRoutePlan> {
     let path = std::path::Path::new("/tmp/flux-goals.json");
     let bytes = std::fs::read(path).ok()?;

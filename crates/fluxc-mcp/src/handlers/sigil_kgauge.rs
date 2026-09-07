@@ -82,6 +82,8 @@ pub const W_TIP: f64 = 0.20;
 pub const W_STATE: f64 = 0.35;
 pub const W_FINALITY: f64 = 0.20;
 pub const W_CONFLICT: f64 = 0.25;
+/// A peer further than this many finality depths from us is catching up, not disagreeing.
+pub const SYNCING_DEPTHS: f64 = 2.0;
 
 static WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -186,6 +188,7 @@ pub(crate) struct ConsensusReading {
     pub tau_finality_secs: f64,
     pub tau_ratio: f64,
     pub tau_basis: &'static str,
+    pub syncing_peers: usize,
     pub omega: f64,
     pub rejects_noise: u64,
     pub rejects_semantic: u64,
@@ -246,10 +249,15 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
     let d_tip = i.merging_blocks as f64 / n;
     let red_frac = i.red_blocks as f64 / n;
     let d_conflict = (red_frac + rate(semantic)).min(1.0);
-    let d_finality = if i.peer_heights.is_empty() { None } else {
-        let m = i.peer_heights.iter().map(|&h| ((h as f64 - i.local_height as f64).abs() / FINAL_DEPTH).min(1.0)).sum::<f64>() / i.peer_heights.len() as f64;
-        Some(m)
+    // A peer more than SYNCING_DEPTHS finality-depths away is CATCHING UP (a fresh sigil-top
+    // syncs 4.7 M blocks from genesis), not disagreeing about what is final. It is counted,
+    // shown, and left out of the mean; if every peer is syncing the channel is unavailable.
+    let (converged, syncing): (Vec<u64>, Vec<u64>) = i.peer_heights.iter().copied()
+        .partition(|&h| (h as f64 - i.local_height as f64).abs() <= SYNCING_DEPTHS * FINAL_DEPTH);
+    let d_finality = if converged.is_empty() { None } else {
+        Some(converged.iter().map(|&h| ((h as f64 - i.local_height as f64).abs() / FINAL_DEPTH).min(1.0)).sum::<f64>() / converged.len() as f64)
     };
+    let syncing_peers = syncing.len();
     let d_state = if i.state_root_verdicts.is_empty() { None } else {
         Some(i.state_root_verdicts.iter().filter(|&&ok| !ok).count() as f64 / i.state_root_verdicts.len() as f64)
     };
@@ -260,8 +268,9 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
             basis: if d_state.is_some() { format!("{} of {} comparable peer(s) committed a DIFFERENT wallet_state_root at their tip height than this node's block at that height (peer-heights heartbeat, node ≥ 2026-09-07)", i.state_root_verdicts.iter().filter(|&&ok| !ok).count(), i.state_root_verdicts.len()) }
                    else { "no comparable peer view: either no connected peer runs a node that publishes wallet_state_root in its heartbeat (≥ 2026-09-07), or every peer is ahead of this node / outside its RAM window".into() } },
         Channel { name: "finality_divergence", weight: W_FINALITY, value: d_finality,
-            basis: if d_finality.is_some() { format!("mean |h_peer − h_local| / final_depth({}) over {} peer height(s); both are settled chain.height() (spine), not the mining frontier, and heartbeats are 5 s apart so ±~25 blocks is clock jitter", FINAL_DEPTH as u64, i.peer_heights.len()) }
-                   else { "no peer height on /v1/network/topology.peer_heights: no connected peer has sent a peer-heights heartbeat within the TTL (sigil-top clients do not publish one; sigil-node does)".into() } },
+            basis: if d_finality.is_some() { format!("mean |h_peer − h_local| / final_depth({}) over {} converged peer(s) ({} still syncing, > {}×final_depth away, excluded); both are settled chain.height() (spine), not the mining frontier; heartbeats are 5 s apart so ±~25 blocks is clock jitter", FINAL_DEPTH as u64, converged.len(), syncing_peers, SYNCING_DEPTHS as u64) }
+                   else if syncing_peers > 0 { format!("{} peer(s) sent heights but all are still syncing (> {}×final_depth away) — catching up is not finality disagreement", syncing_peers, SYNCING_DEPTHS as u64) }
+                   else { "no peer height on /v1/network/topology.peer_heights: no connected peer has sent a peer-heights heartbeat within the TTL (sigil-node ≥ 2026-09-07 and sigil-top ≥ 8.0.11 publish one)".into() } },
         Channel { name: "semantic_conflicts", weight: W_CONFLICT, value: Some(d_conflict),
             basis: format!("red (non-blue) blocks {}/{} + semantic reject ratio {:.4} ({} verify_mismatch/non_canonical of {} submissions); stale_height/duplicate/no_tip are NOISE and excluded", i.red_blocks, i.blocks, rate(semantic), semantic, denom) },
     ];
@@ -291,7 +300,7 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
         regime: regime_of(k_c), confidence: confidence_of(omega),
         delta_h_consensus: delta_h, missing_weight, channels,
         h_norm, n_eff, dominant_share, entropy_resolution_bits: entropy_resolution_bits(i.blocks),
-        tau_finality_secs: tau_fin, tau_ratio, tau_basis, omega,
+        tau_finality_secs: tau_fin, tau_ratio, tau_basis, syncing_peers, omega,
         rejects_noise: noise, rejects_semantic: semantic, rejects_unclassified: unclassified,
         reject_rate_total: rate(rej_total), reject_rate_semantic: rate(semantic), rejects_by_kind: by_kind,
     }
@@ -462,7 +471,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
             "note": format!("Δs over {} blocks is a staircase with step {:.4} bits (199/1 → 0.0454, 198/2 → 0.0808); N_eff = 2^Δs is the intuitive figure", blocks.len(), c.entropy_resolution_bits),
         },
         "network_diagnostics": {
-            "peers": b.peers, "peers_start": a.peers, "peer_churn": churn,
+            "peers": b.peers, "peers_start": a.peers, "peer_churn": churn, "syncing_peers": c.syncing_peers,
             "reject_rate": c.reject_rate_total, "reject_rate_semantic": c.reject_rate_semantic,
             "rejects_noise": c.rejects_noise, "rejects_semantic": c.rejects_semantic, "rejects_unclassified": c.rejects_unclassified,
             "rejects_by_kind": by_kind_json, "rejects_lifetime_by_kind": lifetime_json,
@@ -732,6 +741,20 @@ mod tests {
         let a = consensus_gauge(&agree);
         assert_eq!(a.channels.iter().find(|ch| ch.name == "state_root_mismatch").unwrap().value, Some(0.0), "measured agreement is 0.0, not unavailable");
         assert!(a.k_c_high < consensus_gauge(&base()).k_c_high, "a measured channel narrows the band");
+    }
+
+    #[test]
+    fn a_syncing_peer_is_not_finality_disagreement() {
+        let mut i = base();
+        i.peer_heights = vec![i.local_height - 40, 100_000]; // one converged, one fresh install syncing from genesis
+        let c = consensus_gauge(&i);
+        assert_eq!(c.syncing_peers, 1);
+        let f = c.channels.iter().find(|ch| ch.name == "finality_divergence").unwrap().value.unwrap();
+        assert!((f - 40.0 / 512.0).abs() < 1e-9, "only the converged peer counts: {f}");
+        let mut all = base(); all.peer_heights = vec![100_000, 200_000];
+        let c = consensus_gauge(&all);
+        assert!(c.channels.iter().find(|ch| ch.name == "finality_divergence").unwrap().value.is_none(), "all syncing → unavailable, not 1.0");
+        assert_eq!(c.syncing_peers, 2);
     }
 
     #[test]

@@ -1161,6 +1161,17 @@ impl NetworkManager {
         }
     }
 
+    /// 2026-09-07 (K-gauge v2): record what a peer said about its chain on the
+    /// peer-heights topic, keyed by its peer_id. See [`PeerChainView`].
+    pub fn record_peer_view(&self, peer_id: &str, view: PeerChainView) {
+        self.inner.write().mesh_health.record_peer_view(peer_id, view);
+    }
+
+    /// 2026-09-07 (K-gauge v2): refresh this node's own chain view (what it publishes).
+    pub fn set_local_view(&self, view: PeerChainView) {
+        self.inner.write().mesh_health.local_view = Some(view);
+    }
+
     // ── v0.8: Cortex-driven autonomous P2P optimization ──
 
     /// Feed observed P2P metrics into the Cortex optimizer.
@@ -1253,6 +1264,45 @@ pub struct NetworkSummary {
     pub mesh_health: Option<MeshHealth>,
 }
 
+/// A view of a peer's chain view is dropped when it has not been refreshed within this
+/// many milliseconds (heartbeats are published every 5 s; a departed peer must not keep
+/// reporting agreement or disagreement it can no longer vouch for).
+pub const PEER_VIEW_TTL_MS: u64 = 300_000;
+
+/// 2026-09-07 (SIGIL K-gauge v2): what one node says about ITS OWN chain on the
+/// `peer-heights` topic — and, when recorded by a receiver, whether that agrees with the
+/// receiver's block at the same height. `tip_matches_local` / `state_root_matches_local`
+/// are `None` when the comparison was not possible (peer ahead of us, height pruned from
+/// the in-RAM window, or an older node that does not publish the fields yet), never a
+/// guessed `false`. Before this existed the consensus gauge had no cross-node channel at
+/// all: `peer_heights` was only ever written under the single key `"last"`.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PeerChainView {
+    /// The publisher's node id (its own name for itself, e.g. `sigil-g0-epsilon`).
+    pub node: String,
+    /// `chain.height()` on the publisher — the COUNT of applied blocks (tip index + 1).
+    pub height: u64,
+    /// Hex hash of the publisher's tip block (block at index `height − 1`).
+    #[serde(default)]
+    pub tip_hash: Option<String>,
+    /// Hex `wallet_state_root` committed in that tip header — the balances root.
+    #[serde(default)]
+    pub state_root: Option<String>,
+    /// The publisher's finalized height (braid `finalized_height()`), if it runs the braid.
+    #[serde(default)]
+    pub finalized: Option<u64>,
+    /// Publisher's clock at publish time, ms since the epoch.
+    pub ts_ms: u64,
+    /// Receiver's clock when it recorded the view, ms since the epoch.
+    pub seen_ms: u64,
+    /// Receiver's verdict: its own block at `height − 1` has the same hash.
+    #[serde(default)]
+    pub tip_matches_local: Option<bool>,
+    /// Receiver's verdict: its own block at `height − 1` committed the same wallet root.
+    #[serde(default)]
+    pub state_root_matches_local: Option<bool>,
+}
+
 /// v0.8: Aggregated mesh quality metrics — feeds sigil-top fleet panel.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct MeshHealth {
@@ -1274,6 +1324,14 @@ pub struct MeshHealth {
     pub peer_heights: std::collections::HashMap<String, u64>,
     /// v0.8: Block propagation latency samples (last N blocks)
     pub recent_latencies_ms: Vec<f64>,
+    /// 2026-09-07 (K-gauge v2): what each peer last said about ITS chain, keyed by peer_id,
+    /// with the receiver's agreement verdicts. Pruned by [`PEER_VIEW_TTL_MS`].
+    #[serde(default)]
+    pub peer_views: std::collections::HashMap<String, PeerChainView>,
+    /// This node's own chain view, refreshed on every heartbeat it publishes — the thing
+    /// its peers are comparing against.
+    #[serde(default)]
+    pub local_view: Option<PeerChainView>,
 }
 
 impl MeshHealth {
@@ -1287,6 +1345,18 @@ impl MeshHealth {
             else if self.connected_peers >= 2 { "warming".into() }
             else { "empty".into() };
     }
+    /// Record what a peer said about its chain. Also fills `peer_heights` under the REAL
+    /// peer_id (that map had only ever held the key `"last"`), and drops views — and their
+    /// heights — not refreshed within [`PEER_VIEW_TTL_MS`] of this one.
+    pub fn record_peer_view(&mut self, peer_id: &str, view: PeerChainView) {
+        let now = view.seen_ms;
+        self.peer_heights.insert(peer_id.to_string(), view.height);
+        self.peer_views.insert(peer_id.to_string(), view);
+        self.peer_views.retain(|_, v| now.saturating_sub(v.seen_ms) <= PEER_VIEW_TTL_MS);
+        let live: std::collections::HashSet<String> = self.peer_views.keys().cloned().collect();
+        self.peer_heights.retain(|k, _| k == "last" || live.contains(k));
+    }
+
     /// Record a block propagation latency sample
     pub fn record_latency(&mut self, latency_ms: f64) {
         self.recent_latencies_ms.push(latency_ms);
@@ -1458,5 +1528,45 @@ mod tests {
         assert!(SIGIL_RELAY853_BOOTSTRAP_PEERS
             .iter()
             .any(|(_, addr)| addr.contains("/tcp/853/") && addr.contains("/p2p/")));
+    }
+}
+
+#[cfg(test)]
+mod peer_view_tests {
+    use super::{MeshHealth, PeerChainView, PEER_VIEW_TTL_MS};
+
+    fn view(node: &str, height: u64, seen_ms: u64) -> PeerChainView {
+        PeerChainView { node: node.into(), height, ts_ms: seen_ms, seen_ms, ..Default::default() }
+    }
+
+    #[test]
+    fn record_fills_peer_heights_under_the_real_peer_id() {
+        let mut h = MeshHealth::new();
+        h.record_peer_view("12D3KooWpeerA", view("happysrv", 4_000_000, 1_000));
+        assert_eq!(h.peer_heights.get("12D3KooWpeerA"), Some(&4_000_000));
+        assert_eq!(h.peer_views["12D3KooWpeerA"].node, "happysrv");
+        assert!(h.local_view.is_none());
+    }
+
+    #[test]
+    fn stale_views_and_their_heights_are_pruned_but_last_survives() {
+        let mut h = MeshHealth::new();
+        h.peer_heights.insert("last".into(), 7); // the legacy key record_block_latency writes
+        h.record_peer_view("old", view("old", 10, 1_000));
+        h.record_peer_view("new", view("new", 20, 1_000 + PEER_VIEW_TTL_MS + 1));
+        assert!(!h.peer_views.contains_key("old"));
+        assert!(!h.peer_heights.contains_key("old"));
+        assert_eq!(h.peer_heights.get("new"), Some(&20));
+        assert_eq!(h.peer_heights.get("last"), Some(&7));
+    }
+
+    #[test]
+    fn verdicts_default_to_unknown_not_false() {
+        let v: PeerChainView = serde_json::from_str(r#"{"node":"x","height":5,"ts_ms":1,"seen_ms":2}"#).unwrap();
+        assert_eq!(v.tip_matches_local, None);
+        assert_eq!(v.state_root_matches_local, None);
+        assert_eq!(v.tip_hash, None);
+        let mh: MeshHealth = serde_json::from_str(r#"{"connected_peers":1,"quality":"warming","estimated_drop_rate":0.0,"avg_block_latency_ms":0.0,"blocks_received":0,"messages_processed":0,"fan_out":1,"peer_heights":{},"recent_latencies_ms":[]}"#).unwrap();
+        assert!(mh.peer_views.is_empty() && mh.local_view.is_none(), "old serialized MeshHealth still deserializes");
     }
 }

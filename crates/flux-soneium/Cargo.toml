@@ -1,0 +1,19 @@
+[package]
+name = "flux-soneium"
+version.workspace = true
+edition.workspace = true
+description = "SIGIL on Soneium (Sony's OP-Stack L2, chain 1868): wSIGIL deploy + V2 pool seeding + relay descriptor, Alchemy-first RPC"
+
+[dependencies]
+# Same EVM stack as sigil-relayer (Polygon side) so the two chains share one
+# idiom: alloy 1.x, `sol!` bindings, EIP-1559 fillers, PrivateKeySigner.
+alloy = { version = "1", features = ["full"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[[bin]]
+name = "flux-soneium"
+path = "src/bin/flux-soneium.rs"

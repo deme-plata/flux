@@ -13,6 +13,7 @@ members = [
 # with `fluxc prune-report` (which also reports the unreachable set).
 default-members = [
     "crates/flux-0x",
+    "crates/flux-soneium",
     "crates/flux-aether",
     "crates/flux-agora-stargate",
     "crates/flux-agora-stargate-mcp",

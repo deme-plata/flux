@@ -260,7 +260,7 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
             basis: if d_state.is_some() { format!("{} of {} comparable peer(s) committed a DIFFERENT wallet_state_root at their tip height than this node's block at that height (peer-heights heartbeat, node ≥ 2026-09-07)", i.state_root_verdicts.iter().filter(|&&ok| !ok).count(), i.state_root_verdicts.len()) }
                    else { "no comparable peer view: either no connected peer runs a node that publishes wallet_state_root in its heartbeat (≥ 2026-09-07), or every peer is ahead of this node / outside its RAM window".into() } },
         Channel { name: "finality_divergence", weight: W_FINALITY, value: d_finality,
-            basis: if d_finality.is_some() { format!("mean |h_peer − h_local| / final_depth({}) over {} peer height(s)", FINAL_DEPTH as u64, i.peer_heights.len()) }
+            basis: if d_finality.is_some() { format!("mean |h_peer − h_local| / final_depth({}) over {} peer height(s); both are settled chain.height() (spine), not the mining frontier, and heartbeats are 5 s apart so ±~25 blocks is clock jitter", FINAL_DEPTH as u64, i.peer_heights.len()) }
                    else { "no peer height on /v1/network/topology.peer_heights: no connected peer has sent a peer-heights heartbeat within the TTL (sigil-top clients do not publish one; sigil-node does)".into() } },
         Channel { name: "semantic_conflicts", weight: W_CONFLICT, value: Some(d_conflict),
             basis: format!("red (non-blue) blocks {}/{} + semantic reject ratio {:.4} ({} verify_mismatch/non_canonical of {} submissions); stale_height/duplicate/no_tip are NOISE and excluded", i.red_blocks, i.blocks, rate(semantic), semantic, denom) },
@@ -302,7 +302,12 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
-struct Sample { ts_ms: u64, height: u64, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64>, state_root_verdicts: Vec<bool> }
+/// `height` is the MINING tip from /v1/mining/miners (the DAG frontier); `settled_height` is
+/// the node's own `chain.height()` from /v1/network/topology.local_view — the settled spine,
+/// which is what peers publish in their heartbeats. Measured 2026-09-07: the frontier runs
+/// ~520 blocks (≈ final_depth) ahead of the spine, so comparing a peer's spine height with
+/// OUR frontier height manufactures a full finality-depth of "divergence". Compare like with like.
+struct Sample { ts_ms: u64, height: u64, settled_height: Option<u64>, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64>, state_root_verdicts: Vec<bool> }
 
 impl Sample { fn rejects(&self) -> u64 { self.rejects_by_kind.values().sum() } }
 
@@ -320,10 +325,12 @@ fn sample() -> Result<Sample, String> {
         }
     }
     let peer_heights = t.get("peer_heights").and_then(|v| v.as_object()).map(|o| o.iter().filter(|(k, _)| k.as_str() != "last").filter_map(|(_, v)| v.as_u64()).filter(|&h| h > 0).collect()).unwrap_or_default();
+    let settled_height = t.get("local_view").and_then(|v| v.get("height")).and_then(|v| v.as_u64());
     let state_root_verdicts = t.get("peer_views").and_then(|v| v.as_object()).map(|o| o.values().filter_map(|pv| pv.get("state_root_matches_local").and_then(|b| b.as_bool())).collect()).unwrap_or_default();
     Ok(Sample {
         ts_ms: now_ms(),
         height: m.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+        settled_height,
         shares_accepted: m.get("shares_accepted").and_then(|v| v.as_u64()).unwrap_or(0),
         rejects_by_kind,
         peers: t.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -390,7 +397,8 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     let inputs = ConsensusInputs {
         blocks: blocks.len(), merging_blocks: merging, red_blocks: blue_false,
         accepted_delta: sub_delta, rejects_delta: rejects_delta.clone(),
-        peer_heights: b.peer_heights.clone(), state_root_verdicts: b.state_root_verdicts.clone(), local_height: b.height,
+        peer_heights: b.peer_heights.clone(), state_root_verdicts: b.state_root_verdicts.clone(),
+        local_height: b.settled_height.unwrap_or(b.height), // spine vs spine; frontier only as a last resort
         distinct_producers: distinct, entropy_bits: ds, dominant_count,
         block_rate_bps: obs_bps, peers: b.peers, tau_window_secs: tau,
     };
@@ -468,7 +476,8 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
                     "block_rate_bps": obs_bps, "block_rate_dev_vs_target": br_dev, "target_bps_diagnostic": TARGET_BPS,
                     "is_blue_false": blue_false, "merging_blocks": merging },
         "inputs": { "reject_ratio": rej_ratio, "rejects_delta": rej_delta, "rejects_lifetime": b.rejects(), "shares_accepted_delta": sub_delta,
-                    "peers_start": a.peers, "peers_end": b.peers, "peer_churn": churn, "peer_heights_seen": b.peer_heights.len(), "state_root_verdicts": b.state_root_verdicts.len() },
+                    "peers_start": a.peers, "peers_end": b.peers, "peer_churn": churn, "peer_heights_seen": b.peer_heights.len(), "state_root_verdicts": b.state_root_verdicts.len(),
+                    "settled_height": b.settled_height, "frontier_minus_settled": b.settled_height.map(|s| b.height as i64 - s as i64) },
         // Compatibility: these top-level keys are read by sigil_realization and the series stats.
         "K": k_v1, "K_star": k_star_v1, "delta_H": dh_v1, "delta_s_bits": ds, "tau_secs": tau, "dominant": if c.delta_h_consensus > 0.0 { "state disagreement (ΔH_c)" } else if ds > 0.0 { "proposer plurality (Δs)" } else { "none (quiet chain)" },
         "legacy_v1": {

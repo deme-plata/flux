@@ -138,6 +138,10 @@ pub(crate) struct ConsensusInputs {
     pub accepted_delta: u64,
     pub rejects_delta: HashMap<String, u64>,
     pub peer_heights: Vec<u64>,
+    /// One entry per peer whose wallet-state-root at ITS tip height the node could compare
+    /// with its own block at that height (`true` = agrees). Peers ahead of us / older nodes
+    /// contribute nothing here — unknown is not disagreement.
+    pub state_root_verdicts: Vec<bool>,
     pub local_height: u64,
     pub distinct_producers: usize,
     pub entropy_bits: f64,
@@ -246,14 +250,18 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
         let m = i.peer_heights.iter().map(|&h| ((h as f64 - i.local_height as f64).abs() / FINAL_DEPTH).min(1.0)).sum::<f64>() / i.peer_heights.len() as f64;
         Some(m)
     };
+    let d_state = if i.state_root_verdicts.is_empty() { None } else {
+        Some(i.state_root_verdicts.iter().filter(|&&ok| !ok).count() as f64 / i.state_root_verdicts.len() as f64)
+    };
     let channels = vec![
         Channel { name: "tip_divergence", weight: W_TIP, value: Some(d_tip),
             basis: format!("{} of {} blocks in the window carry merge-parents (the frontier had >1 tip that had to be reconciled); 0 on a straight chain is a measurement, not a gap", i.merging_blocks, i.blocks) },
-        Channel { name: "state_root_mismatch", weight: W_STATE, value: None,
-            basis: "no cross-node state root on sigil-api — peers do not publish theirs, so this node cannot compare; the strongest consensus evidence is the one SIGIL cannot measure today".into() },
+        Channel { name: "state_root_mismatch", weight: W_STATE, value: d_state,
+            basis: if d_state.is_some() { format!("{} of {} comparable peer(s) committed a DIFFERENT wallet_state_root at their tip height than this node's block at that height (peer-heights heartbeat, node ≥ 2026-09-07)", i.state_root_verdicts.iter().filter(|&&ok| !ok).count(), i.state_root_verdicts.len()) }
+                   else { "no comparable peer view: either no connected peer runs a node that publishes wallet_state_root in its heartbeat (≥ 2026-09-07), or every peer is ahead of this node / outside its RAM window".into() } },
         Channel { name: "finality_divergence", weight: W_FINALITY, value: d_finality,
             basis: if d_finality.is_some() { format!("mean |h_peer − h_local| / final_depth({}) over {} peer height(s)", FINAL_DEPTH as u64, i.peer_heights.len()) }
-                   else { "peer_heights map on /v1/network/topology is empty (flux-p2p mesh_health not fed by sigil-node); nothing to compare".into() } },
+                   else { "no peer height on /v1/network/topology.peer_heights: no connected peer has sent a peer-heights heartbeat within the TTL (sigil-top clients do not publish one; sigil-node does)".into() } },
         Channel { name: "semantic_conflicts", weight: W_CONFLICT, value: Some(d_conflict),
             basis: format!("red (non-blue) blocks {}/{} + semantic reject ratio {:.4} ({} verify_mismatch/non_canonical of {} submissions); stale_height/duplicate/no_tip are NOISE and excluded", i.red_blocks, i.blocks, rate(semantic), semantic, denom) },
     ];
@@ -294,7 +302,7 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
-struct Sample { ts_ms: u64, height: u64, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64> }
+struct Sample { ts_ms: u64, height: u64, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64>, state_root_verdicts: Vec<bool> }
 
 impl Sample { fn rejects(&self) -> u64 { self.rejects_by_kind.values().sum() } }
 
@@ -311,7 +319,8 @@ fn sample() -> Result<Sample, String> {
             *rejects_by_kind.entry(kind).or_insert(0) += n;
         }
     }
-    let peer_heights = t.get("peer_heights").and_then(|v| v.as_object()).map(|o| o.values().filter_map(|v| v.as_u64()).filter(|&h| h > 0).collect()).unwrap_or_default();
+    let peer_heights = t.get("peer_heights").and_then(|v| v.as_object()).map(|o| o.iter().filter(|(k, _)| k.as_str() != "last").filter_map(|(_, v)| v.as_u64()).filter(|&h| h > 0).collect()).unwrap_or_default();
+    let state_root_verdicts = t.get("peer_views").and_then(|v| v.as_object()).map(|o| o.values().filter_map(|pv| pv.get("state_root_matches_local").and_then(|b| b.as_bool())).collect()).unwrap_or_default();
     Ok(Sample {
         ts_ms: now_ms(),
         height: m.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -319,6 +328,7 @@ fn sample() -> Result<Sample, String> {
         rejects_by_kind,
         peers: t.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0),
         peer_heights,
+        state_root_verdicts,
     })
 }
 
@@ -380,7 +390,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     let inputs = ConsensusInputs {
         blocks: blocks.len(), merging_blocks: merging, red_blocks: blue_false,
         accepted_delta: sub_delta, rejects_delta: rejects_delta.clone(),
-        peer_heights: b.peer_heights.clone(), local_height: b.height,
+        peer_heights: b.peer_heights.clone(), state_root_verdicts: b.state_root_verdicts.clone(), local_height: b.height,
         distinct_producers: distinct, entropy_bits: ds, dominant_count,
         block_rate_bps: obs_bps, peers: b.peers, tau_window_secs: tau,
     };
@@ -420,7 +430,9 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     let channels_json: serde_json::Map<String, Value> = c.channels.iter().map(|ch| (ch.name.to_string(), ch.json())).collect();
     let by_kind_json: serde_json::Map<String, Value> = c.rejects_by_kind.iter().map(|(k, (n, class))| (k.clone(), json!({"delta": n, "class": class}))).collect();
     let lifetime_json: serde_json::Map<String, Value> = b.rejects_by_kind.iter().map(|(k, n)| (k.clone(), json!(n))).collect();
-    let measured = ["proposer entropy (Δs)", "tip divergence (DAG merge-parents)", "semantic conflicts (red blocks + verify_mismatch)", "block rate → finality time τ", "mining rejects BY KIND", "peer count / churn (diagnostic only)"];
+    let mut measured = vec!["proposer entropy (Δs)", "tip divergence (DAG merge-parents)", "semantic conflicts (red blocks + verify_mismatch)", "block rate → finality time τ", "mining rejects BY KIND", "peer count / churn (diagnostic only)"];
+    if !b.state_root_verdicts.is_empty() { measured.push("state-root agreement (peer_views, wallet_state_root at the peer's tip height)"); }
+    if !b.peer_heights.is_empty() { measured.push("finality divergence (peer heights vs final_depth)"); }
     let unavailable: Vec<String> = c.channels.iter().filter(|ch| ch.value.is_none()).map(|ch| format!("{} — {}", ch.name, ch.basis)).chain(["P2P byte asymmetry (no byte counters on sigil-api)".to_string()]).collect();
 
     Ok(json!({
@@ -456,7 +468,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
                     "block_rate_bps": obs_bps, "block_rate_dev_vs_target": br_dev, "target_bps_diagnostic": TARGET_BPS,
                     "is_blue_false": blue_false, "merging_blocks": merging },
         "inputs": { "reject_ratio": rej_ratio, "rejects_delta": rej_delta, "rejects_lifetime": b.rejects(), "shares_accepted_delta": sub_delta,
-                    "peers_start": a.peers, "peers_end": b.peers, "peer_churn": churn, "peer_heights_seen": b.peer_heights.len() },
+                    "peers_start": a.peers, "peers_end": b.peers, "peer_churn": churn, "peer_heights_seen": b.peer_heights.len(), "state_root_verdicts": b.state_root_verdicts.len() },
         // Compatibility: these top-level keys are read by sigil_realization and the series stats.
         "K": k_v1, "K_star": k_star_v1, "delta_H": dh_v1, "delta_s_bits": ds, "tau_secs": tau, "dominant": if c.delta_h_consensus > 0.0 { "state disagreement (ΔH_c)" } else if ds > 0.0 { "proposer plurality (Δs)" } else { "none (quiet chain)" },
         "legacy_v1": {
@@ -469,7 +481,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
             "unavailable": unavailable,
             "diagnostic_only": ["peer churn", "noise rejects (stale_height/duplicate/no_tip)", "block-rate deviation vs 0.83/s"],
             "note": if window_only { "blocks counted are exactly those produced inside the window" } else { "fewer than 2 blocks landed inside the window; Δs and DAG channels computed over the node's recent-block feed instead" },
-            "next_to_wire_on_the_node": ["publish state root + tip hash in the peer-heights heartbeat so state_root_mismatch and finality_divergence become measurable", "feed flux-p2p mesh_health.peer_heights per peer_id from the peer-heights topic handler"],
+            "node_side": "since 2026-09-07 sigil-node publishes tip_hash + wallet_state_root + finalized in its peer-heights heartbeat and records per-peer agreement verdicts under /v1/network/topology.peer_views; both channels light up as soon as one connected peer runs that node. sigil-top clients publish no heartbeat, so a node whose only peers are miners still reads them as unavailable.",
         },
         "reference_gauge": reference
     }))
@@ -576,7 +588,7 @@ mod tests {
 
     fn base() -> ConsensusInputs {
         ConsensusInputs { blocks: 200, merging_blocks: 0, red_blocks: 0, accepted_delta: 150, rejects_delta: HashMap::new(),
-            peer_heights: vec![], local_height: 4_000_000, distinct_producers: 2, entropy_bits: 0.0454146923337941, dominant_count: 199,
+            peer_heights: vec![], state_root_verdicts: vec![], local_height: 4_000_000, distinct_producers: 2, entropy_bits: 0.0454146923337941, dominant_count: 199,
             block_rate_bps: 4.45, peers: 5, tau_window_secs: 60.0 }
     }
 
@@ -695,6 +707,22 @@ mod tests {
         let f = c.channels.iter().find(|ch| ch.name == "finality_divergence").unwrap().value.unwrap();
         assert!((f - 0.25).abs() < 1e-9, "{f}"); // mean(0, 256/512)
         assert!((c.missing_weight - W_STATE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn state_root_disagreement_is_the_heaviest_channel() {
+        let mut i = base();
+        i.state_root_verdicts = vec![true, false]; // one of two comparable peers committed a different balances root
+        let c = consensus_gauge(&i);
+        let st = c.channels.iter().find(|ch| ch.name == "state_root_mismatch").unwrap();
+        assert_eq!(st.value, Some(0.5));
+        assert!((c.delta_h_consensus - W_STATE * 0.5).abs() < 1e-9);
+        assert!((c.missing_weight - W_FINALITY).abs() < 1e-9, "only finality still unmeasured");
+        assert!(c.k_c > 0.0);
+        let mut agree = base(); agree.state_root_verdicts = vec![true, true, true];
+        let a = consensus_gauge(&agree);
+        assert_eq!(a.channels.iter().find(|ch| ch.name == "state_root_mismatch").unwrap().value, Some(0.0), "measured agreement is 0.0, not unavailable");
+        assert!(a.k_c_high < consensus_gauge(&base()).k_c_high, "a measured channel narrows the band");
     }
 
     #[test]

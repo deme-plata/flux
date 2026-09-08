@@ -56,7 +56,7 @@ fn main() {
     let supply_sigil = f(&supply["data"]["native_supply"]);
     let depth = b["stark_by_depth"].as_array().cloned().unwrap_or_default();
     let slip = b["slippage"].as_array().cloned().unwrap_or_default();
-    let spot = f(&b["pool_spot_usdc_per_wsigil_1e18"]) / 1e12; // USDC(6dp)/wei → USDC per wSIGIL
+    let spot = f(&b["pool_spot_usdc_per_wsigil_1e18"]) / 1e6; // (USDC-units per wei)·1e18 → USDC per wSIGIL: ×1e18/1e6/1e18
     let res_w = f(&b["pool_reserve_wsigil_wei"]) / 1e18; let res_u = f(&b["pool_reserve_usdc_units"]) / 1e6;
 
     let mut body = String::new();
@@ -70,12 +70,12 @@ fn main() {
     // ── 1. The picture ──────────────────────────────────────────────────────────────────
     body.push_str("\\section{The picture}\n");
     body.push_str("OK, so here's the deal. Think of a tunnel with a lit entrance, a lit exit, and a dark middle. A Bitcoin transaction is public forever. An Ethereum mint is public forever. If the Bitcoin transaction named the Ethereum address, the two would be linked on chain for good and nothing in between could un-link them. So the Bitcoin side is only ever told a \\emph{shield public key} --- a one-way image of a secret nobody on Ethereum has ever seen --- and the Ethereum destination rides \\emph{inside} the sealed SIGIL note, readable by the exit vault alone.\n\n");
-    body.push_str(r#"\begin{center}\begin{tikzpicture}[node distance=9mm, every node/.style={font=\small}]
-\node[draw=btc,thick,rounded corners,fill=btc!8,text width=44mm,align=center] (btc) {\textbf{\textcolor{btc}{PUBLIC Bitcoin}}\\[2pt] tx pays $N$ sats, memo names a \emph{shield pk}\\[2pt]\scriptsize sees: txid, sats, shield pk};
-\node[draw=sig,thick,rounded corners,fill=sig!8,text width=44mm,align=center,right=of btc] (sig) {\textbf{\textcolor{sig}{PRIVATE SIGIL}}\\[2pt] hidden note $\to$ hiding STARK $\to$ vault note; ETH dest sealed in ciphertext\\[2pt]\scriptsize sees: nullifier, 2 commitments, fee, proof};
-\node[draw=eth,thick,rounded corners,fill=eth!8,text width=44mm,align=center,right=of sig] (eth) {\textbf{\textcolor{eth}{PUBLIC Polygon/ETH}}\\[2pt] \texttt{mint(to, wei, lockId)} keyed on the SIGIL tx hash\\[2pt]\scriptsize sees: to, wei, lockId};
-\draw[-{Stealth[length=3mm]},thick] (btc) -- node[above]{SPV proof} (sig);
-\draw[-{Stealth[length=3mm]},thick] (sig) -- node[above]{settled exit} (eth);
+    body.push_str(r#"\begin{center}\begin{tikzpicture}[node distance=16mm, every node/.style={font=\small}]
+\node[draw=btc,thick,rounded corners,fill=btc!8,text width=40mm,align=center] (btc) {\textbf{\textcolor{btc}{PUBLIC Bitcoin}}\\[2pt] tx pays $N$ sats, memo names a \emph{shield pk}\\[2pt]\scriptsize sees: txid, sats, shield pk};
+\node[draw=sig,thick,rounded corners,fill=sig!8,text width=40mm,align=center,right=of btc] (sig) {\textbf{\textcolor{sig}{PRIVATE SIGIL}}\\[2pt] hidden note $\to$ hiding STARK $\to$ vault note; ETH dest sealed in ciphertext\\[2pt]\scriptsize sees: nullifier, 2 commitments, fee, proof};
+\node[draw=eth,thick,rounded corners,fill=eth!8,text width=40mm,align=center,right=of sig] (eth) {\textbf{\textcolor{eth}{PUBLIC Polygon/ETH}}\\[2pt] \texttt{mint(to, wei, lockId)} keyed on the SIGIL tx hash\\[2pt]\scriptsize sees: to, wei, lockId};
+\draw[-{Stealth[length=3mm]},thick] (btc) -- node[above,font=\scriptsize]{SPV proof} (sig);
+\draw[-{Stealth[length=3mm]},thick] (sig) -- node[above,font=\scriptsize]{settled exit} (eth);
 \node[below=4mm of sig,font=\footnotesize] (h) {$H_0 \;\longrightarrow\; H_1 \;\longrightarrow\; H_2 \;\longrightarrow\; H_3$ \quad (BLAKE3 receipt chain, \S6)};
 \end{tikzpicture}\end{center}
 "#);
@@ -84,7 +84,7 @@ fn main() {
     // ── 2. What each observer learns ───────────────────────────────────────────────────
     body.push_str("\\section{What each observer learns}\n");
     body.push_str("Call the depositor Alice, the exit vault $V$, and her Ethereum address $A_E$. Write $\\mathrm{pk}_A$ for her shield public key ($\\mathrm{pk}=\\mathrm{compress}_2(\\mathrm{sk},\\,\\mathrm{PK\\_DOMAIN})$, one-way).\n");
-    body.push_str(r#"\begin{center}\begin{tabular}{lll}\toprule
+    body.push_str(r#"\begin{center}\small\begin{tabular}{p{24mm}p{62mm}p{62mm}}\toprule
 observer & learns & does \emph{not} learn \\\midrule
 Bitcoin watcher & $\mathrm{txid}$, sats, $\mathrm{pk}_A$ & $A_E$, any SIGIL address, when/if it exits \\
 SIGIL node & anchor, nullifier, two hiding commitments, fee, proof & Alice, $V$, the split, $A_E$ \\

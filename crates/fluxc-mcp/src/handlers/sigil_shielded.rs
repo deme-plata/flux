@@ -321,12 +321,26 @@ fn recover(seed: [u8; 32], pool: &Pool, opts: &ScanOpts) -> Wallet {
     let full = padded(pool);
     store.scan_owned(&acct, &full);
 
-    let spent: HashSet<String> = journal_load()
+    let mut spent: HashSet<String> = journal_load()
         .get(&hex::encode(to_wire(acct.public_key())))
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .collect();
+    // The chain's OWN spent set (2026-09-08). The journal only knows what THIS MCP spent; a
+    // note this seed spent from the browser, the phone or sigil-top was invisible here, got
+    // offered again, and the node refused it as "nullifier already spent" (measured today:
+    // txid 58bfde1b…). Nullifiers are public — union them in; the journal stays as the
+    // record of in-flight spends the chain has not settled yet.
+    if let Ok(v) = serde_json::from_str::<Value>(&rpc_get("/v1/shielded/nullifiers")) {
+        if let Some(arr) = v.get("nullifiers").and_then(|a| a.as_array()) {
+            for n in arr {
+                if let Some(h) = n.as_str() {
+                    spent.insert(h.to_ascii_lowercase());
+                }
+            }
+        }
+    }
 
     origins.resize(store.notes.len(), "unknown");
     Wallet { acct, store, max_index, origins, spent }

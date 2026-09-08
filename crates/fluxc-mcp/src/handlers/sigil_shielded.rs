@@ -901,9 +901,16 @@ fn shield_from_seed(a: &Value) -> String {
 
     let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm_hex}|{fee}|nonce={nonce}");
     let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+    // Seal the note to OUR OWN delivery key (2026-09-08): every client of this seed then
+    // finds the deposit by trial-decryption, the way it finds a received payment. Without
+    // it the browser could not spend MCP deposits and the MCP could not see the browser's.
+    let note_ciphertext: Option<String> = u64::try_from(amount).ok().and_then(|v| {
+        seal_note(&NotePlaintext::new(v, acct.blinding(index)), &acct.address(&seed)).ok().map(|c| c.0)
+    });
     let body = json!({
         "from": from, "amount": amount.to_string(), "cm": cm_hex,
         "fee": fee, "sig": sig, "req_nonce": nonce,
+        "note_ciphertext": note_ciphertext,
     });
     match rpc_post("/v1/shield", &body.to_string()) {
         Ok(raw) => {

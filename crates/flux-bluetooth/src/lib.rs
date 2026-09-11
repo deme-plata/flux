@@ -1,4 +1,11 @@
-//! flux-bluetooth — BLE mesh networking for Flux P2P.
+//! flux-bluetooth — the SIGIL BLE profile (`sigil` module, default) and the older BLE-mesh
+//! chat scaffold (`mesh` feature).
+//!
+//! Start at [`sigil`] for phone↔phone / phone↔Chrome offline coin hand-off.
+//!
+//! ---
+//!
+//! Mesh scaffold (feature `mesh`) — BLE mesh networking for Flux P2P.
 //!
 //! Bridges Bluetooth Low Energy (BLE) mesh with libp2p gossipsub,
 //! creating an off-grid, post-quantum encrypted mesh network that
@@ -48,21 +55,31 @@
 //! }
 //! ```
 
-pub mod mesh;
-pub mod p2p_bridge;
-pub mod chat;
-pub mod crypto;
-pub mod discovery;
+#[cfg(feature = "sigil")]
+pub mod sigil;
+
+#[cfg(feature = "ble")]
+pub mod linux;
+
+#[cfg(feature = "mesh")] pub mod mesh;
+#[cfg(feature = "mesh")] pub mod p2p_bridge;
+#[cfg(feature = "mesh")] pub mod chat;
+#[cfg(feature = "mesh")] pub mod crypto;
+#[cfg(feature = "mesh")] pub mod discovery;
+
+#[cfg(feature = "mesh")]
+mod node {
+    use super::{mesh, p2p_bridge, chat};
 
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use anyhow::Result;
 
 /// Re-export key types.
-pub use mesh::{MeshConfig, BleMessage, BlePeer, BleAddress};
-pub use p2p_bridge::{P2pBridge, BridgeEvent};
-pub use chat::{ChatProtocol, ChatMessage, ChatRoom};
-pub use crypto::{BluetoothCrypto, PQIdentity};
+pub use super::mesh::{MeshConfig, BleMessage, BlePeer, BleAddress};
+pub use super::p2p_bridge::{P2pBridge, BridgeEvent};
+pub use super::chat::{ChatProtocol, ChatMessage, ChatRoom};
+pub use super::crypto::{BluetoothCrypto, PQIdentity};
 
 /// Configuration for a flux-bluetooth node.
 #[derive(Debug, Clone)]
@@ -224,3 +241,7 @@ fn ble_message_from_chat(msg: &chat::SignedMessage) -> mesh::BleMessage {
         kind: mesh::MessageKind::Chat,
     }
 }
+
+}
+#[cfg(feature = "mesh")]
+pub use node::*;

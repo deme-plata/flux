@@ -3,41 +3,47 @@ name = "flux-bluetooth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Flux Bluetooth — BLE mesh networking for Flux P2P. Bridges Bluetooth Low Energy mesh with libp2p gossipsub for off-grid, post-quantum encrypted mesh chat and data transfer. Beats BitChat with PQ crypto, libp2p routing, and Flux substrate."
+description = "Flux Bluetooth — the SIGIL BLE profile (offline bearer-coin hand-off between phones and Chrome over a GATT link, X25519+AES-GCM sealed) plus the older BLE-mesh/libp2p bridge scaffold behind the `mesh` feature."
 
 [features]
-default = []
-# Full BLE hardware support via btleplug (Linux/Windows/macOS)
-ble = ["btleplug"]
+# The SIGIL BLE profile: framing, messages, sealed link, session. std-only + small
+# crypto crates. This is what the Android core and the Linux central link against.
+default = ["sigil"]
+sigil = ["dep:serde", "dep:serde_json", "dep:x25519-dalek", "dep:hkdf", "dep:sha2", "dep:aes-gcm", "dep:rand", "dep:hex", "dep:thiserror"]
+# The 2026-08 BLE-mesh chat scaffold (libp2p bridge, PQ identity). Heavy; off by default
+# so a phone or a wasm target can take `sigil` without dragging in libp2p.
+mesh = ["dep:tokio", "dep:anyhow", "dep:tracing", "dep:blake3", "dep:flux-p2p", "dep:libp2p", "dep:flux-sqisign", "dep:futures", "dep:uuid", "dep:hex", "dep:serde", "dep:serde_json"]
+# Real BLE hardware on Linux/Windows/macOS via btleplug — the laptop-side central.
+ble = ["sigil", "dep:btleplug", "dep:tokio", "dep:anyhow", "dep:futures", "dep:uuid"]
 # Simulation mode for testing without BLE hardware
 sim = []
 
 [dependencies]
-# Core
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-blake3 = { workspace = true }
-hex = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+rand = { workspace = true, optional = true }
 
-# P2P bridge
-flux-p2p = { path = "../flux-p2p" }
+# mesh
+tokio = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+flux-p2p = { path = "../flux-p2p", optional = true }
 libp2p = { version = "0.54", features = [
     "tokio", "gossipsub", "kad", "identify", "noise", "yamux", "tcp"
-] }
+], optional = true }
+flux-sqisign = { path = "../flux-sqisign", optional = true }
+futures = { version = "0.3", optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
 
-# PQ crypto
-flux-sqisign = { path = "../flux-sqisign" }
-
-# BLE hardware (optional, feature-gated)
+# ble
 btleplug = { version = "0.11", optional = true }
-
-# Channels
-futures = "0.3"
-uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

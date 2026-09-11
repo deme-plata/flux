@@ -89,6 +89,38 @@ impl Ephemeral {
     }
 }
 
+/// The raw derived material, role-relative — what a port that does its own AES-GCM
+/// (the Android wallet over JNI) needs and nothing more.
+#[derive(Clone)]
+pub struct LinkMaterial {
+    pub send_key: [u8; 32],
+    pub recv_key: [u8; 32],
+    /// Direction byte this side puts first in its nonces (0 = c→p, 1 = p→c).
+    pub send_dir: u8,
+    pub sas: u32,
+}
+
+impl std::fmt::Debug for LinkMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkMaterial").field("send_dir", &self.send_dir).field("sas", &self.sas).finish()
+    }
+}
+
+/// Complete the handshake from raw keys and hand back the material. Used by the JNI
+/// bridge; [`Ephemeral::link`] is the same computation wrapped in a [`Link`].
+pub fn derive_material(role: Role, my_sk: &[u8; 32], peer_epk: &[u8; 32]) -> LinkMaterial {
+    let secret = StaticSecret::from(*my_sk);
+    let my_pk = PublicKey::from(&secret).to_bytes();
+    let shared = secret.diffie_hellman(&PublicKey::from(*peer_epk));
+    let (epk_c, epk_p) = match role {
+        Role::Central => (my_pk, *peer_epk),
+        Role::Peripheral => (*peer_epk, my_pk),
+    };
+    let l = Link::derive(role, shared.as_bytes(), &epk_c, &epk_p);
+    let (send_key, recv_key, send_dir, _) = l.keys();
+    LinkMaterial { send_key, recv_key, send_dir, sas: l.sas }
+}
+
 /// The keyed link. Seals in one direction, opens the other.
 pub struct Link {
     role: Role,

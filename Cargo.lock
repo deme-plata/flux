@@ -3696,6 +3696,7 @@ dependencies = [
 name = "flux-bluetooth"
 version = "0.41.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "blake3",
  "btleplug",
@@ -3703,13 +3704,17 @@ dependencies = [
  "flux-sqisign",
  "futures",
  "hex",
+ "hkdf",
  "libp2p 0.54.1",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]

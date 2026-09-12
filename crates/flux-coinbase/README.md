@@ -69,8 +69,25 @@ that stops buying is a market-timer. State (ticks, avg entry, notional held, his
 
 ## TUI keys
 
-`1-5`/Tab tabs · `←/→` product · `g` candle granularity · `b`/`s` order form · `d` DCA plan ·
-`c` cancel-all · `r` refresh · `q` quit. Form: digits amount · `+`/`-` leverage · `m` market/limit
+`1-5`/Tab tabs · `←/→` product · **`z`/`x` zoom in/out** · **`Enter` Claude analysis** · `b`/`s` order form ·
+`d` DCA plan · `c` cancel-all · `r` refresh · `q` quit.
+
+**Zoom ladder** (span of chart → candle width): `3m` 1-second · `15m` 5-second · `1h` 1-minute ·
+`6h` 5-minute · `24h` 15-minute · `7d` hourly · `30d` 6-hour · `4mo` daily. Coinbase has no
+sub-minute candles, so the 1 s / 5 s levels are built locally from the live trade tape (polled at
+2 Hz while you sit there; gaps are filled flat so the chart stays continuous).
+
+**Claude analysis (Enter on the Trade tab).** A modal on top of the chart runs `claude -p` on this
+box's login (needs `claude` on PATH or `FLUX_CLAUDE_BIN`; `FLUX_CLAUDE_MODEL` optional) and streams
+the answer live. It is fed the full measurement bundle: the chart on screen (SMA20/50/200, EMA12/26,
+MACD 12-26-9, RSI14, Bollinger 20/2 + %b, ATR14, range position, volume trend), the 1h and 1d frames
+for context, the book (spread, imbalance top-10/25, depth within 0.5 %, largest resting orders), the
+tape (buy ratio, VWAP, largest print), funding/OI for perps, open positions with liquidation
+distance, the DCA state and the gate. **The analysis is zoom-aware:** the span of the chart sets
+the horizon (≤ 30 min scalp · ≤ 6 h intraday · ≤ 3 d swing · beyond = position) and the prompt
+tells Claude to answer at that horizon and to say which frame it is weighting. The numbers strip
+sits above the text so every claim can be checked; `Tab` flips to the raw JSON; `z`/`x` re-run at
+another zoom; `Esc` kills the child. Form: digits amount · `+`/`-` leverage · `m` market/limit
 · `Tab` field · `Enter` gate+preview → `Enter` again places (LIVE only) · `Esc`.
 
 PAPER mode is the default: Enter logs what would be sent. `--live` is the only way Enter can trade.

@@ -21,10 +21,88 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Ta
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io;
+use std::io::{BufRead, Write as _};
+use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const GRANS: [&str; 6] = ["1m", "5m", "15m", "1h", "6h", "1d"];
+/// Where a zoom level's candles come from: built locally from the trade tape (sub-minute, which
+/// Coinbase has no endpoint for) or fetched from the candles API.
+#[derive(Clone, Copy, PartialEq)]
+enum Src { Local(u64), Api(&'static str) }
+
+/// The zoom ladder — `z` in, `x` out. Label · source · candles kept · what the span reads as.
+const ZOOMS: [(&str, Src, u32, &str); 8] = [
+    ("3m",  Src::Local(1),   180, "3 min of 1-second candles"),
+    ("15m", Src::Local(5),   180, "15 min of 5-second candles"),
+    ("1h",  Src::Api("1m"),   60, "1 hour of 1-minute candles"),
+    ("6h",  Src::Api("5m"),   72, "6 hours of 5-minute candles"),
+    ("24h", Src::Api("15m"),  96, "24 hours of 15-minute candles"),
+    ("7d",  Src::Api("1h"),  168, "7 days of hourly candles"),
+    ("30d", Src::Api("6h"),  120, "30 days of 6-hour candles"),
+    ("4mo", Src::Api("1d"),  120, "4 months of daily candles"),
+];
+const ZOOM_DEFAULT: usize = 2;
+
+/// One trade, as a tick for the local candle builder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tick { ts_ms: u64, price: f64, size: f64 }
+
+/// `2026-09-12T02:22:11.123456Z` → unix milliseconds. Hand-rolled so the crate stays chrono-free.
+fn parse_rfc3339_ms(s: &str) -> Option<u64> {
+    let (date, rest) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let time = rest.trim_end_matches('Z');
+    let time = time.split(['+', '-']).next().unwrap_or(time);
+    let mut t = time.split(':');
+    let (hh, mm): (u64, u64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    let sec_s = t.next()?;
+    let (ss, frac) = sec_s.split_once('.').unwrap_or((sec_s, ""));
+    let ss: u64 = ss.parse().ok()?;
+    let ms: u64 = { let f: String = frac.chars().chain("000".chars()).take(3).collect(); f.parse().unwrap_or(0) };
+    // days from civil (Howard Hinnant)
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 { return None; }
+    Some(days as u64 * 86_400_000 + hh * 3_600_000 + mm * 60_000 + ss * 1000 + ms)
+}
+
+/// Bucket ticks into fixed-width candles, oldest → newest, gaps filled with flat candles at the
+/// previous close so the chart stays continuous. Includes the in-progress bucket.
+fn local_candles(ticks: &VecDeque<Tick>, bucket_s: u64, count: u32, now_ms: u64) -> Vec<Candle> {
+    if ticks.is_empty() || bucket_s == 0 { return vec![]; }
+    let b = bucket_s * 1000;
+    let last_bucket = now_ms / b;
+    let first_bucket = last_bucket.saturating_sub(count as u64 - 1);
+    let mut out: Vec<Candle> = Vec::with_capacity(count as usize);
+    let mut prev_close: Option<f64> = ticks.iter().rev().find(|t| t.ts_ms / b < first_bucket).map(|t| t.price);
+    let mut i = 0;
+    let v: Vec<&Tick> = ticks.iter().collect();
+    for bk in first_bucket..=last_bucket {
+        let (lo_ms, hi_ms) = (bk * b, (bk + 1) * b);
+        while i < v.len() && v[i].ts_ms < lo_ms { i += 1; }
+        let mut c: Option<Candle> = None;
+        while i < v.len() && v[i].ts_ms < hi_ms {
+            let t = v[i];
+            match &mut c {
+                None => c = Some(Candle { start: lo_ms / 1000, open: t.price, high: t.price, low: t.price, close: t.price, volume: t.size }),
+                Some(k) => { k.high = k.high.max(t.price); k.low = k.low.min(t.price); k.close = t.price; k.volume += t.size; }
+            }
+            i += 1;
+        }
+        match (c, prev_close) {
+            (Some(k), _) => { prev_close = Some(k.close); out.push(k); }
+            (None, Some(pc)) => out.push(Candle { start: lo_ms / 1000, open: pc, high: pc, low: pc, close: pc, volume: 0.0 }),
+            (None, None) => {}
+        }
+    }
+    out
+}
 const TABS: [&str; 5] = ["Trade", "DCA", "Orders", "Account", "Log"];
 
 #[derive(Clone)]
@@ -60,7 +138,123 @@ struct OrderForm {
 
 enum Pending { CancelAll, Place(Value), Dca(Value) }
 
-struct Shared { product: String, gran: String, refresh: bool }
+enum AMsg { Status(String), Report(Value), Delta(String), Full(String), Done(Result<(), String>) }
+
+/// The Claude analysis modal: a `claude -p` child streaming into a scrollable pane, fed the
+/// measurement bundle for the chart currently on screen.
+struct Analysis {
+    rx: mpsc::Receiver<AMsg>,
+    child: Arc<Mutex<Option<Child>>>,
+    text: String, status: String, report: Option<Value>, done: bool, error: Option<String>,
+    scroll: u16, show_numbers: bool, started: Instant, finished_ms: Option<u128>, view_label: String,
+}
+
+/// Everything the analysis thread needs, copied out of the App so the UI never blocks.
+#[derive(Clone)]
+struct Snapshot {
+    product: ProductInfo, book: Book, tape: Tape, view: crate::ta::View, candles: Vec<Candle>,
+    positions: Vec<Position>, dca_state: Value, gate: Gate,
+}
+
+fn claude_bin() -> String {
+    std::env::var("FLUX_CLAUDE_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "claude".into())
+}
+
+/// Parse one `--output-format stream-json` line into what the pane should do with it.
+fn parse_stream_line(line: &str) -> Option<AMsg> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("stream_event") => {
+            let ev = v.get("event")?;
+            if ev.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
+                let d = ev.get("delta")?;
+                if d.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                    return Some(AMsg::Delta(d.get("text")?.as_str()?.to_string()));
+                }
+            }
+            None
+        }
+        Some("assistant") => {
+            let text: String = v.get("message")?.get("content")?.as_array()?.iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("");
+            if text.is_empty() { None } else { Some(AMsg::Full(text)) }
+        }
+        Some("result") => {
+            if v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
+                Some(AMsg::Done(Err(v.get("result").and_then(|r| r.as_str()).unwrap_or("claude returned an error").to_string())))
+            } else {
+                match v.get("result").and_then(|r| r.as_str()) {
+                    Some(r) if !r.is_empty() => Some(AMsg::Full(r.to_string())),
+                    _ => Some(AMsg::Done(Ok(()))),
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Spawn the measurement + `claude -p` pipeline. Runs entirely off the UI thread.
+fn start_analysis(snap: Snapshot) -> Analysis {
+    let (tx, rx) = mpsc::channel();
+    let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let slot = child_slot.clone();
+    let view_label = format!("{} · {} candles · {}", snap.view.zoom, snap.view.candles, crate::ta::human_span(snap.view.span_secs()));
+    std::thread::spawn(move || {
+        let _ = tx.send(AMsg::Status("measuring: fetching 1h + 1d context candles…".into()));
+        let pid = snap.product.product_id.clone();
+        let (c1h, c1d) = match Coinbase::public() {
+            Ok(c) => (c.candles(&pid, "1h", 300).unwrap_or_default(), c.candles(&pid, "1d", 200).unwrap_or_default()),
+            Err(_) => (vec![], vec![]),
+        };
+        let report = crate::ta::report(&snap.product, &snap.book, &snap.tape, &snap.view, &snap.candles, &c1h, &c1d,
+                                       &snap.positions, &snap.dca_state, &snap.gate);
+        let _ = tx.send(AMsg::Report(report.clone()));
+        let prompt = crate::ta::prompt(&report);
+        let (hz, _) = snap.view.horizon();
+        let _ = tx.send(AMsg::Status(format!("asking claude -p at the {hz} horizon ({} chars of measurements)…", prompt.len())));
+        let cwd = std::env::var("FLUX_COINBASE_STATE_DIR").unwrap_or_else(|_| crate::dca::STATE_DIR.into());
+        let _ = std::fs::create_dir_all(&cwd);
+        let mut cmd = Command::new(claude_bin());
+        cmd.args(["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+                  "--disallowedTools", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "Agent"])
+           .current_dir(&cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Ok(m) = std::env::var("FLUX_CLAUDE_MODEL") { if !m.is_empty() { cmd.args(["--model", &m]); } }
+        // a claude spawned from inside a Claude Code session refuses to start unless the nesting
+        // markers are gone; the login in ~/.claude is untouched by this. NOT `--bare`: bare mode
+        // skips the credential loader and answers "Not logged in" with a perfectly valid login.
+        for (k, _) in std::env::vars() { if k.starts_with("CLAUDE") { cmd.env_remove(&k); } }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => { let _ = tx.send(AMsg::Done(Err(format!("cannot start `{}`: {e} (set FLUX_CLAUDE_BIN)", claude_bin())))); return; }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes());
+        }
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        *slot.lock().unwrap() = Some(child);
+        let mut saw_done = false;
+        if let Some(out) = stdout {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                match parse_stream_line(&line) {
+                    Some(AMsg::Done(r)) => { saw_done = true; let _ = tx.send(AMsg::Done(r)); break; }
+                    Some(m) => { let _ = tx.send(m); }
+                    None => {}
+                }
+            }
+        }
+        let err_text: String = stderr.map(|e| std::io::BufReader::new(e).lines().map_while(Result::ok).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+        let status = slot.lock().unwrap().as_mut().and_then(|c| c.wait().ok());
+        if !saw_done {
+            let ok = status.map(|s| s.success()).unwrap_or(false);
+            let _ = tx.send(AMsg::Done(if ok { Ok(()) } else { Err(if err_text.trim().is_empty() { "claude exited without a result".into() } else { err_text.chars().take(600).collect() }) }));
+        }
+    });
+    Analysis { rx, child: child_slot, text: String::new(), status: "starting…".into(), report: None, done: false, error: None,
+               scroll: 0, show_numbers: false, started: Instant::now(), finished_ms: None, view_label }
+}
+
+struct Shared { product: String, gran: String, refresh: bool, fast: bool }
 
 struct App {
     opts: TuiOpts,
@@ -73,6 +267,8 @@ struct App {
     form: Option<OrderForm>, pending: Option<Pending>,
     dca_state: DcaState, dca_plan: Option<Value>,
     gate: Gate, quit: bool,
+    zoom: usize, ticks: VecDeque<Tick>, last_trade_id: u64,
+    analysis: Option<Analysis>,
 }
 
 impl App {
@@ -82,7 +278,6 @@ impl App {
         if self.log.len() > 200 { self.log.pop_back(); }
     }
     fn product_id(&self) -> String { self.shared.lock().map(|s| s.product.clone()).unwrap_or_default() }
-    fn gran(&self) -> String { self.shared.lock().map(|s| s.gran.clone()).unwrap_or_else(|_| "1h".into()) }
     fn switch_product(&mut self, delta: i32) {
         let pid = self.product_id();
         let n = self.opts.products.len() as i32;
@@ -95,13 +290,57 @@ impl App {
         self.dca_state = DcaState::load(&self.dca_cfg().state_path());
         self.log(format!("→ {np}"));
     }
-    fn cycle_gran(&mut self) {
-        let g = self.gran();
-        let i = GRANS.iter().position(|x| *x == g).unwrap_or(3);
-        let ng = GRANS[(i + 1) % GRANS.len()].to_string();
-        if let Ok(mut s) = self.shared.lock() { s.gran = ng.clone(); s.refresh = true; }
-        self.candles.clear();
-        self.log(format!("candles {ng}"));
+    fn set_zoom(&mut self, z: usize) {
+        let z = z.min(ZOOMS.len() - 1);
+        let (label, src, count, span) = ZOOMS[z];
+        self.zoom = z;
+        match src {
+            Src::Api(g) => {
+                if let Ok(mut s) = self.shared.lock() { if s.gran != g { s.gran = g.to_string(); self.candles.clear(); } s.fast = false; s.refresh = true; }
+            }
+            Src::Local(_) => { if let Ok(mut s) = self.shared.lock() { s.fast = true; s.refresh = true; } }
+        }
+        self.log(format!("zoom {label}: {span} ({count} candles)"));
+    }
+    fn zoom_in(&mut self) { if self.zoom > 0 { self.set_zoom(self.zoom - 1); } }
+    fn zoom_out(&mut self) { if self.zoom + 1 < ZOOMS.len() { self.set_zoom(self.zoom + 1); } }
+    /// Fold a tape into the tick history (dedup by monotone trade id), newest last.
+    fn absorb_tape(&mut self, t: &Tape) {
+        let floor = self.last_trade_id;
+        let mut fresh: Vec<(u64, Tick)> = t.trades.iter().filter_map(|tr| {
+            let id: u64 = tr.trade_id.parse().ok()?;
+            if id <= floor { return None; }
+            Some((id, Tick { ts_ms: parse_rfc3339_ms(&tr.time)?, price: tr.price, size: tr.size }))
+        }).collect();
+        if let Some(mx) = fresh.iter().map(|(id, _)| *id).max() { self.last_trade_id = mx; }
+        fresh.sort_by_key(|(_, k)| k.ts_ms);
+        let fresh: Vec<Tick> = fresh.into_iter().map(|(_, k)| k).collect();
+        self.ticks.extend(fresh);
+        while self.ticks.len() > 20_000 { self.ticks.pop_front(); }
+    }
+    fn snapshot(&self) -> Snapshot {
+        let (candles, label, _count, _span) = self.chart_candles();
+        let candle_secs = match ZOOMS[self.zoom].1 { Src::Local(b) => b, Src::Api(g) => crate::granularity(g).map(|x| x.1).unwrap_or(3600) };
+        Snapshot { product: self.product.clone(), book: self.book.clone(), tape: self.tape.clone(),
+                   view: crate::ta::View { zoom: label.to_string(), candle_secs, candles: candles.len() }, candles,
+                   positions: self.positions.clone(), dca_state: self.dca_state.to_json(), gate: self.gate.clone() }
+    }
+    fn open_analysis(&mut self) {
+        if let Some(a) = self.analysis.take() { if let Some(mut c) = a.child.lock().unwrap().take() { let _ = c.kill(); } }
+        let snap = self.snapshot();
+        self.log(format!("analysis: {} @ {} horizon", ZOOMS[self.zoom].0, snap.view.horizon().0));
+        self.analysis = Some(start_analysis(snap));
+    }
+    fn close_analysis(&mut self) {
+        if let Some(a) = self.analysis.take() { if let Some(mut c) = a.child.lock().unwrap().take() { let _ = c.kill(); } }
+    }
+    /// What the chart draws for the current zoom.
+    fn chart_candles(&self) -> (Vec<Candle>, &'static str, u32, &'static str) {
+        let (label, src, count, span) = ZOOMS[self.zoom];
+        match src {
+            Src::Local(b) => (local_candles(&self.ticks, b, count, crate::now_ms()), label, count, span),
+            Src::Api(_) => { let n = self.candles.len().min(count as usize); (self.candles[self.candles.len() - n..].to_vec(), label, count, span) }
+        }
     }
     fn dca_cfg(&self) -> DcaConfig {
         let mut c = self.opts.dca.clone();
@@ -141,21 +380,21 @@ fn spawn_fetcher(client: Arc<Coinbase>, shared: Arc<Mutex<Shared>>, tx: mpsc::Se
     std::thread::spawn(move || {
         let mut n: u64 = 0;
         loop {
-            let (pid, gran, refresh) = match shared.lock() {
-                Ok(mut s) => { let r = s.refresh; s.refresh = false; (s.product.clone(), s.gran.clone(), r) }
+            let (pid, gran, refresh, fast) = match shared.lock() {
+                Ok(mut s) => { let r = s.refresh; s.refresh = false; (s.product.clone(), s.gran.clone(), r, s.fast) }
                 Err(_) => break,
             };
             let t0 = Instant::now();
             match client.book(&pid, 25) { Ok(b) => { let _ = tx.send(Msg::Book(b)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("book: {e}"))); } }
             let _ = tx.send(Msg::Latency(t0.elapsed().as_millis() as u64));
-            if n % 2 == 0 || refresh {
-                match client.tape(&pid, 40) { Ok(t) => { let _ = tx.send(Msg::Tape(t)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("tape: {e}"))); } }
+            if fast || n % 2 == 0 || refresh {
+                match client.tape(&pid, 100) { Ok(t) => { let _ = tx.send(Msg::Tape(t)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("tape: {e}"))); } }
             }
             if n % 5 == 0 || refresh {
                 match client.product(&pid) { Ok(p) => { let _ = tx.send(Msg::Product(p)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("product: {e}"))); } }
             }
             if n % 20 == 0 || refresh {
-                match client.candles(&pid, &gran, 120) { Ok(c) => { let _ = tx.send(Msg::Candles(c)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("candles: {e}"))); } }
+                match client.candles(&pid, &gran, 200) { Ok(c) => { let _ = tx.send(Msg::Candles(c)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("candles: {e}"))); } }
             }
             if client.is_signed() && (n % 8 == 0 || refresh) {
                 match client.accounts() { Ok(a) => { let _ = tx.send(Msg::Accounts(a)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("accounts: {e}"))); } }
@@ -163,7 +402,7 @@ fn spawn_fetcher(client: Arc<Coinbase>, shared: Arc<Mutex<Shared>>, tx: mpsc::Se
                 match client.open_orders("") { Ok(o) => { let _ = tx.send(Msg::Orders(o)); }, Err(e) => { let _ = tx.send(Msg::Err(format!("orders: {e}"))); } }
             }
             n += 1;
-            std::thread::sleep(Duration::from_millis(900));
+            std::thread::sleep(Duration::from_millis(if fast { 450 } else { 900 }));
         }
     });
 }
@@ -172,7 +411,7 @@ fn spawn_fetcher(client: Arc<Coinbase>, shared: Arc<Mutex<Shared>>, tx: mpsc::Se
 
 pub fn run(opts: TuiOpts) -> io::Result<()> {
     let client = Arc::new(Coinbase::best_effort().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?);
-    let shared = Arc::new(Mutex::new(Shared { product: opts.product.to_uppercase(), gran: opts.gran.clone(), refresh: true }));
+    let shared = Arc::new(Mutex::new(Shared { product: opts.product.to_uppercase(), gran: opts.gran.clone(), refresh: true, fast: false }));
     let (tx, rx) = mpsc::channel();
     spawn_fetcher(client.clone(), shared.clone(), tx);
 
@@ -183,7 +422,9 @@ pub fn run(opts: TuiOpts) -> io::Result<()> {
         log: VecDeque::new(), latency_ms: 0, last_data: Instant::now(), errors: 0,
         form: None, pending: None, dca_state: DcaState::default(), dca_plan: None,
         gate: Gate::default(), quit: false,
+        zoom: ZOOM_DEFAULT, ticks: VecDeque::new(), last_trade_id: 0, analysis: None,
     };
+    app.set_zoom(ZOOMS.iter().position(|z| z.0 == opts.gran).unwrap_or(ZOOM_DEFAULT));
     app.dca_state = DcaState::load(&app.dca_cfg().state_path());
     if !app.opts.products.iter().any(|p| p.eq_ignore_ascii_case(&app.opts.product)) { app.opts.products.insert(0, app.opts.product.to_uppercase()); }
     app.log(format!("flux-coinbase · key {} · {}", client.key_fingerprint(), if opts.live { "LIVE — Enter can place orders" } else { "PAPER — nothing is sent" }));
@@ -205,11 +446,25 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, rx: mpsc::R
         while let Ok(m) = rx.try_recv() {
             app.last_data = Instant::now();
             match m {
-                Msg::Book(b) => app.book = b, Msg::Tape(t) => app.tape = t, Msg::Candles(c) => app.candles = c,
+                Msg::Book(b) => app.book = b,
+                Msg::Tape(t) => { app.absorb_tape(&t); app.tape = t; }
+                Msg::Candles(c) => app.candles = c,
                 Msg::Product(p) => app.product = p, Msg::Accounts(a) => app.accounts = a,
                 Msg::Positions(p, w) => { app.positions = p; app.positions_note = w; }
                 Msg::Orders(o) => app.orders = o, Msg::Latency(l) => app.latency_ms = l,
                 Msg::Err(e) => { app.errors += 1; app.log(format!("⚠ {e}")); }
+            }
+        }
+        if let Some(a) = app.analysis.as_mut() {
+            while let Ok(m) = a.rx.try_recv() {
+                match m {
+                    AMsg::Status(st) => a.status = st,
+                    AMsg::Report(r) => a.report = Some(r),
+                    AMsg::Delta(d) => { a.text.push_str(&d); a.status = "streaming…".into(); }
+                    AMsg::Full(t) => a.text = t,
+                    AMsg::Done(r) => { a.done = true; a.finished_ms = Some(a.started.elapsed().as_millis());
+                                       match r { Ok(()) => a.status = "done".into(), Err(e) => { a.status = "failed".into(); a.error = Some(e); } } }
+                }
             }
         }
         terminal.draw(|f| draw(f, app))?;
@@ -228,6 +483,7 @@ fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') { app.quit = true; return; }
     if app.pending.is_some() { return on_key_pending(app, code); }
     if app.form.is_some() { return on_key_form(app, code); }
+    if app.analysis.is_some() { return on_key_analysis(app, code); }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
         KeyCode::Tab => app.tab = (app.tab + 1) % TABS.len(),
@@ -235,7 +491,8 @@ fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char(c @ '1'..='5') => app.tab = (c as u8 - b'1') as usize,
         KeyCode::Left | KeyCode::Char('[') => app.switch_product(-1),
         KeyCode::Right | KeyCode::Char(']') => app.switch_product(1),
-        KeyCode::Char('g') => app.cycle_gran(),
+        KeyCode::Char('z') | KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_in(),
+        KeyCode::Char('x') | KeyCode::Char('-') | KeyCode::Char('g') => app.zoom_out(),
         KeyCode::Char('r') => { if let Ok(mut s) = app.shared.lock() { s.refresh = true; } app.log("refresh"); }
         KeyCode::Char('b') | KeyCode::Char('s') => {
             let side = if code == KeyCode::Char('b') { "BUY" } else { "SELL" };
@@ -248,6 +505,22 @@ fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.pending = Some(Pending::CancelAll);
         }
         KeyCode::Char('d') => dca_propose(app),
+        KeyCode::Enter | KeyCode::Char('a') if app.tab == 0 => app.open_analysis(),
+        _ => {}
+    }
+}
+
+fn on_key_analysis(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_analysis(),
+        KeyCode::Enter | KeyCode::Char('r') => app.open_analysis(),
+        KeyCode::Tab | KeyCode::Char('n') => { if let Some(a) = app.analysis.as_mut() { a.show_numbers = !a.show_numbers; a.scroll = 0; } }
+        KeyCode::Up | KeyCode::Char('k') => { if let Some(a) = app.analysis.as_mut() { a.scroll = a.scroll.saturating_sub(1); } }
+        KeyCode::Down | KeyCode::Char('j') => { if let Some(a) = app.analysis.as_mut() { a.scroll = a.scroll.saturating_add(1); } }
+        KeyCode::PageUp => { if let Some(a) = app.analysis.as_mut() { a.scroll = a.scroll.saturating_sub(10); } }
+        KeyCode::PageDown => { if let Some(a) = app.analysis.as_mut() { a.scroll = a.scroll.saturating_add(10); } }
+        KeyCode::Char('z') | KeyCode::Char('+') => { app.zoom_in(); app.open_analysis(); }
+        KeyCode::Char('x') | KeyCode::Char('-') => { app.zoom_out(); app.open_analysis(); }
         _ => {}
     }
 }
@@ -398,8 +671,86 @@ fn draw(f: &mut Frame, app: &App) {
         _ => draw_log(f, app, rows[2]),
     }
     draw_footer(f, app, rows[3]);
+    if let Some(a) = &app.analysis { draw_analysis(f, app, a, area); }
     if let Some(form) = &app.form { draw_form(f, app, form, area); }
     if let Some(p) = &app.pending { draw_confirm(f, app, p, area); }
+}
+
+/// One compact line per timeframe so the numbers Claude was given are visible beside its words.
+fn frame_line(fr: &Value) -> Line<'static> {
+    let g = |k: &str| fr[k].as_f64();
+    let f2 = |x: Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or("—".into());
+    let tf = fr["timeframe"].as_str().unwrap_or("?").split(' ').next().unwrap_or("?").to_string();
+    let rsi = g("rsi14");
+    let rsi_c = match rsi { Some(r) if r < 30.0 => C_GREEN, Some(r) if r > 70.0 => C_RED, _ => C_TXT };
+    let hist = fr["macd_12_26_9"]["hist"].as_f64();
+    Line::from(vec![
+        Span::styled(format!("{tf:<5}"), Style::new().fg(C_CYAN).bold()),
+        Span::styled(format!("vsSMA20 {:>6}% ", f2(g("price_vs_sma20_pct"))), Style::new().fg(if g("price_vs_sma20_pct").unwrap_or(0.0) >= 0.0 { C_GREEN } else { C_RED })),
+        Span::styled(format!("vsSMA200 {:>6}% ", f2(g("price_vs_sma200_pct"))), Style::new().fg(if g("price_vs_sma200_pct").unwrap_or(0.0) >= 0.0 { C_GREEN } else { C_RED })),
+        Span::styled(format!("RSI {:>5} ", f2(rsi)), Style::new().fg(rsi_c)),
+        Span::styled(format!("MACDh {:>8} ", f2(hist)), Style::new().fg(if hist.unwrap_or(0.0) >= 0.0 { C_GREEN } else { C_RED })),
+        Span::styled(format!("%b {:>4} ", f2(fr["bollinger_20_2"]["pct_b"].as_f64())), Style::new().fg(C_TXT)),
+        Span::styled(format!("ATR {:>5}% ", f2(g("atr14_pct"))), Style::new().fg(C_DIM)),
+        Span::styled(format!("rng {:>4}", f2(fr["range"]["position_0_low_1_high"].as_f64())), Style::new().fg(C_DIM)),
+    ])
+}
+
+fn draw_analysis(f: &mut Frame, app: &App, a: &Analysis, area: Rect) {
+    let r = centered(area, (area.width as u32 * 88 / 100) as u16, (area.height as u32 * 86 / 100) as u16);
+    f.render_widget(Clear, r);
+    let (hz, _) = crate::ta::View { zoom: ZOOMS[app.zoom].0.into(), candle_secs: match ZOOMS[app.zoom].1 { Src::Local(b) => b, Src::Api(g) => crate::granularity(g).map(|x| x.1).unwrap_or(3600) }, candles: ZOOMS[app.zoom].2 as usize }.horizon();
+    let elapsed = a.finished_ms.unwrap_or(a.started.elapsed().as_millis());
+    let title = format!("CLAUDE ANALYSIS · {} · {} · horizon {hz} · {:.1}s", app.product_id(), a.view_label, elapsed as f64 / 1000.0);
+    let outer = panel(&title, C_CYAN);
+    let inner = outer.inner(r);
+    f.render_widget(outer, r);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(4), Constraint::Min(3), Constraint::Length(1)]).split(inner);
+    let st_c = if a.error.is_some() { C_RED } else if a.done { C_GREEN } else { C_GOLD };
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(format!(" ● {} ", a.status), Style::new().fg(st_c).bold()),
+        Span::styled(if a.done { "" } else { "▮▮▮" }, Style::new().fg(C_DIM)),
+    ])), rows[0]);
+    // the measurements strip — three timeframes, the chart on screen first
+    let mut strip: Vec<Line> = vec![];
+    match &a.report {
+        Some(rep) => {
+            for fr in rep["frames"].as_array().cloned().unwrap_or_default() { strip.push(frame_line(&fr)); }
+            let (b, t) = (&rep["book"], &rep["tape"]);
+            strip.push(Line::from(vec![
+                Span::styled("flow  ", Style::new().fg(C_CYAN).bold()),
+                Span::styled(format!("spread {:.1} bps · imb {:+.2} · depth±0.5% ${:.0}/${:.0} · buy ratio {:.2} · vwap {} · funding {:+.4}%",
+                    b["spread_bps"].as_f64().unwrap_or(0.0), b["imbalance_top10"].as_f64().unwrap_or(0.0),
+                    b["bid_depth_usd_within_0_5pct"].as_f64().unwrap_or(0.0), b["ask_depth_usd_within_0_5pct"].as_f64().unwrap_or(0.0),
+                    t["buy_ratio"].as_f64().unwrap_or(0.0), t["vwap"].as_f64().map(|v| fmt_px(v).trim().to_string()).unwrap_or("—".into()),
+                    rep["perp"]["funding_rate"].as_f64().unwrap_or(0.0) * 100.0), Style::new().fg(C_TXT)),
+            ]));
+        }
+        None => strip.push(Line::from(Span::styled("measuring…", Style::new().fg(C_DIM)))),
+    }
+    f.render_widget(Paragraph::new(strip).style(Style::new().bg(Color::Rgb(18, 21, 30))), rows[1]);
+    let body: Text = if a.show_numbers {
+        Text::from(a.report.as_ref().map(|r| serde_json::to_string_pretty(r).unwrap_or_default()).unwrap_or_else(|| "no report yet".into()))
+    } else if let Some(e) = &a.error {
+        Text::from(vec![Line::from(Span::styled(format!("✗ {e}"), Style::new().fg(C_RED))), Line::from(""),
+                        Line::from(Span::styled("needs the `claude` CLI logged in on this box (FLUX_CLAUDE_BIN to point at it). Tab shows the raw measurements.", Style::new().fg(C_DIM)))])
+    } else if a.text.is_empty() {
+        Text::from(Line::from(Span::styled("waiting for the first token…", Style::new().fg(C_DIM))))
+    } else {
+        let mut lines: Vec<Line> = vec![];
+        for l in a.text.lines() {
+            let style = if l.starts_with("VERDICT") {
+                Style::new().fg(if l.contains("BULLISH") { C_GREEN } else if l.contains("BEARISH") { C_RED } else { C_GOLD }).bold()
+            } else if l.starts_with(|c: char| c.is_ascii_digit()) && l.contains(" — ") || l.starts_with("1.") || l.starts_with("2.") || l.starts_with("3.") || l.starts_with("4.") {
+                Style::new().fg(C_CYAN)
+            } else { Style::new().fg(C_TXT) };
+            lines.push(Line::from(Span::styled(l.to_string(), style)));
+        }
+        Text::from(lines)
+    };
+    f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }).scroll((a.scroll, 0)), rows[2]);
+    f.render_widget(Paragraph::new(Span::styled(
+        " Esc close · Enter re-run · Tab numbers/text · ↑↓ PgUp/PgDn scroll · z/x re-run at another zoom ", Style::new().fg(C_DIM))), rows[3]);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -440,7 +791,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let last = app.log.front().cloned().unwrap_or_default();
-    let keys = " q quit │ 1-5 tabs │ ←→ product │ g candles │ b/s order │ d DCA │ c cancel-all │ r refresh ";
+    let keys = " q quit │ 1-5 tabs │ ←→ product │ z/x zoom │ Enter analysis │ b/s order │ d DCA │ c cancel-all │ r refresh ";
     let w = area.width as usize;
     let klen = keys.chars().count();
     let mut text = last.clone();
@@ -498,10 +849,13 @@ fn draw_book(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chart(f: &mut Frame, app: &App, area: Rect) {
-    let c = &app.candles;
-    let title = format!("CANDLES {} · {}", app.product_id(), app.gran());
+    let (owned, zlabel, zcount, zspan) = app.chart_candles();
+    let c = &owned;
+    let _ = zcount;
+    let title = format!("CANDLES {} · {zlabel} — {zspan} · z in / x out", app.product_id());
     if c.len() < 2 {
-        f.render_widget(Paragraph::new(Span::styled("loading candles…", Style::new().fg(C_DIM))).block(panel(&title, C_GOLD)), area);
+        let msg = match ZOOMS[app.zoom].1 { Src::Local(_) => format!("building {zlabel} candles from the live tape… ({} ticks)", app.ticks.len()), Src::Api(_) => "loading candles…".into() };
+        f.render_widget(Paragraph::new(Span::styled(msg, Style::new().fg(C_DIM))).block(panel(&title, C_GOLD)), area);
         return;
     }
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -513,6 +867,7 @@ fn draw_chart(f: &mut Frame, app: &App, area: Rect) {
     let (ylo, yhi) = (lo - pad, hi + pad);
     let closes: Vec<f64> = c.iter().map(|x| x.close).collect();
     let sma_n = 20usize;
+    let c = c.clone();
     let last = show.last().copied().unwrap_or_default();
     let last_style = if last.close >= last.open { C_GREEN } else { C_RED };
     let hdr = format!("{title}  hi {}  lo {}  last {}  sma20 {}", fmt_px(hi).trim(), fmt_px(lo).trim(), fmt_px(last.close).trim(),
@@ -795,4 +1150,44 @@ fn draw_confirm(f: &mut Frame, app: &App, p: &Pending, area: Rect) {
                                 Style::new().fg(if app.opts.live { C_RED } else { C_GOLD }).bold())),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(panel("CONFIRM", C_RED)), r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_to_ms() {
+        assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339_ms("1970-01-02T00:00:01.5Z"), Some(86_400_000 + 1500));
+        assert_eq!(parse_rfc3339_ms("2026-09-12T02:22:11.123456Z"), Some(1_789_179_731_123));
+        assert_eq!(parse_rfc3339_ms("2000-03-01T00:00:00Z"), Some(951_868_800_000), "leap-year boundary");
+        assert_eq!(parse_rfc3339_ms("garbage"), None);
+    }
+
+    #[test]
+    fn local_candles_bucket_and_fill() {
+        let mut t = VecDeque::new();
+        // bucket 10: two trades; bucket 11: none; bucket 12: one trade
+        t.push_back(Tick { ts_ms: 10_100, price: 100.0, size: 1.0 });
+        t.push_back(Tick { ts_ms: 10_900, price: 102.0, size: 2.0 });
+        t.push_back(Tick { ts_ms: 12_500, price: 99.0, size: 0.5 });
+        let c = local_candles(&t, 1, 3, 12_999);
+        assert_eq!(c.len(), 3);
+        assert_eq!((c[0].open, c[0].high, c[0].low, c[0].close, c[0].volume), (100.0, 102.0, 100.0, 102.0, 3.0));
+        assert_eq!((c[1].open, c[1].close, c[1].volume), (102.0, 102.0, 0.0), "gap filled flat at prev close");
+        assert_eq!(c[2].close, 99.0);
+        assert_eq!(c[0].start, 10);
+        // 5-second buckets collapse all three into one candle
+        let c5 = local_candles(&t, 5, 1, 12_999);
+        assert_eq!(c5.len(), 1);
+        assert_eq!((c5[0].open, c5[0].high, c5[0].low, c5[0].close), (100.0, 102.0, 99.0, 99.0));
+        assert!(local_candles(&VecDeque::new(), 1, 10, 1000).is_empty());
+    }
+
+    #[test]
+    fn zoom_ladder_is_ordered_fine_to_coarse() {
+        let secs = |z: &(&str, Src, u32, &str)| match z.1 { Src::Local(b) => b, Src::Api(g) => crate::granularity(g).unwrap().1 } * z.2 as u64;
+        for w in ZOOMS.windows(2) { assert!(secs(&w[0]) < secs(&w[1]), "{} must span less than {}", w[0].0, w[1].0); }
+    }
 }

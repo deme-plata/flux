@@ -27,6 +27,7 @@
 //! futures (`*-PERP-INTX`, leverage) go through the same gate with a tighter default cap.
 
 pub mod dca;
+pub mod ta;
 pub mod tui;
 
 use base64::Engine;

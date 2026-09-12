@@ -644,10 +644,33 @@ impl NetworkManager {
                                 // after startup, before any inbound gossip has fed the router),
                                 // so this is safe from the very first publish call, not just
                                 // once scores have warmed up.
-                                if swarm.entanglement.config.enabled {
-                                    let _ = swarm.entangled_publish(&topic, data, ENTANGLED_PUBLISH_TOP_N);
+                                //
+                                // 2026-09-12 (rocky-bps100-0912): `entangled_publish` is a heuristic that
+                                // SKIPS the publish outright when no known peer clears its min score
+                                // (`swarm.rs` says so itself: "NOT a substitute for reliable full-mesh
+                                // delivery on consensus-critical topics (blocks, tip-proofs) — callers on
+                                // those topics should keep using plain `publish()`"). Yet EVERY publish,
+                                // blocks and finality votes included, was routed through it whenever the
+                                // flag was on — and sigil-node sets it on. MEASURED on the live g2 pair:
+                                // the follower's gossip receive rate ran 27–40% below the producer's mint
+                                // rate, and after a reconnect (scores reset) collapsed to ~8 blk/s while
+                                // bytes still flowed and backfill carried the rest — exactly the shape of
+                                // a publish that fires only when a score happens to clear. Only the flux
+                                // combo-affinity topic (informational) keeps the entangled path; everything
+                                // else is a plain, unconditional gossipsub publish.
+                                let entangled = swarm.entanglement.config.enabled && topic == COMBO_AFFINITY_TOPIC;
+                                let res = if entangled {
+                                    swarm.entangled_publish(&topic, data, ENTANGLED_PUBLISH_TOP_N).map(|_| ())
                                 } else {
-                                    let _ = swarm.publish(&topic, data);
+                                    swarm.publish(&topic, data)
+                                };
+                                if let Err(e) = res {
+                                    // Once a second at most: a dropped consensus publish must be visible.
+                                    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                    if LAST.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+                                        tracing::warn!(topic = %topic, error = %e, "gossipsub publish failed (rate-limited log)");
+                                    }
                                 }
                             }
                             Some(SwarmCommand::SendRequest { peer, payload, resp }) => {

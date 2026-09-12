@@ -1,0 +1,23 @@
+[package]
+name = "flux-coinbase"
+version.workspace = true
+edition.workspace = true
+description = "Flux-native Coinbase Advanced Trade engine: CDP-JWT client (ES256 + Ed25519), Verified Execution Gate, leveraged-DCA planner, ratatui trading TUI, and the flux_coinbase_* MCP surface. Propose-only unless confirmed."
+
+[dependencies]
+flux-api = { path = "../flux-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+base64 = "0.21"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+ratatui = "0.28"
+crossterm = "0.28"
+
+[[bin]]
+name = "flux-coinbase"
+path = "src/bin/flux-coinbase.rs"

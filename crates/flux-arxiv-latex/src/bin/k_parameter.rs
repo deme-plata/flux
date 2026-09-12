@@ -130,6 +130,22 @@ fn main() {
     let pi = std::f64::consts::PI;
     let ln2 = std::f64::consts::LN_2;
 
+    // SIGIL live clock inputs for the "Kristensen Time" section: last line of the K-gauge series if given,
+    // else the 2026-09-12 snapshot values (labelled as such in the text).
+    let (sigil_bps, sigil_final_depth, sigil_finality_s, sigil_src) = std::env::var("SIGIL_KGAUGE_JSONL")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|txt| txt.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .and_then(|v| {
+            let bps = v["network_diagnostics"]["block_rate_bps"].as_f64()?;
+            let depth = v["tau"]["final_depth"].as_f64()?;
+            let fin = v["tau"]["finality_secs"].as_f64()?;
+            let ts = v["ts_ms"].as_i64().unwrap_or(0);
+            Some((bps, depth, fin, format!("live K-gauge series line, ts\\_ms={ts}")))
+        })
+        .unwrap_or((0.3666422238517432, 512.0, 1396.4567272727272, "K-gauge snapshot of 2026-09-12 (sigil-g2)".to_string()));
+
     // ------------------------------------------------------------ constants
     let l_p = planck_length();
     let t_p = planck_time();
@@ -477,6 +493,22 @@ fn main() {
     );
 
     // ------------------------------------------------------------ LaTeX
+    // ------------------------------------------------------------ Kristensen time (the three clocks)
+    let t_planck_k = planck_temperature();
+    let tick_of = |t_k: f64| pi * PLANCK_REDUCED / (2.0 * BOLTZMANN * t_k);
+    let tick_planck = tick_of(t_planck_k);
+    let t_ew = 100e9 * ELECTRON_VOLT / BOLTZMANN;
+    let t_qcd = 150e6 * ELECTRON_VOLT / BOLTZMANN;
+    let t_iter = 15e3 * ELECTRON_VOLT / BOLTZMANN;
+    let t_sun = 1.57e7;
+    let (tick_ew, tick_qcd, tick_iter, tick_sun, tick_room) = (tick_of(t_ew), tick_of(t_qcd), tick_of(t_iter), tick_of(t_sun), tick_of(300.0));
+    let tolman_per_m = 300.0 * STANDARD_GRAVITY * 1.0 / (SPEED_OF_LIGHT * SPEED_OF_LIGHT);
+    let sigil_tau_b = 1.0 / sigil_bps;
+    let a_core = 2.0 * 15.0 * sigil_tau_b / (pi * PLANCK_REDUCED);
+    let a_iter = 2.0 * 350e6 * sigil_tau_b / (pi * PLANCK_REDUCED);
+    let t_ledger = PLANCK_REDUCED / (BOLTZMANN * sigil_tau_b);
+    let t_finality = PLANCK_REDUCED / (2.0 * pi * BOLTZMANN * sigil_finality_s);
+
     let mut doc = Document::new("article")
         .option("11pt")
         .package_opt("inputenc", &["utf8"])
@@ -694,6 +726,86 @@ fn main() {
             sci(k_lloyd_epsilon),
             sci(landauer_300)
         )))
+        .add(Block::Section("Kristensen Time: the Three Clocks".into()))
+        .add(para(
+            "Everything above treats $K$ as a thermometer. This section turns the same identity around and reads it as a \
+             \\emph{clock}. A chain has three ways of saying how much time has passed, and they are not the same quantity: \
+             proper seconds $t$ (physics); Margolus--Levitin ticks $n=2Et/\\pi\\hbar$, the number of distinguishable states \
+             a system of energy $E$ can pass through in $t$ (set by energy, hence by temperature); and \\emph{agreed} ticks \
+             $h$, the block height, which advances only when independent machines commit the same state. We call the \
+             triple $(t,n,h)$ \\textbf{Kristensen time}. The gauge $K^{*}=2\\pi\\sqrt{\\tfrac{\\pi}{2}N_{\\mathrm{ML}}\\Delta s}$ \
+             is exactly the bridge between the second and the third clock: $N_{\\mathrm{ML}}$ counts physical ticks, \
+             $\\Delta s$ counts who was allowed to advance the agreed one."
+                .to_string(),
+        ))
+        .add(para(format!(
+            "\\textbf{{Heat sets the fastest clock, not the existence of time.}} A system at temperature $T$ carries \
+             $k_BT$ per degree of freedom and can therefore tick no faster than $\\pi\\hbar/2k_BT$. Computed from CODATA: \
+             at the Planck temperature $T_P={}$\\,K the tick is ${}$\\,s, i.e.\\ ${:.1}$ Planck times --- the one regime where \
+             ``a tick'' stops meaning anything and time must be \\emph{{emergent}} (Wheeler--DeWitt has no $t$; Page--Wootters \
+             recovers it from entanglement, Connes--Rovelli from the thermal state). Everything cooler has a perfectly good \
+             clock, only slower:",
+            sci(t_planck_k), sci(tick_planck), tick_planck / t_p
+        )))
+        .add(Block::Raw(format!(
+            "\\begin{{center}}\\begin{{tabular}}{{lrrr}}\\toprule\n\
+             \\textbf{{regime}} & $T$ [K] & fastest tick $\\pi\\hbar/2k_BT$ [s] & in Planck times \\\\\\midrule\n\
+             Planck epoch & ${}$ & ${}$ & ${:.1}$ \\\\\n\
+             electroweak (100\\,GeV) & ${}$ & ${}$ & ${}$ \\\\\n\
+             QCD (150\\,MeV) & ${}$ & ${}$ & ${}$ \\\\\n\
+             ITER core (15\\,keV) & ${}$ & ${}$ & ${}$ \\\\\n\
+             solar core & ${}$ & ${}$ & ${}$ \\\\\n\
+             room (300\\,K) & ${}$ & ${}$ & ${}$ \\\\\\bottomrule\n\
+             \\end{{tabular}}\\end{{center}}\n\n",
+            sci(t_planck_k), sci(tick_planck), tick_planck / t_p,
+            sci(t_ew), sci(tick_ew), sci(tick_ew / t_p),
+            sci(t_qcd), sci(tick_qcd), sci(tick_qcd / t_p),
+            sci(t_iter), sci(tick_iter), sci(tick_iter / t_p),
+            sci(t_sun), sci(tick_sun), sci(tick_sun / t_p),
+            sci(300.0), sci(tick_room), sci(tick_room / t_p)
+        )))
+        .add(para(format!(
+            "ITER's plasma is ${}$ times colder than the Planck temperature: a fusion reactor is a superb clock \
+             (${}$\\,s per tick) and no threat to the existence of time. The one place heat and time genuinely touch is \
+             Tolman--Ehrenfest: in a gravitational field a body in thermal equilibrium obeys $T\\sqrt{{g_{{00}}}}=$const, so it \
+             is warmer where clocks run slower. On Earth that is ${}$\\,K per metre at 300\\,K --- unmeasurable as a \
+             temperature, routinely measured as time dilation by optical clocks. Time \\emph{{can}} be read through \
+             temperature; the instrument is still a clock.",
+            sci(t_planck_k / t_iter), sci(tick_iter), sci(tolman_per_m)
+        )))
+        .add(para(format!(
+            "\\textbf{{The agreed clock, measured.}} SIGIL (\\texttt{{sigil-g2}}, {}) advances its agreed clock at \
+             ${:.3}$ blocks/s, one tick every $\\tau_b={:.2}$\\,s, and declares a tick irreversible ${:.0}$ ticks later, \
+             $\\tau_F={:.0}$\\,s. Three quantities follow, and we name them because they will be read off the live node:",
+            sigil_src, sigil_bps, sigil_tau_b, sigil_final_depth, sigil_finality_s
+        )))
+        .add(para(format!(
+            "\\emph{{Agreement cost}} $A = N_{{\\mathrm{{ML}}}}(E,\\tau_b)/1$: how many physical ticks physics permits while the \
+             chain agrees on one. For one active core (15\\,W, the labelled model parameter used throughout) $A={}$; for \
+             ITER's 350\\,MJ of thermal energy $A={}$. Agreement is the slowest clock in the building by thirty-five to \
+             forty-two orders of magnitude, and that is not inefficiency --- it is the price of a tick that strangers accept.",
+            sci(a_core), sci(a_iter)
+        )))
+        .add(para(format!(
+            "\\emph{{Ledger temperature}} $T_L=\\hbar/k_B\\tau_b$: the temperature of a thermal state whose thermal time \
+             (Connes--Rovelli; equivalently a Euclidean periodicity $\\beta=\\tau_b/\\hbar$) flows one tick per block interval. \
+             For SIGIL $T_L={}$\\,K --- picokelvin. \\emph{{Finality-horizon temperature}} $T_F=\\hbar/2\\pi k_B\\tau_F$: the \
+             Unruh--Hawking temperature a horizon would have if its characteristic time were the finality time; \
+             $T_F={}$\\,K, femtokelvin. Both are formal: they are what the ledger's clock \\emph{{would}} be as a thermal \
+             clock, and they are labelled ANALOGY in the table below. They are also, as far as we know, the coldest numbers \
+             anyone has attached to a running blockchain, which is why the wallet shows them.",
+            sci(t_ledger), sci(t_finality)
+        )))
+        .add(para(
+            "\\emph{Consensus dilation} $\\gamma_C = \\dot h_{\\mathrm{follower}}/\\dot h_{\\mathrm{producer}}$: the rate at which a \
+             second node's agreed clock advances relative to the producer's, read from the K-gauge's finality channel. \
+             Relativity has no universal now; a chain \\emph{constructs} one, and $\\gamma_C$ is how well the construction \
+             holds. At the snapshot both nodes sat within one block of each other over the window, $\\gamma_C\\approx1$; on \
+             2026-09-10 it fell to $0$ for eighteen hours when the follower refused a tip it could not verify --- the correct \
+             reading, since the alternative was to advance an agreed clock on a lie. \\emph{Compare at the same height} is \
+             clock synchronisation, and $K_C$ is the residual after it."
+                .to_string(),
+        ))
         .add(Block::Section("What Is Measured, Derived, Claimed".into()))
         .add(Block::Raw(
             "\\begin{center}\\begin{tabular}{p{7cm}p{2.4cm}p{5.6cm}}\\toprule\n\
@@ -708,6 +820,9 @@ fn main() {
              $\\hat\\alpha_G=6.96\\times10^{-10}$ & CLAIMED & internal earlier work, no external measurement \\\\\n\
              $\\Gamma_h=4.07$\\,MeV & PDG, not CODATA & particle data \\\\\n\
              $\\Delta s$ as a quantum entropy & ANALOGY & Shannon over proposers, not von Neumann \\\\\n\
+             three-clock table, $A$, Tolman--Ehrenfest gradient & DERIVED & CODATA, computed here \\\\\n\
+             SIGIL block rate, finality time & MEASURED & K-gauge series line named in the text \\\\\n\
+             $T_L$, $T_F$ (ledger / finality-horizon temperature) & ANALOGY & thermal-time and Unruh forms applied to a clock \\\\\n\
              $n\\ge2f+1$ via Berry phase & CONJECTURE & no proof, no adversarial test \\\\\\bottomrule\n\
              \\end{tabular}\\end{center}\n\n"
                 .to_string(),

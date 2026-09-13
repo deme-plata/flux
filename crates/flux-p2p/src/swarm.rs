@@ -48,6 +48,12 @@ pub const COMBO_AFFINITY_TOPIC: &str = "/flux/combo-affinity/v1";
 /// block-range chunks point-to-point.
 pub const BACKFILL_MAX_MSG: u64 = 64 * 1024 * 1024;
 
+/// Consecutive inbound (serve-side) failures, with no response sent in between, before
+/// the substream is treated as wedged. Deliberately far above the outbound threshold of
+/// 6: failing to serve is the normal state of a node that is catching up, whereas
+/// failing to be served is the abnormal state that stops one.
+pub const INBOUND_WEDGE_THRESHOLD: u32 = 64;
+
 /// Raw opaque codec for the backfill request-response protocol: payloads are already
 /// application-serialized `Vec<u8>`, so we just length-bound + read-to-end (the
 /// substream is closed after each write, signalling end). No CBOR wrapping; cap is
@@ -306,6 +312,27 @@ pub struct FluxSwarmManager {
     /// independent of ping health — see the `OutboundFailure` arm in
     /// `handle_swarm_event` for the full story and live evidence.
     outbound_req_failures: HashMap<PeerId, u32>,
+    /// When each connected peer last FORWARDED us a gossipsub message (propagation source,
+    /// not author). 2026-09-13: the sole input to the "is this connection alive for the thing
+    /// we actually need it for" test that gates the teardown below — see `gossip_alive`.
+    last_gossip_from: HashMap<PeerId, std::time::Instant>,
+    /// Inbound (serve-side) request failures, counted SEPARATELY from outbound.
+    ///
+    /// 2026-08-27: these used to share `outbound_req_failures`, and that pooling is
+    /// what made a node that falls behind unable to ever catch up. The two signals
+    /// mean opposite things:
+    ///
+    /// * an OUTBOUND failure says "this peer will not answer me" — my sync is broken,
+    ///   and reconnecting may genuinely help;
+    /// * an INBOUND failure says "I could not answer this peer in time" — which is the
+    ///   NORMAL condition of a node that is still catching up and is being asked for
+    ///   history it does not have yet.
+    ///
+    /// Pooling them meant six serve-side timeouts tore down the connection the node was
+    /// syncing FROM. Measured live on happysrv: it synced at ~100 blk/s to height
+    /// 141,085, then sat frozen there for nine hours while peers ahead of it kept
+    /// asking for ranges it could not serve.
+    inbound_req_failures: HashMap<PeerId, u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -620,6 +647,8 @@ impl FluxSwarmManager {
                 connected: std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
                 ping_failures: HashMap::new(),
                 outbound_req_failures: HashMap::new(),
+                last_gossip_from: HashMap::new(),
+                inbound_req_failures: HashMap::new(),
             },
             event_rx,
         ))
@@ -881,7 +910,8 @@ impl FluxSwarmManager {
                     }
                     gossipsub::Event::Message { .. } => { /* handled below */ }
                 }
-                if let gossipsub::Event::Message { message, .. } = ev {
+                if let gossipsub::Event::Message { message, propagation_source, .. } = ev {
+                    self.last_gossip_from.insert(propagation_source, std::time::Instant::now());
                     let from = message.source.unwrap_or(PeerId::random());
                     let from_str = from.to_string();
                     tracing::debug!(
@@ -1052,12 +1082,42 @@ impl FluxSwarmManager {
                         let failures = self.outbound_req_failures.entry(peer).or_insert(0);
                         *failures += 1;
                         if *failures >= 6 {
-                            tracing::warn!(%peer, consecutive_failures = *failures,
-                                "6 net backfill request failures — request_response \
-                                 substream likely wedged (ping still healthy); tearing down \
-                                 connection so bootstrap redial gets a fresh one");
-                            self.outbound_req_failures.remove(&peer);
-                            let _ = self.swarm.disconnect_peer_id(peer);
+                            // 2026-09-13 (bps100 stall, MEASURED on happysrv): this teardown
+                            // fired against the ONLY producer connection while gossip on it
+                            // was delivering 108 blk/s perfectly. The redial took ~200 ms;
+                            // gossipsub does not replay, so ~230 blocks published in that
+                            // window were never seen — a gap the backfill lane (the thing
+                            // that was failing) then had to fill, and could not. The follower
+                            // sat at H=10,997,456 for 45 minutes with "pending overflow
+                            // (24001 total)" while the producer, starved of certificates,
+                            // fell from 110 to 11 blk/s. Cutting a live gossip stream to fix
+                            // a dead request lane traded a slow sync for no sync.
+                            //
+                            // The connection is only worth cutting if it is dead for what we
+                            // use it for. If this peer forwarded us gossip in the last 15 s,
+                            // the connection is alive; keep it, reset the counter, and let the
+                            // request path deal with its own failures (it sizes down and
+                            // retries). A peer that is silent on gossip too gets the old cure.
+                            let gossip_alive = self
+                                .last_gossip_from
+                                .get(&peer)
+                                .is_some_and(|t| t.elapsed() < Duration::from_secs(15));
+                            if gossip_alive {
+                                tracing::warn!(%peer, net_failures = *failures,
+                                    "6 net backfill request failures but this peer is still \
+                                     forwarding gossip — keeping the connection (a redial would \
+                                     drop live blocks); backfill lane will size down and retry");
+                                self.outbound_req_failures.remove(&peer);
+                            } else {
+                                tracing::warn!(%peer, consecutive_failures = *failures,
+                                    "6 net backfill request failures and no gossip from this peer \
+                                     in 15s — request_response substream likely wedged (ping still \
+                                     healthy); tearing down connection so bootstrap redial gets a \
+                                     fresh one");
+                                self.outbound_req_failures.remove(&peer);
+                                self.last_gossip_from.remove(&peer);
+                                let _ = self.swarm.disconnect_peer_id(peer);
+                            }
                         }
                     }
                     request_response::Event::InboundFailure { peer, request_id, error, .. } => {
@@ -1078,18 +1138,29 @@ impl FluxSwarmManager {
                         // tear the connection down past threshold so bootstrap redial
                         // gets a fresh substream instead of a permanently wedged one.
                         tracing::warn!(%peer, %request_id, %error, "Backfill inbound failure");
-                        let failures = self.outbound_req_failures.entry(peer).or_insert(0);
+                        // Own counter, own threshold, and reset by ResponseSent below —
+                        // so this now detects what it claims to detect: a substream on
+                        // which we have not managed to send ANY response for a sustained
+                        // run. Six consecutive serve timeouts is an ordinary Tuesday for a
+                        // node that is behind; it is not evidence of a broken link, and it
+                        // must not cost that node the connection it is syncing over.
+                        let failures = self.inbound_req_failures.entry(peer).or_insert(0);
                         *failures += 1;
-                        if *failures >= 6 {
+                        if *failures >= INBOUND_WEDGE_THRESHOLD {
                             tracing::warn!(%peer, consecutive_failures = *failures,
-                                "6 net backfill failures (inbound) — request_response \
-                                 substream likely wedged (ping still healthy); tearing down \
+                                "inbound backfill substream wedged — no response sent for \
+                                 {INBOUND_WEDGE_THRESHOLD} consecutive requests; tearing down \
                                  connection so bootstrap redial gets a fresh one");
-                            self.outbound_req_failures.remove(&peer);
+                            self.inbound_req_failures.remove(&peer);
                             let _ = self.swarm.disconnect_peer_id(peer);
                         }
                     }
-                    request_response::Event::ResponseSent { .. } => { /* ignore */ }
+                    request_response::Event::ResponseSent { peer, .. } => {
+                        // Proof the inbound substream works. Clears the consecutive-failure
+                        // run so the wedge detector measures a real wedge rather than
+                        // accumulating the ordinary timeouts of a busy or behind node.
+                        self.inbound_req_failures.remove(&peer);
+                    }
                 }
             }
             SwarmEvent::Behaviour(FluxBehaviourEvent::Ping(ev)) => {
@@ -1139,6 +1210,7 @@ impl FluxSwarmManager {
                 self.connected.write().insert(peer_id);
                 self.ping_failures.remove(&peer_id);
                 self.outbound_req_failures.remove(&peer_id);
+                self.inbound_req_failures.remove(&peer_id);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1172,6 +1244,8 @@ impl FluxSwarmManager {
                     self.peers.remove(&peer_id);
                     self.ping_failures.remove(&peer_id);
                     self.outbound_req_failures.remove(&peer_id);
+                    self.inbound_req_failures.remove(&peer_id);
+                    self.last_gossip_from.remove(&peer_id);
                     if let Some(ref rx) = self.event_rx {
                         rx.write().push(SwarmAppEvent::PeerDisconnected { peer_id });
                     }

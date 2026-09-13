@@ -85,10 +85,20 @@ fn now_ms() -> u64 {
 
 /// Read the body of a ureq response, treating an HTTP error status as data (rpcd
 /// returns useful JSON in its 400s).
+/// 2026-09-13: `into_string()` caps a body at 10 MB. `/v1/shielded/leaves` is 18 MB at
+/// 14k notes (one 620-byte delivery ciphertext per note) and will be ~40 MB at pool
+/// capacity, so every shielded tool failed with "response too big for into_string".
+/// Read through a 256 MB-capped reader instead.
+fn read_body(r: ureq::Response) -> Result<String, String> {
+    use std::io::Read;
+    let mut s = String::new();
+    r.into_reader().take(256 * 1024 * 1024).read_to_string(&mut s).map_err(|e| e.to_string())?;
+    Ok(s)
+}
 fn body_of(resp: Result<ureq::Response, ureq::Error>) -> Result<String, String> {
     match resp {
-        Ok(r) => r.into_string().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(_c, r)) => r.into_string().map_err(|e| e.to_string()),
+        Ok(r) => read_body(r),
+        Err(ureq::Error::Status(_c, r)) => read_body(r),
         Err(e) => Err(e.to_string()),
     }
 }

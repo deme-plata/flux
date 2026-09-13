@@ -48,6 +48,18 @@ fn main() {
     let (config, subcommand_args) = fluxc_core::parse_args(&args[1..]);
     let subcommand = subcommand_args.first().map(|s| s.as_str());
 
+    // Rust ignores SIGPIPE, so `fluxc verify-proof … | grep -q ok` ended in
+    // `panicked … failed printing to stdout: Broken pipe` (exit 101) the moment grep
+    // closed its end — and a release script read a VALID signature as "verify failed"
+    // (sigil-top v8.0.7, 2026-09-06). Restore the Unix default for one-shot CLI
+    // subcommands: die quietly on a closed pipe like every other tool. Daemons keep
+    // Rust's ignore (std sockets send with MSG_NOSIGNAL anyway, but `mcp` speaks
+    // stdio and must report a vanished client as an error, not vanish itself).
+    #[cfg(unix)]
+    if !matches!(subcommand, Some("serve") | Some("mcp") | Some("p2p-worker") | Some("dev") | Some("d") | Some("watch") | Some("w") | Some("auto-update")) {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
+    }
+
     // EPSILON STDIN-POISON GUARD (v0.36): on shared boxes a concurrent
     // status-feed `jq` can race onto an inherited stdin pipe. cargo hands that
     // fd to its DIRECT rustc target probe (`rustc - --print=…` — cargo does
@@ -506,6 +518,42 @@ fn main() {
         }
         Some("ai") => fluxc_core::phase3::ai_audit(),
         Some("agility") => fluxc_core::phase3::agility_audit(),
+        // `fluxc wire-audit [--root DIR] [--json] [--strict]` — serde attributes that
+        // bincode/postcard cannot decode (internally-tagged / untagged / flatten /
+        // skip_serializing_if) in every crate with such a codec in scope. Exit 1 on a
+        // DIRECT finding (the crate depends on the codec itself) so it works as a gate;
+        // `--strict` also fails on REVIEW items (codec reachable only via a dependent).
+        Some("wire-audit") => {
+            let want_json = subcommand_args.iter().any(|a| a == "--json");
+            let strict = subcommand_args.iter().any(|a| a == "--strict");
+            let root = subcommand_args.iter().position(|a| a == "--root")
+                .and_then(|i| subcommand_args.get(i + 1))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let ws = match flux_graph::resolve_workspace(&root) {
+                Ok(w) => w,
+                Err(e) => { eprintln!("wire-audit: {}", e); std::process::exit(2); }
+            };
+            let audit = flux_graph::wire_safety::audit_wire_safety(&ws);
+            if want_json {
+                let findings: Vec<serde_json::Value> = audit.findings.iter().map(|f| serde_json::json!({
+                    "rule": f.rule.code(), "crate": f.crate_name, "file": f.file, "line": f.line,
+                    "attribute": f.attribute, "codecs": f.codecs, "direct": f.direct,
+                    "why": f.rule.why(), "fix": f.rule.fix(),
+                })).collect();
+                let v = serde_json::json!({
+                    "root": root, "crates_scanned": audit.crates_scanned,
+                    "crates_in_scope": audit.crates_in_scope, "files_scanned": audit.files_scanned,
+                    "allowed": audit.allowed, "direct": audit.direct_findings(), "review": audit.review_findings(),
+                    "clean": audit.is_clean(), "clean_strict": audit.is_clean_strict(), "findings": findings,
+                });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            } else {
+                print!("{}", flux_graph::wire_safety::render_text(&audit));
+            }
+            let clean = if strict { audit.is_clean_strict() } else { audit.is_clean() };
+            if !clean { std::process::exit(1); }
+        }
         Some("verify-proof") => {
             let artifact = subcommand_args.get(1).map(|s| s.as_str()).unwrap_or("");
             let proof_path = subcommand_args.get(2).map(|s| s.as_str())

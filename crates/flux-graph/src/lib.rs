@@ -12,6 +12,7 @@ pub mod graph;
 pub mod resolver;
 pub mod build_order;
 pub mod agility;
+pub mod wire_safety;
 
 use std::path::PathBuf;
 
@@ -41,6 +42,11 @@ pub struct Dependency {
     pub path: Option<PathBuf>,
     pub kind: DepKind,
     pub optional: bool,
+    /// From `[dev-dependencies]` only. Cargo allows a dev-dep cycle (a crate's tests
+    /// may use a crate that depends on it), so dev edges are excluded from the build
+    /// DAG — folding them in made `resolve_workspace` refuse the whole SIGIL tree
+    /// ("Cycle detected"), which blinded xray/agility/wire-audit there (2026-09-13).
+    pub dev: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

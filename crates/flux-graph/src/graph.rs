@@ -28,8 +28,9 @@ pub fn build_dag(crates: &[CrateInfo]) -> Result<DepGraph, String> {
     // For each crate, resolve its path dependencies to crate indices
     for (i, ci) in crates.iter().enumerate() {
         for dep in &ci.dependencies {
-            // Only path deps resolve to workspace crates
-            if dep.kind != DepKind::Path { continue; }
+            // Only path deps resolve to workspace crates; dev-deps are test-only and
+            // may legally form cycles, so they are not build edges.
+            if dep.kind != DepKind::Path || dep.dev { continue; }
             // Find which workspace crate this path points to
             if let Some(ref dep_path) = dep.path {
                 if let Some(dep_idx) = find_crate_by_path(crates, dep_path) {
@@ -40,8 +41,11 @@ pub fn build_dag(crates: &[CrateInfo]) -> Result<DepGraph, String> {
         }
     }
 
-    // Cycle detection via DFS
-    detect_cycle(n, &depends_on)?;
+    // Cycle detection via DFS — the error names the crates on the loop.
+    detect_cycle(n, &depends_on).map_err(|path| {
+        let names: Vec<&str> = path.iter().map(|&i| crates[i].name.as_str()).collect();
+        format!("Cycle detected: {}", names.join(" → "))
+    })?;
 
     Ok(DepGraph { depends_on, depended_by, len: n })
 }
@@ -114,28 +118,37 @@ pub fn topological_batches(dag: &DepGraph) -> Vec<Vec<usize>> {
     batches
 }
 
-/// DFS-based cycle detection. Returns Err if a cycle is found.
-fn detect_cycle(n: usize, edges: &[Vec<usize>]) -> Result<(), String> {
+/// DFS-based cycle detection. Returns the crate indices on the loop (closing back on
+/// the first) if a cycle is found, so the caller can name it.
+fn detect_cycle(n: usize, edges: &[Vec<usize>]) -> Result<(), Vec<usize>> {
     #[derive(Clone, PartialEq)]
     enum Color { White, Gray, Black }
     let mut color = vec![Color::White; n];
 
-    fn dfs(u: usize, edges: &[Vec<usize>], color: &mut [Color]) -> Result<(), String> {
+    fn dfs(u: usize, edges: &[Vec<usize>], color: &mut [Color], stack: &mut Vec<usize>) -> Result<(), Vec<usize>> {
         color[u] = Color::Gray;
+        stack.push(u);
         for &v in &edges[u] {
             match color[v] {
-                Color::Gray => return Err(format!("Cycle detected: crate involves dependency loop")),
-                Color::White => dfs(v, edges, color)?,
+                Color::Gray => {
+                    let from = stack.iter().position(|&x| x == v).unwrap_or(0);
+                    let mut cycle: Vec<usize> = stack[from..].to_vec();
+                    cycle.push(v);
+                    return Err(cycle);
+                }
+                Color::White => dfs(v, edges, color, stack)?,
                 Color::Black => {}
             }
         }
+        stack.pop();
         color[u] = Color::Black;
         Ok(())
     }
 
+    let mut stack = Vec::new();
     for i in 0..n {
         if color[i] == Color::White {
-            dfs(i, edges, &mut color)?;
+            dfs(i, edges, &mut color, &mut stack)?;
         }
     }
     Ok(())
@@ -158,9 +171,48 @@ mod tests {
                 path: Some(PathBuf::from(d)),
                 kind: DepKind::Path,
                 optional: false,
+                dev: false,
             }).collect(),
             features: vec![],
         }
+    }
+
+    fn fix_paths(mut crates: Vec<CrateInfo>) -> Vec<CrateInfo> {
+        for ci in &mut crates {
+            ci.path = PathBuf::from(format!("/test/{}", ci.name));
+            for dep in &mut ci.dependencies {
+                dep.path = Some(PathBuf::from(format!("/test/{}", dep.name)));
+            }
+        }
+        crates
+    }
+
+    #[test]
+    fn dev_dependency_cycle_is_legal_and_not_a_build_edge() {
+        // chronos dev-depends on node (its tests drive the node); node depends on chronos's
+        // sibling types → with dev edges folded in this was "Cycle detected" and the whole
+        // SIGIL workspace was unresolvable (2026-09-13).
+        let mut crates = fix_paths(vec![
+            make_crate("node", &["chronos"]),
+            make_crate("chronos", &["node"]),
+        ]);
+        crates[1].dependencies[0].dev = true;
+        let dag = build_dag(&crates).expect("dev edge must not close a cycle");
+        assert_eq!(dag.depends_on[0], vec![1], "node → chronos is a real build edge");
+        assert!(dag.depends_on[1].is_empty(), "chronos → node is dev-only, not a build edge");
+        let batches = topological_batches(&dag);
+        assert_eq!(batches, vec![vec![1], vec![0]]);
+    }
+
+    #[test]
+    fn cycle_error_names_the_crates_on_the_loop() {
+        let crates = fix_paths(vec![
+            make_crate("a", &["b"]),
+            make_crate("b", &["c"]),
+            make_crate("c", &["b"]),
+        ]);
+        let err = build_dag(&crates).err().expect("b → c → b must be a cycle");
+        assert_eq!(err, "Cycle detected: b → c → b", "{err}");
     }
 
     #[test]

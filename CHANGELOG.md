@@ -1,5 +1,66 @@
 # Flux Foundation — Commit Log & Changelog
 
+## Unreleased on v0.5.2-dev — What SIGIL taught the compiler (2026-09-13)
+
+Two weeks of SIGIL work (g2 → shielded sends → 100 blk/s) used Flux for every build,
+serve, release and swarm step. The retro `docs/FLUX_SIGIL_RETRO_2026-09-13.md` ranks
+what Flux itself cost, each item traced to a dated incident. The pattern: a tool that
+answers "fine" when the truth is "absent" — a 200 where a 404 belonged, a green where an
+UNVERIFIED belonged, a panic where a quiet exit belonged. Fixed here:
+
+### `fluxc wire-audit` + `flux_wire_audit` — serde attributes bincode can never decode (new)
+- `flux-graph::wire_safety`: W1 internally-tagged, W2 untagged, W3 flatten (all decoded
+  via `deserialize_any`, which bincode/postcard cannot answer — encodes, never decodes),
+  W4 `skip_serializing_if` (zero bytes on skip, decoder still reads one). Five SIGIL
+  incidents were exactly these; the last one parked a follower 6 M blocks behind on a
+  payload that arrived complete.
+- Two tiers: DIRECT (the crate depends on the codec itself → fails the gate, exit 1) and
+  REVIEW (codec reachable only via a dependent crate → listed; `--strict` fails on it).
+  `// flux-wire: allow` on/above the attribute silences a deliberate one.
+- Measured: flux tree 0 direct / 10 review (all JSON wires); SIGIL tree 4 direct / 20
+  review — and the review list contains `sigil-events/src/lib.rs:56 #[serde(tag = "kind")]`,
+  the exact type behind the 09-11 stall. Markers for the known-JSON ones are a sigil task.
+
+### flux-graph resolves the SIGIL workspace again
+- Dev-dependencies were folded into the build DAG, so cargo-legal dev cycles made
+  `resolve_workspace` refuse the whole sigil tree ("Cycle detected") — `fluxc xray`,
+  `agility`, `api_generate` and the new audit were all blind there. `Dependency.dev` is
+  now parsed and excluded from build edges; the cycle error names the crates on the loop
+  (`Cycle detected: b → c → b`) instead of "crate involves dependency loop".
+
+### `flux_release_check` reads SIGIL manifests and verifies the signature
+- `ReleaseManifest` tolerates `blake3_hex`-only manifests (`sha256_hex`, `released_at_us`,
+  `publisher` default; `channel`/`flux_rev`/`source_tag`/`targets` kept) — it failed with
+  `missing field sha256_hex` on every sigil-top manifest since 09-02. The live manifest
+  body is now a unit test.
+- `sigil-*` products resolve to `https://sigilgraph.org/downloads` (two projects, two
+  homes); everything else stays on quillon.xyz.
+- Fetches `<manifest>.sig` and verifies the 128-hex Ed25519 signature over the EXACT bytes
+  against a pinned key — sigil-* default to the SIGIL release key `150fb84d…6402`, others
+  pass `pubkey_hex`. An HTML page where the manifest should be is reported as ABSENT.
+- The auto-updater checks blake3 when a manifest carries no sha256, and no longer slices
+  an empty digest (a panic).
+
+### `fluxc serve`: the SPA fallback answers browser navigations only
+- Fallback (`FLUX_SPA_FALLBACK=1`) now requires GET/HEAD and an `Accept` that lists
+  `text/html` or `*/*`. A webhook POST or a JSON client on a missing route gets 404, not
+  the landing page at 200 — four chronos step events went into that black hole on 09-09
+  and `flux_webhook_list` counted 42 "live" receivers that were all the fallback answering.
+- Measured: the public "200 text/html for a missing `.json`" on sigilgraph.org is q-flux's
+  vhost, not fluxc — `:8459` already 404s those.
+
+### `fluxc` dies quietly on a closed pipe
+- Rust ignores SIGPIPE, so `fluxc verify-proof … | grep -q` ended in
+  `panicked … failed printing to stdout: Broken pipe` (exit 101) and a release script read a
+  VALID signature as "verify failed" (sigil-top v8.0.7). One-shot subcommands now restore
+  `SIG_DFL`: exit 141, no backtrace (measured old 101 → new 141). Daemons (`serve`, `mcp`,
+  `p2p-worker`, `dev`, `watch`) keep the ignore.
+
+### `flux_combo` shows the load it ran under
+- `LOAD 1m 54.2 / 48 cores ⚠ saturated — timings measure the queue, not the build`; also
+  `load_1m`/`cores` in the `combo_complete` webhook. The "`--tests` evicts the cache" rule
+  (2026-09-02) was derived from timings taken under a release build and was wrong.
+
 ## v0.41.0 — The layered core (2026-08-22)
 
 The theme: the 16.4k-LOC `fluxc-core` god-crate is now a real layered stack, the

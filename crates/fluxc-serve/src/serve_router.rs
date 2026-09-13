@@ -175,10 +175,14 @@ fn serve_static_file(req: &Request) -> Option<Response> {
     // nearest index.html walking UP the path — so /cockpit/<route> serves /cockpit/index.html
     // (the cockpit SPA), not the root qwen index. Skip for obvious asset requests (have a file
     // extension in the last segment) so a missing .js/.png honestly 404s instead of returning HTML.
+    // And only for a BROWSER NAVIGATION (GET/HEAD whose Accept lists text/html): a webhook POST,
+    // a curl, a JSON client polling a route that does not exist must get a 404, not the landing
+    // page at 200 — four chronos step events went into exactly that black hole on 2026-09-09 and
+    // `flux_webhook_list` counted 42 "live" receivers that were all this fallback answering.
     if std::env::var("FLUX_SPA_FALLBACK").ok().as_deref() == Some("1") {
         let last = rel.rsplit('/').next().unwrap_or("");
         let looks_like_asset = last.contains('.');
-        if !looks_like_asset {
+        if !looks_like_asset && spa_navigation(&req.method, &req.headers) {
             let mut segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
             loop {
                 let cand = dir_path.join(segs.join("/")).join("index.html");
@@ -189,6 +193,25 @@ fn serve_static_file(req: &Request) -> Option<Response> {
         }
     }
     None
+}
+
+/// Is this request a browser navigation — the only shape the SPA fallback should answer?
+/// GET/HEAD, and an `Accept` header that names `text/html` (or `*/*` — the browser default
+/// for a top-level load; also what a bare `curl` sends, and a 200 there is the documented
+/// "check content-type, not status" trap, but refusing `*/*` would break every real browser
+/// that lands on a deep link). A POST, or a client that asks for `application/json`, is not
+/// navigating and gets the honest 404.
+pub fn spa_navigation(method: &str, headers: &[(String, String)]) -> bool {
+    if !(method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")) {
+        return false;
+    }
+    let accept = headers.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+        .map(|(_, v)| v.to_ascii_lowercase());
+    match accept {
+        None => true,
+        Some(a) => a.contains("text/html") || a.contains("*/*"),
+    }
 }
 
 /// Parse a single HTTP byte-range spec ("start-end", "start-", or "-suffixlen")
@@ -269,7 +292,27 @@ fn static_file_response(req: &Request, path: std::path::PathBuf, meta: &std::fs:
 
 #[cfg(test)]
 mod tests {
-    use super::parse_single_range;
+    use super::{parse_single_range, spa_navigation};
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn spa_fallback_answers_browser_navigations_only() {
+        // A browser landing on a deep link.
+        assert!(spa_navigation("GET", &h(&[("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")])));
+        assert!(spa_navigation("HEAD", &h(&[("accept", "text/html")])));
+        // Bare curl / no Accept at all: still a navigation (`*/*` is the browser default too).
+        assert!(spa_navigation("GET", &h(&[])));
+        assert!(spa_navigation("GET", &h(&[("Accept", "*/*")])));
+        // A webhook POST, or any non-GET, is never a navigation — 404, not the landing page.
+        assert!(!spa_navigation("POST", &h(&[("Accept", "text/html")])));
+        assert!(!spa_navigation("PUT", &h(&[])));
+        // A JSON client polling a missing route gets the honest 404.
+        assert!(!spa_navigation("GET", &h(&[("Accept", "application/json")])));
+        assert!(!spa_navigation("GET", &h(&[("Accept", "text/event-stream")])));
+    }
 
     #[test]
     fn open_ended_range_reaches_eof() {

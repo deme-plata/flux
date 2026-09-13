@@ -222,7 +222,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 dependencies: vec![
-                    Dependency { name: "leaf".into(), path: Some(PathBuf::from("/ws/crates/leaf")), kind: DepKind::Path, optional: false },
+                    Dependency { name: "leaf".into(), path: Some(PathBuf::from("/ws/crates/leaf")), kind: DepKind::Path, optional: false, dev: false },
                 ],
                 features: vec![],
             },

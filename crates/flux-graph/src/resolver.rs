@@ -50,8 +50,8 @@ mod tests {
             edition: "2021".into(),
             crate_type: CrateType::Lib,
             dependencies: vec![
-                Dependency { name: "a".into(), path: Some(PathBuf::from("a")), kind: DepKind::Path, optional: false },
-                Dependency { name: "b".into(), path: Some(PathBuf::from("b")), kind: DepKind::Path, optional: true },
+                Dependency { name: "a".into(), path: Some(PathBuf::from("a")), kind: DepKind::Path, optional: false, dev: false },
+                Dependency { name: "b".into(), path: Some(PathBuf::from("b")), kind: DepKind::Path, optional: true, dev: false },
             ],
             features: vec![],
         };

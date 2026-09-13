@@ -164,6 +164,7 @@ fn flux_combo(args: &Value) -> String {
     let release = args.get("release").and_then(|v| v.as_bool()).unwrap_or(false);
     let incremental = args.get("incremental").and_then(|v| v.as_bool()).unwrap_or(false);
     let start = std::time::Instant::now();
+    let (load_1m, cores) = load_and_cores();
     let pkg = package.to_string();
     let pkg2 = pkg.clone();
 
@@ -266,6 +267,7 @@ fn flux_combo(args: &Value) -> String {
         "tests_passed": test_passed, "tests_failed": test_failed,
         "suites_seen": suites_seen, "verdict": verdict,
         "predicted_ms": pred.predicted_ms,
+        "load_1m": load_1m, "cores": cores,
         "rev": rev_stamp
     }));
 
@@ -290,6 +292,7 @@ fn flux_combo(args: &Value) -> String {
                 &[
                     build_line,
                     " TESTS     ░░░░░░░░░░░░░░░░░░░░░░░░  0 suites executed".to_string(),
+                    load_line(load_1m, cores),
                     " VERDICT   ⚠ NOT green — no test harness produced output".to_string(),
                     format!(" NEXT      fluxc check -p {} · then run target/debug/deps/<crate>-<hash> directly", pkg),
                     "--".to_string(),
@@ -314,6 +317,7 @@ fn flux_combo(args: &Value) -> String {
             &[
                 " BUILD     ✓ (via fluxc test, no redundant check)".to_string(),
                 tests_line,
+                load_line(load_1m, cores),
                 format!(" PREDICT   {}ms   cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 12), (pred.predicted_cache_rate * 100.0) as u64),
                 format!("           confidence {} {}%", bar(pred.confidence, 12), (pred.confidence * 100.0) as u64),
                 "--".to_string(),
@@ -330,6 +334,31 @@ use fluxc_analytics::heatmap;
 const PANEL_W: usize = 50; // inner content width (all rows are single-width chars)
 
 /// Unicode progress bar: `█`×filled + `░`×empty, `w` cells, for `frac` in 0..1.
+/// (1-minute load, online cores). A combo's wall-clock on a saturated box measures
+/// the QUEUE, not the build: the "`--tests` evicts the cache" rule (2026-09-02) was
+/// derived from 13 s → 48 s measured under a release build and was simply wrong.
+/// Print the load next to every timing so nobody re-derives that conclusion.
+pub fn load_and_cores() -> (f64, usize) {
+    let load = std::fs::read_to_string("/proc/loadavg").ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|x| x.parse::<f64>().ok()))
+        .unwrap_or(0.0);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    (load, cores)
+}
+
+/// One dashboard row: `LOAD 1m 54.2 / 48 cores  ⚠ saturated — timings measure the queue`.
+pub fn load_line(load: f64, cores: usize) -> String {
+    let ratio = if cores > 0 { load / cores as f64 } else { 0.0 };
+    let verdict = if ratio >= 1.0 {
+        "⚠ saturated — timings measure the queue, not the build"
+    } else if ratio >= 0.75 {
+        "△ busy — timings inflated"
+    } else {
+        "✓ idle enough to compare"
+    };
+    format!(" LOAD      1m {:.1} / {} cores  {}", load, cores, verdict)
+}
+
 fn bar(frac: f64, w: usize) -> String {
     let f = (frac.clamp(0.0, 1.0) * w as f64).round() as usize;
     "█".repeat(f) + &"░".repeat(w - f)
@@ -383,6 +412,18 @@ pub(crate) fn anchored_fluxc_cmd() -> std::process::Command {
 
 #[cfg(test)]
 mod anchor_tests {
+    #[test]
+    fn load_line_names_the_saturated_box() {
+        let l = super::load_line(54.2, 48);
+        assert!(l.contains("54.2 / 48 cores"), "{l}");
+        assert!(l.contains("saturated"), "{l}");
+        assert!(super::load_line(40.0, 48).contains("busy"));
+        assert!(super::load_line(3.0, 48).contains("idle enough"));
+        let (load, cores) = super::load_and_cores();
+        assert!(cores >= 1);
+        assert!(load >= 0.0);
+    }
+
     #[test]
     fn spawns_are_workspace_anchored() {
         let cmd = super::anchored_fluxc_cmd();

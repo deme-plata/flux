@@ -141,13 +141,13 @@ fn extract_path_deps(
     let mut deps = Vec::new();
 
     if let Some(dep_table) = doc.get("dependencies").and_then(|d| d.as_table()) {
-        process_dep_table(&mut deps, dep_table, crate_dir, workspace)?;
+        process_dep_table(&mut deps, dep_table, crate_dir, workspace, false)?;
     }
     if let Some(build_table) = doc.get("build-dependencies").and_then(|d| d.as_table()) {
-        process_dep_table(&mut deps, build_table, crate_dir, workspace)?;
+        process_dep_table(&mut deps, build_table, crate_dir, workspace, false)?;
     }
     if let Some(dev_table) = doc.get("dev-dependencies").and_then(|d| d.as_table()) {
-        process_dep_table(&mut deps, dev_table, crate_dir, workspace)?;
+        process_dep_table(&mut deps, dev_table, crate_dir, workspace, true)?;
     }
 
     Ok(deps)
@@ -158,9 +158,11 @@ fn process_dep_table(
     dep_table: &toml::value::Table,
     crate_dir: &PathBuf,
     workspace: Option<&WorkspaceContext>,
+    dev: bool,
 ) -> Result<(), String> {
     for (dep_name, dep_val) in dep_table {
-        if let Some(dep) = parse_dependency(dep_name, dep_val, crate_dir, workspace)? {
+        if let Some(mut dep) = parse_dependency(dep_name, dep_val, crate_dir, workspace)? {
+            dep.dev = dev;
             push_dependency(deps, dep);
         }
     }
@@ -173,6 +175,7 @@ fn push_dependency(deps: &mut Vec<Dependency>, dep: Dependency) {
         .find(|d| d.name == dep.name && d.kind == dep.kind && d.path == dep.path)
     {
         existing.optional = existing.optional && dep.optional;
+        existing.dev = existing.dev && dep.dev;
     } else {
         deps.push(dep);
     }
@@ -223,6 +226,7 @@ fn parse_dependency_value(
             path: Some(canonical),
             kind: DepKind::Path,
             optional,
+            dev: false,
         });
     }
     if dep_val.get("git").is_some() {
@@ -231,6 +235,7 @@ fn parse_dependency_value(
             path: None,
             kind: DepKind::Git,
             optional,
+            dev: false,
         });
     }
     if dep_val.get("version").is_some() || dep_val.is_str() {
@@ -239,6 +244,7 @@ fn parse_dependency_value(
             path: None,
             kind: DepKind::CratesIo,
             optional,
+            dev: false,
         });
     }
     None

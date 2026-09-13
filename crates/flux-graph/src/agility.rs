@@ -194,8 +194,8 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 dependencies: vec![
-                    Dependency { name: "sha2".into(), path: None, kind: DepKind::CratesIo, optional: false },
-                    Dependency { name: "blake3".into(), path: None, kind: DepKind::CratesIo, optional: false },
+                    Dependency { name: "sha2".into(), path: None, kind: DepKind::CratesIo, optional: false, dev: false },
+                    Dependency { name: "blake3".into(), path: None, kind: DepKind::CratesIo, optional: false, dev: false },
                 ],
                 features: vec![],
             },
@@ -205,7 +205,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 dependencies: vec![
-                    Dependency { name: "pqcrypto-dilithium".into(), path: None, kind: DepKind::CratesIo, optional: false },
+                    Dependency { name: "pqcrypto-dilithium".into(), path: None, kind: DepKind::CratesIo, optional: false, dev: false },
                 ],
                 features: vec![],
             },

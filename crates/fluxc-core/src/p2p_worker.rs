@@ -42,15 +42,38 @@ pub struct ReleaseManifest {
     pub product: String,
     pub version: String,
     pub url: String,
+    /// Absent on sigil-* manifests, which carry only `blake3_hex` — `flux_release_check`
+    /// failed on them with `missing field sha256_hex` until 2026-09-13. Optional fields
+    /// here mean "this manifest did not say", never a fabricated value.
+    #[serde(default)]
     pub sha256_hex: String,
     pub blake3_hex: String,
     pub size_bytes: u64,
+    #[serde(default)]
     pub released_at_us: u64,
+    #[serde(default)]
     pub publisher: String,
     #[serde(default)]
     pub publisher_wallet_hex: String,
     #[serde(default)]
     pub notes: String,
+    /// sigil-top style extras, kept so a checker can show them: release channel,
+    /// the flux-rev stamp of the source, the git tag, and per-target artifacts.
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub flux_rev: String,
+    #[serde(default)]
+    pub source_tag: String,
+    #[serde(default)]
+    pub targets: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// The download root a product publishes to. SIGIL products live on sigilgraph.org
+/// and Quillon/Flux products on quillon.xyz — two projects, two homes; a SIGIL
+/// manifest must never be looked up (or handed out) on the Quillon domain.
+pub fn url_base_for(product: &str) -> &'static str {
+    if product.starts_with("sigil-") { SIGIL_URL_BASE } else { DEFAULT_URL_BASE }
 }
 
 fn default_product() -> String { "fluxc".into() }
@@ -61,12 +84,14 @@ const DEFAULT_DOWNLOADS_DIR: &str =
     "/home/orobit/q-narwhalknight/dist-final/downloads";
 const DEFAULT_URL_BASE: &str =
     "https://quillon.xyz/downloads";
+const SIGIL_URL_BASE: &str =
+    "https://sigilgraph.org/downloads";
 
 /// Manifest URL for an arbitrary product. Mirrors the convention used by the
 /// default `fluxc-latest.json` — every product publishes to
 /// `${url_base}/${product}-latest.json`.
 pub fn manifest_url_for(product: &str) -> String {
-    format!("{}/{}-latest.json", DEFAULT_URL_BASE, product)
+    format!("{}/{}-latest.json", url_base_for(product), product)
 }
 
 /// Suffix that distinguishes the on-disk binary name. Defaults to `musl` for
@@ -175,6 +200,10 @@ pub fn publish_release_product(
         publisher,
         publisher_wallet_hex: wallet,
         notes: std::env::var("FLUX_RELEASE_NOTES").unwrap_or_default(),
+        channel: String::new(),
+        flux_rev: String::new(),
+        source_tag: String::new(),
+        targets: Default::default(),
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serialize manifest: {}", e))?;
@@ -287,18 +316,29 @@ fn check_once(
     http_get_to_file(&manifest.url, &dl_tmp, 120)?;
     let bytes = std::fs::read(&dl_tmp).map_err(|e| format!("read tmp: {}", e))?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let got_sha = hex_encode(&hasher.finalize());
-    if got_sha != manifest.sha256_hex {
+    // A manifest names the artifact by sha256 (fluxc) or by blake3 only (sigil-*);
+    // check whichever it carries, and refuse one that carries neither — an unhashed
+    // download is not a release. Never slice an empty digest (that was a panic).
+    let (algo, want, got) = if !manifest.sha256_hex.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        ("sha256", manifest.sha256_hex.clone(), hex_encode(&hasher.finalize()))
+    } else if !manifest.blake3_hex.is_empty() {
+        ("blake3", manifest.blake3_hex.clone(), blake3::hash(&bytes).to_hex().to_string())
+    } else {
+        let _ = std::fs::remove_file(&dl_tmp);
+        return Err("manifest carries neither sha256_hex nor blake3_hex — refusing an unhashed release".into());
+    };
+    if got != want {
         let _ = std::fs::remove_file(&dl_tmp);
         return Err(format!(
-            "sha256 mismatch — expected {}, got {}",
-            &manifest.sha256_hex[..16],
-            &got_sha[..16]
+            "{} mismatch — expected {}…, got {}…",
+            algo,
+            &want[..16.min(want.len())],
+            &got[..16.min(got.len())]
         ));
     }
-    println!("✓ sha256 matches ({} bytes)", bytes.len());
+    println!("✓ {} matches ({} bytes)", algo, bytes.len());
 
     let _ = Command::new("chmod").arg("+x").arg(&dl_tmp).status();
 
@@ -327,8 +367,21 @@ fn check_once(
 /// Read-only manifest fetch + parse. Used by `flux_release_check` MCP tool —
 /// returns the current manifest without downloading the binary or applying it.
 pub fn fetch_manifest(manifest_url: &str) -> Result<ReleaseManifest, String> {
+    fetch_manifest_raw(manifest_url).map(|(m, _)| m)
+}
+
+/// Fetch and parse, but also hand back the EXACT bytes — a detached signature
+/// is over those bytes, so a verifier must not re-serialize. An SPA fallback
+/// answering a missing manifest with its landing page (HTTP 200, text/html —
+/// measured on sigilgraph.org 2026-09-02) fails here as a parse error that
+/// names the first bytes, not as a mysterious "bad signature" later.
+pub fn fetch_manifest_raw(manifest_url: &str) -> Result<(ReleaseManifest, String), String> {
     let body = http_get_string(manifest_url, 10)?;
-    serde_json::from_str(&body).map_err(|e| format!("parse manifest: {}", e))
+    let m: ReleaseManifest = serde_json::from_str(&body).map_err(|e| {
+        let head: String = body.chars().take(48).collect();
+        format!("parse manifest: {} — body starts {:?} (an HTML page here means the file is ABSENT and an SPA fallback answered)", e, head)
+    })?;
+    Ok((m, body))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -784,5 +837,45 @@ mod tests {
     #[test]
     fn hex_roundtrip() {
         assert_eq!(hex_encode(&[0xab, 0xcd, 0x01]), "abcd01");
+    }
+
+    #[test]
+    fn sigil_products_resolve_to_sigilgraph_org() {
+        assert_eq!(manifest_url_for("sigil-top"), "https://sigilgraph.org/downloads/sigil-top-latest.json");
+        assert_eq!(manifest_url_for("sigil-ai"), "https://sigilgraph.org/downloads/sigil-ai-latest.json");
+        assert_eq!(manifest_url_for("fluxc"), "https://quillon.xyz/downloads/fluxc-latest.json");
+        assert_eq!(manifest_url_for("flux-arena"), "https://quillon.xyz/downloads/flux-arena-latest.json");
+    }
+
+    #[test]
+    fn sigil_top_manifest_parses_without_sha256() {
+        // The live sigil-top-latest.json shape (2026-09-13): blake3 only, extra fields,
+        // no sha256_hex / released_at_us / publisher. Used to fail: `missing field sha256_hex`.
+        let body = r#"{
+          "product": "sigil-top", "version": "10.0.2", "channel": "stable",
+          "url": "https://sigilgraph.org/downloads/sigil-top-v10.0.2-linux-x64",
+          "blake3_hex": "5451748e695a599df405a1b6c9871d0aa2109f0a599a0b8647e1db1a1c23b1c6", "size_bytes": 34348896,
+          "flux_rev": "27c5949b", "source_tag": "v10.0.2",
+          "verify": "fluxc verify-proof <artifact> <artifact>.proof",
+          "notes": "100 blk/s network",
+          "targets": { "linux-x64": { "url": "x" }, "windows-x64": { "url": "y" }, "linux-arm64": { "url": "z" } }
+        }"#;
+        let m: ReleaseManifest = serde_json::from_str(body).expect("sigil manifest parses");
+        assert_eq!(m.version, "10.0.2");
+        assert!(m.sha256_hex.is_empty(), "absent means absent, never fabricated");
+        assert_eq!(m.blake3_hex.len(), 64);
+        assert_eq!(m.channel, "stable");
+        assert_eq!(m.flux_rev, "27c5949b");
+        assert_eq!(m.targets.len(), 3);
+        assert_eq!(m.released_at_us, 0);
+    }
+
+    #[test]
+    fn fluxc_manifest_still_parses() {
+        let body = r#"{"version":"0.41.0","url":"u","sha256_hex":"aa","blake3_hex":"bb","size_bytes":1,"released_at_us":2,"publisher":"epsilon"}"#;
+        let m: ReleaseManifest = serde_json::from_str(body).unwrap();
+        assert_eq!(m.product, "fluxc");
+        assert_eq!(m.sha256_hex, "aa");
+        assert!(m.targets.is_empty());
     }
 }

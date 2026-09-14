@@ -296,10 +296,22 @@ fn main() {
                 notes["address"] = serde_json::json!(me);
                 println!("{}", notes); return;
             }
+            if subcommand_args.iter().any(|a| a == "--viewing-key") {
+                // Sight without authority (sigil-shield viewing.rs): opens this wallet's note ciphertexts,
+                // cannot spend. Printed only on this explicit flag — meant for a DEDICATED wallet whose
+                // receipts are supposed to be public (the sigil-earth anchor wallet).
+                let bytes: [u8; 32] = hex::decode(&seed).ok().and_then(|b| b.try_into().ok()).expect("32-byte seed");
+                let vk = sigil_shield::viewing::ViewingKey::from_seed(&bytes);
+                println!("{}", serde_json::json!({"ok": true, "address": me, "viewing_key": vk.to_hex(),
+                    "warning": "a viewing key discloses this wallet's entire receiving history (amounts, memos, timing) forever; it cannot spend"}));
+                return;
+            }
             let memo = get("--memo").unwrap_or_default();
             let amount = get("--amount").and_then(|a| a.parse::<u64>().ok()).unwrap_or(1000);
             let broadcast = !subcommand_args.iter().any(|a| a == "--dry-run");
-            let mut out = parse(sh::shielded_send_full(&serde_json::json!({"seed": seed, "to_address": me, "amount": amount, "memo": memo, "broadcast": broadcast})));
+            let to = get("--to-address").unwrap_or_else(|| me.clone());
+            let mut out = parse(sh::shielded_send_full(&serde_json::json!({"seed": seed, "to_address": to, "amount": amount, "memo": memo, "broadcast": broadcast})));
+            out["to_address"] = serde_json::json!(to);
             out["address"] = serde_json::json!(me);
             out["dry_run"] = serde_json::json!(!broadcast);
             println!("{}", out);

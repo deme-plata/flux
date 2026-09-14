@@ -15,6 +15,9 @@ fluxc-analytics = { path = "../fluxc-analytics" }
 fluxc-util = { path = "../fluxc-util" }
 fluxc-core = { path = "../fluxc-core" }
 fluxc-mcp = { path = "../fluxc-mcp" }
+# `fluxc sigil-attest --viewing-key` (sigil-earth anchor wallet): sight without authority.
+sigil-shield = { path = "../../../sigil/crates/sigil-shield" }
+hex = "0.4"
 flux-webcam = { path = "../flux-webcam" }
 flux-sigil-releases = { path = "../flux-sigil-releases" }
 flux-graph = { path = "../flux-graph" }

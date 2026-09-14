@@ -218,11 +218,25 @@ pub fn register(registry: &mut ToolRegistry) {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string"}, "via": {"type": "string", "enum": ["process", "systemd"]}
+                    "host": {"type": "string"}, "via": {"type": "string", "enum": ["process", "systemd"]},
+                    "force": {"type": "boolean", "description": "override a PATH-MISMATCH / DELETED-EXE refusal from the pre-restart deploy-check"}
                 }
             }),
         },
         sigil_node_restart,
+    );
+    registry.register(
+        ToolDef {
+            name: "flux_sigil_deploy_check",
+            description: "Which binary does a systemd unit RUN (/proc/PID/exe) vs which does its effective ExecStart NAME (drop-ins applied) vs the bytes on disk there? Verdict MATCH / STALE-ON-DISK (built, not restarted) / PATH-MISMATCH (your build targets the wrong dir) / DELETED-EXE / NOT-RUNNING. Run it BEFORE building and BEFORE restarting — `systemctl cat` lied on 2026-09-10. Args: [unit=sigil-node], [host=local; e.g. 10.77.0.5 for happysrv], [expect=<sha256|path> the RUNNING binary must satisfy].",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "unit": {"type": "string"}, "host": {"type": "string"}, "expect": {"type": "string"}
+                }
+            }),
+        },
+        sigil_deploy_check,
     );
     registry.register(
         ToolDef {
@@ -403,6 +417,38 @@ fn sigil_node_restart(a: &Value) -> String {
     // resolves to Epsilon. Other/future hosts still fall back to "process".
     let default_via = if host == "89.149.241.126" { "systemd" } else { "process" };
     let via = arg_str(a, "via", default_via);
+    // 2026-09-14: a restart is a DEPLOY of whatever ExecStart names. Measure the unit's
+    // binary identity first (fluxc-core::deploy_check) and refuse the two shapes in which
+    // "restart" would not mean "run the binary you just built": ExecStart pointing somewhere
+    // other than the running exe (your build went to the wrong target dir — 2026-09-10) or a
+    // deleted exe (the file under the process is not the file on disk). STALE-ON-DISK is the
+    // state a restart exists to fix, so it proceeds. `force:true` overrides, and the verdicts
+    // before and after are printed either way so the receipt is in the tool output.
+    let force = a.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut receipt = String::new();
+    if via == "systemd" {
+        let before = if host == "89.149.241.126" || host == "127.0.0.1" || host == "localhost" {
+            fluxc_core::deploy_check::inspect_local("sigil-node")
+        } else {
+            fluxc_core::deploy_check::inspect_remote(&host, "sigil-node")
+        };
+        match before {
+            Ok(id) => {
+                use fluxc_core::deploy_check::Verdict::*;
+                let v = id.verdict();
+                receipt.push_str("── before ──\n");
+                receipt.push_str(&fluxc_core::deploy_check::render(&id));
+                if matches!(v, PathMismatch | Deleted) && !force {
+                    return format!(
+                        "{receipt}✗ REFUSED: restart would not deploy the binary you built ({}). \
+                         Fix ExecStart / rebuild into the ExecStart dir, or pass force:true.",
+                        v.label()
+                    );
+                }
+            }
+            Err(e) => receipt.push_str(&format!("── before ── deploy-check unavailable: {e}\n")),
+        }
+    }
     let remote = if via == "systemd" {
         "systemctl restart sigil-node && sleep 2 && systemctl is-active sigil-node".to_string()
     } else {
@@ -414,7 +460,46 @@ fn sigil_node_restart(a: &Value) -> String {
          sleep 2; pgrep -af 'sigil-node start' | head -1"
             .to_string()
     };
-    run_ssh(&host, &remote, "restart sigil-node")
+    let out = run_ssh(&host, &remote, "restart sigil-node");
+    if via == "systemd" {
+        let after = if host == "89.149.241.126" || host == "127.0.0.1" || host == "localhost" {
+            fluxc_core::deploy_check::inspect_local("sigil-node")
+        } else {
+            fluxc_core::deploy_check::inspect_remote(&host, "sigil-node")
+        };
+        receipt.push_str("── after ──\n");
+        match after {
+            Ok(id) => receipt.push_str(&fluxc_core::deploy_check::render(&id)),
+            Err(e) => receipt.push_str(&format!("deploy-check unavailable: {e}\n")),
+        }
+    }
+    format!("{receipt}{out}")
+}
+
+// ── deploy-check: the unit's binary identity, measured (fluxc-core::deploy_check) ──
+fn sigil_deploy_check(a: &Value) -> String {
+    let unit = arg_str(a, "unit", "sigil-node");
+    let host = arg_str(a, "host", "");
+    let expect = arg_str(a, "expect", "");
+    let id = if host.is_empty() || host == "127.0.0.1" || host == "localhost" || host == "89.149.241.126" {
+        fluxc_core::deploy_check::inspect_local(&unit)
+    } else {
+        if !safe_host(&host) {
+            return format!("error: host {host:?} rejected (hostname/IP chars only) [SEC-001]");
+        }
+        fluxc_core::deploy_check::inspect_remote(&host, &unit)
+    };
+    match id {
+        Ok(id) => {
+            let mut s = fluxc_core::deploy_check::render(&id);
+            if !expect.is_empty() {
+                s.push_str(&format!("  expect       {expect}  →  {}\n",
+                    if id.satisfies(&expect) { "OK" } else { "NOT SATISFIED" }));
+            }
+            s
+        }
+        Err(e) => format!("error: deploy-check: {e}"),
+    }
 }
 
 // ── node deploy (scp binary + relaunch) ──

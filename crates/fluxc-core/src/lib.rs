@@ -13,6 +13,7 @@ pub use ::flux_quantum_architect as quantum_architect; // P1: extracted to own c
 pub mod cortex;
 pub mod self_heal;
 pub mod doctor;
+pub mod deploy_check;
 
 // v0.41 god-crate split — compatibility re-exports so downstream
 // `fluxc_core::version::…` / `fluxc_core::live_fluxc_path` keep working.

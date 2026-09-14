@@ -499,6 +499,15 @@ fn main() {
         Some("doctor") => {
             fluxc_core::doctor::run();
         }
+        // `fluxc deploy-check <unit> [--host H] [--expect <sha256|path>] [--json]` — which binary
+        // a systemd unit RUNS (/proc/PID/exe) vs which its effective ExecStart NAMES (drop-ins
+        // applied) vs the bytes on disk there. Exit 0 only when all three agree; 2 on
+        // PATH-MISMATCH / STALE-ON-DISK / DELETED-EXE / NOT-RUNNING; 3 when a side is unreadable.
+        // The 2026-09-10 lesson: `systemctl cat` showed a path nothing was running.
+        Some("deploy-check") => {
+            let rc = fluxc_core::deploy_check::run(&subcommand_args[1..]);
+            std::process::exit(rc);
+        }
         Some("prune-report") => {
             // v0.36 SDE (semantic dependency elimination, report-only): walk the
             // workspace dep graph from the default-members roots and write

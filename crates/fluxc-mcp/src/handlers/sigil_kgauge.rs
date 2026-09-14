@@ -664,12 +664,23 @@ mod tests {
     fn plurality_amplifies_but_is_bounded_by_2pi_at_full_disagreement() {
         let mut i = base();
         i.merging_blocks = 200; i.red_blocks = 200; i.entropy_bits = 1.0; i.dominant_count = 100; i.block_rate_bps = FINAL_DEPTH / TAU0_SECS;
-        i.peer_heights = vec![i.local_height + 5_000];
+        // Full finality disagreement = a CONVERGED peer one whole final_depth away. Since
+        // a90bb0f7 a peer > SYNCING_DEPTHS×final_depth away counts as catching up (excluded),
+        // so +5_000 no longer measures anything — it measured 0.45 and this test was red
+        // from 09-08 to 09-14.
+        i.peer_heights = vec![i.local_height + FINAL_DEPTH as u64];
         let c = consensus_gauge(&i);
         assert!((c.h_norm - 1.0).abs() < 1e-9);
         assert!((c.tau_ratio - 1.0).abs() < 1e-9);
+        assert_eq!(c.syncing_peers, 0, "one final_depth away is disagreement, not syncing");
         // ΔH_c = 0.20·1 + 0.20·1 + 0.25·1 = 0.65 (state root still unmeasured)
         assert!((c.delta_h_consensus - 0.65).abs() < 1e-9, "{}", c.delta_h_consensus);
+        // …and a peer far beyond the syncing horizon is NOT disagreement: the channel drops out.
+        let mut far = i.clone();
+        far.peer_heights = vec![far.local_height + (SYNCING_DEPTHS as u64 + 1) * FINAL_DEPTH as u64 + 1];
+        let f = consensus_gauge(&far);
+        assert_eq!(f.syncing_peers, 1);
+        assert!((f.delta_h_consensus - 0.45).abs() < 1e-9, "{}", f.delta_h_consensus);
         assert!(c.k_c < 2.0 * std::f64::consts::PI);
         assert_eq!(c.regime, "critical");
     }

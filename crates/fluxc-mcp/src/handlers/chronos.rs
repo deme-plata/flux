@@ -56,7 +56,8 @@ pub fn register(registry: &mut ToolRegistry) {
                     "seed": {"type": "integer", "description": "Scenario seed (default: 42)"},
                     "heal_on_failure": {"type": "boolean", "description": "Auto-heal via AI cortex if simulation fails"},
                     "deploy_on_success": {"type": "boolean", "description": "Deploy release on success"},
-                    "webhook_url": {"type": "string", "description": "Webhook URL for CI status notifications"}
+                    "webhook_url": {"type": "string", "description": "Webhook URL for CI status notifications"},
+                    "gates": {"type": "array", "items": {"type": "string", "enum": ["header-body", "shielded-send", "follower-reorg"]}, "description": "Consensus gates to run against the REAL producer loop (sigil-node integration tests, --profile release-fast). Default for a sigil-* crate: [\"header-body\"] — the 2026-09-10 lesson: a header must commit exactly the body it ships with, and an independent follower must accept every minted block. Pass [] to skip."}
                 }
             }),
         },
@@ -337,6 +338,46 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
     let chronos_ok = chronos_result.contains("\"actual_deliveries\"");
     steps.push(json!({"step": "chronos", "ok": chronos_ok, "summary": chronos_result.chars().take(300).collect::<String>()}));
 
+    // 2b. Consensus gates — the REAL producer loop, not the gossip sim. Allowlisted names map
+    // to sigil-node integration tests so nothing arbitrary is spawned. `header-body` is the
+    // one the 2026-09-10 incident asked for (a passing suite, a follower frozen on STATE
+    // DIVERGENCE): every minted block is re-applied by an independent follower, and the
+    // typed body events must hash to the header's event_log_root; a corrupted body must be
+    // refused. Runs under --profile release-fast because the STARK prover needs
+    // debug_assertions off.
+    let default_gates: Vec<String> = if crate_name.starts_with("sigil-") { vec!["header-body".into()] } else { vec![] };
+    let gates: Vec<String> = args.get("gates").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or(default_gates);
+    let mut gates_ok = true;
+    for gate in &gates {
+        let target = match gate.as_str() {
+            "header-body" => "chronos_header_body_agreement",
+            "shielded-send" => "chronos_shielded_send_settles",
+            "follower-reorg" => "chronos_follower_reorg_recovers",
+            other => {
+                steps.push(json!({"step": format!("gate:{other}"), "ok": false, "error": "unknown gate (allowlist: header-body, shielded-send, follower-reorg)"}));
+                gates_ok = false;
+                continue;
+            }
+        };
+        let sigil_ws = resolve_ci_workspace("sigil-node");
+        let out = crate::handlers::fluxc_cmd()
+            .args(["test", "-p", "sigil-node", "--profile", "release-fast", "--test", target, "--", "--nocapture"])
+            .current_dir(&sigil_ws)
+            .output();
+        let (ok, summary) = match &out {
+            Ok(o) => {
+                let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let line = text.lines().rev().find(|l| l.starts_with("chronos[") || l.starts_with("test result")).unwrap_or("").to_string();
+                (o.status.success() && text.contains("test result: ok"), line)
+            }
+            Err(e) => (false, format!("spawn: {e}")),
+        };
+        steps.push(json!({"step": format!("gate:{gate}"), "ok": ok, "test": target, "summary": summary}));
+        gates_ok &= ok;
+    }
+
     // 3. AI heal on failure
     if !chronos_ok && heal_on_failure {
         let target = workspace
@@ -353,8 +394,8 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
         steps.push(json!({"step": "heal", "ok": heal.as_ref().map(|o| o.status.success()).unwrap_or(false)}));
     }
 
-    // 4. Deploy on success
-    if deploy_on_success && build_ok && chronos_ok {
+    // 4. Deploy on success — never past a failed gate.
+    if deploy_on_success && build_ok && chronos_ok && gates_ok {
         let deploy = crate::handlers::fluxc_cmd()
             .args(["release", crate_name])
             .current_dir(&workspace)
@@ -363,7 +404,7 @@ fn flux_sigil_chronos_ci(args: &Value) -> String {
     }
 
     // 5. Fire webhook
-    let status = if build_ok && chronos_ok { "PASSED" } else { "FAILED" };
+    let status = if build_ok && chronos_ok && gates_ok { "PASSED" } else { "FAILED" };
     if let Some(url) = webhook_url {
         let payload = json!({"event":"sigil_chronos_ci","crate":crate_name,"status":status,"steps":steps});
         let _ = std::process::Command::new("curl")

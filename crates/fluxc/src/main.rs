@@ -255,6 +255,55 @@ fn main() {
         Some("supercluster") | Some("sc") => fluxc_core::supercluster_mode(&subcommand_args[1..]),
         Some("self") => fluxc_core::self_build(config),
         Some("architect") | Some("arch") => fluxc_core::phase3::architect_plan(),
+        Some("webhook") | Some("webhooks") => {
+            // fluxc webhook list | trigger <event> <json> — the same signed rail the MCP tools use.
+            match subcommand_args.get(1).map(String::as_str) {
+                Some("list") => println!("{}", fluxc_webhooks::webhook::list_webhooks()),
+                Some("trigger") => {
+                    let event = subcommand_args.get(2).cloned().unwrap_or_default();
+                    let data: serde_json::Value = subcommand_args.get(3).and_then(|d| serde_json::from_str(d).ok()).unwrap_or(serde_json::json!({}));
+                    if event.is_empty() { eprintln!("usage: fluxc webhook trigger <event> '<json>'"); std::process::exit(2) }
+                    println!("{}", fluxc_webhooks::webhook::trigger_event(&event, data));
+                }
+                _ => { eprintln!("usage: fluxc webhook list | trigger <event> '<json>'"); std::process::exit(2) }
+            }
+        }
+        Some("sigil-attest") => {
+            // fluxc sigil-attest --seed-file <path> --memo <str> [--amount <raw>] [--dry-run] [--notes]
+            // A keyfile-driven shielded memo self-send (the sigil-earth attestation anchor). The seed
+            // is read from the file and never printed: every JSON the handlers return is redacted.
+            let get = |k: &str| subcommand_args.iter().position(|a| a == k).and_then(|i| subcommand_args.get(i + 1)).cloned();
+            let Some(seed_path) = get("--seed-file") else { eprintln!("sigil-attest: --seed-file <path> is required"); std::process::exit(2) };
+            let seed = std::fs::read_to_string(&seed_path).map(|s| s.trim().trim_start_matches("0x").to_string()).unwrap_or_default();
+            if seed.len() != 64 || !seed.chars().all(|c| c.is_ascii_hexdigit()) { eprintln!("sigil-attest: {seed_path} must hold a 32-byte hex seed"); std::process::exit(2) }
+            fn redact(v: &mut serde_json::Value, secret: &str) {
+                match v {
+                    serde_json::Value::Object(m) => { m.remove("seed"); m.remove("sk"); for x in m.values_mut() { redact(x, secret); } }
+                    serde_json::Value::Array(a) => { for x in a { redact(x, secret); } }
+                    serde_json::Value::String(s) => { if s.contains(secret) { *s = s.replace(secret, "<redacted>"); } }
+                    _ => {}
+                }
+            }
+            let parse = |raw: String| -> serde_json::Value {
+                let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({"raw": raw}));
+                redact(&mut v, &seed); v
+            };
+            use fluxc_mcp::handlers::sigil_shielded as sh;
+            let keys = parse(sh::shielded_keys(&serde_json::json!({"seed": seed})));
+            let me = keys.get("address").and_then(|a| a.as_str()).map(|s| s.to_string()).unwrap_or_default();
+            if subcommand_args.iter().any(|a| a == "--notes") {
+                let mut notes = parse(sh::shielded_notes(&serde_json::json!({"seed": seed})));
+                notes["address"] = serde_json::json!(me);
+                println!("{}", notes); return;
+            }
+            let memo = get("--memo").unwrap_or_default();
+            let amount = get("--amount").and_then(|a| a.parse::<u64>().ok()).unwrap_or(1000);
+            let broadcast = !subcommand_args.iter().any(|a| a == "--dry-run");
+            let mut out = parse(sh::shielded_send_full(&serde_json::json!({"seed": seed, "to_address": me, "amount": amount, "memo": memo, "broadcast": broadcast})));
+            out["address"] = serde_json::json!(me);
+            out["dry_run"] = serde_json::json!(!broadcast);
+            println!("{}", out);
+        }
         Some("sigil-plan") => {
             let json = subcommand_args.iter().any(|a| a == "--json");
             let plan = flux_sigil_releases::plan::generate_release_plan();

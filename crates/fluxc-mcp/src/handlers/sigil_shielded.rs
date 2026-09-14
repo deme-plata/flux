@@ -611,7 +611,7 @@ pub fn register(registry: &mut ToolRegistry) {
     }, register_from_seed);
 }
 
-fn shielded_keys(a: &Value) -> String {
+pub fn shielded_keys(a: &Value) -> String {
     use rand::RngCore;
     let (seed, generated) = match arg_str(a, "seed", "") {
         s if s.is_empty() => {
@@ -649,7 +649,7 @@ fn shielded_keys(a: &Value) -> String {
     out.to_string()
 }
 
-fn shielded_notes(a: &Value) -> String {
+pub fn shielded_notes(a: &Value) -> String {
     let seed = match seed_of(a) {
         Ok(s) => s,
         Err(e) => return err(e),
@@ -675,7 +675,7 @@ fn shielded_notes(a: &Value) -> String {
     .to_string()
 }
 
-fn shielded_send_full(a: &Value) -> String {
+pub fn shielded_send_full(a: &Value) -> String {
     let seed = match seed_of(a) {
         Ok(s) => s,
         Err(e) => return err(e),

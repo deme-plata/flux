@@ -7,7 +7,7 @@
 // Each module self-registers tools with schema + handler function.
 // Coupling: 50% → ~20%. Test coverage: 0 → 5+ handler tests.
 
-mod handlers;
+pub mod handlers;   // pub since 2026-09-14: `fluxc sigil-attest` (keyfile-driven shielded memo) reuses the shielded handlers
 
 use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};

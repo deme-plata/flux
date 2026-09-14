@@ -115,12 +115,81 @@ fn load_series(path: &str) -> Vec<Sample> {
         .collect()
 }
 
+/// Numbers from the 2026-09-14 battle test (sigil-chronos `sigil-kparam-battle`, run dir with sweeps/*.jsonl)
+/// and the live K-gauge series row that now carries K_fix. Every field is read, never typed.
+struct Battle {
+    fork_one_key: (f64, f64),
+    fork_one_key_41: (f64, f64),
+    fork_two_keys: (f64, f64),
+    fork_two_keys_41: (f64, f64),
+    sybil_1: (f64, f64),
+    sybil_1000: (f64, f64),
+    rate_slow: (f64, f64, f64),
+    rate_fast: (f64, f64, f64),
+    net_cells: usize,
+    net_kstar_max: f64,
+    net_kfix_max: f64,
+    fuzz_trials: u64,
+    fuzz_rejected: u64,
+    fuzz_rho_kc: f64,
+    fuzz_rho_kfix: f64,
+    live_kc: Option<f64>,
+    live_kfix: Option<f64>,
+    live_regime_fix: String,
+    live_persist: Option<f64>,
+    dir: String,
+}
+
+fn load_battle(dir: &str) -> Option<Battle> {
+    let rows = |name: &str| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(format!("{dir}/sweeps/{name}.jsonl"))
+            .map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+            .unwrap_or_default()
+    };
+    let f = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
+    let nz = |x: f64| if x == 0.0 { 0.0 } else { x }; // -0.0 from a zero-entropy product prints as "-0.00"
+    let pair = |v: &serde_json::Value| (nz(f(v, "k_star_unit")), nz(f(v, "k_fix")));
+    let fork = rows("fork0");
+    let pick = |name: &str| fork.iter().find(|r| r.get("scenario").and_then(|s| s.as_str()) == Some(name)).map(pair);
+    let sy = rows("sybil");
+    let syp = |keys: u64| sy.iter().find(|r| r.get("producers").and_then(|x| x.as_u64()) == Some(keys) && f(r, "fork_p") == 0.2).map(pair);
+    let ra = rows("rate");
+    let rp = |bps: f64| ra.iter().find(|r| f(r, "bps") == bps).map(|r| (bps, nz(f(r, "k_star_unit")), nz(f(r, "k_fix"))));
+    let net: Vec<serde_json::Value> = rows("net").into_iter().filter(|r| r.get("scenario").and_then(|s| s.as_str()) == Some("one_honest_producer")).collect();
+    let fz = rows("fuzz").into_iter().rev().find(|r| r.get("scenario").and_then(|s| s.as_str()) == Some("fuzz_summary"))?;
+    let live = std::env::var("SIGIL_KGAUGE_JSONL").ok().and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| t.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()));
+    Some(Battle {
+        fork_one_key: pick("equivocation_one_key_ds0")?,
+        fork_one_key_41: pick("equivocation_one_key_ds0_persist41")?,
+        fork_two_keys: pick("two_keys_same_fork_ds1")?,
+        fork_two_keys_41: pick("two_keys_same_fork_ds1_persist41")?,
+        sybil_1: syp(1)?,
+        sybil_1000: syp(1000)?,
+        rate_slow: rp(0.1)?,
+        rate_fast: rp(10000.0)?,
+        net_cells: net.len(),
+        net_kstar_max: net.iter().map(|r| f(r, "k_star_unit")).fold(0.0, f64::max),
+        net_kfix_max: net.iter().map(|r| f(r, "k_fix")).fold(0.0, f64::max),
+        fuzz_trials: fz.get("trials").and_then(|x| x.as_u64()).unwrap_or(0),
+        fuzz_rejected: f(&fz, "rejected_total") as u64,
+        fuzz_rho_kc: f(&fz, "spearman_kc_vs_rejected"),
+        fuzz_rho_kfix: f(&fz, "spearman_kfix_vs_rejected"),
+        live_kc: live.as_ref().and_then(|v| v.get("K_C")).and_then(|x| x.as_f64()),
+        live_kfix: live.as_ref().and_then(|v| v.get("K_fix")).and_then(|x| x.as_f64()),
+        live_regime_fix: live.as_ref().and_then(|v| v.get("regime_fix")).and_then(|x| x.as_str()).unwrap_or("n/a").to_string(),
+        live_persist: live.as_ref().and_then(|v| v.get("k_fix")).and_then(|k| k.get("persistence_blocks")).and_then(|x| x.as_f64()),
+        dir: dir.to_string(),
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let json_path = args.get(1).map(String::as_str).unwrap_or("crates/flux-arxiv-latex/k_parameter.arxiv.json");
     let out_dir = args.get(2).map(String::as_str).unwrap_or("/home/storage/claude-code/k-parameter-paper");
     let gauge = args.get(3).and_then(|p| load_gauge(p));
     let series = args.get(4).map(|p| load_series(p)).unwrap_or_default();
+    let battle = load_battle(&std::env::var("SIGIL_KPARAM_BATTLE_DIR").unwrap_or_else(|_| "/home/storage/sigil-scratch/sigil-kparam-2026-09-14".into()));
 
     let papers: Vec<ArxivPaper> = std::fs::read_to_string(json_path)
         .ok()
@@ -540,7 +609,11 @@ fn main() {
              Margolus--Levitin orthogonalisation count in disguise, $K^{{*}}=2\\pi\\sqrt{{\\tfrac{{\\pi}}{{2}}N_{{\\mathrm{{ML}}}}\\Delta s}}$, \
              to a maximum relative deviation of ${}$ --- which is the first physical reason that $K^{{*}}\\approx1$ is a \
              boundary. (3) It reads the gauge that Quillon Graph mainnet serves today and states, without softening, \
-             which of its fields are measurements and which are plumbing. All constants are CODATA 2022 via \
+             which of its fields are measurements and which are plumbing. (4) Since 2026-09-14 it also carries the \
+             battle test: the dimensionless form was driven through the real chain code under chronos and failed --- its \
+             product with $\\Delta s$ hides a one-key fork --- and the repaired gauge \
+             $K_{{\\mathrm{{fix}}}}=2\\pi\\sqrt{{\\Delta H_c\\,\\tau_d\\,w_S}}$ that passed every sweep is stated and read live. \
+             All constants are CODATA 2022 via \
              \\texttt{{flux-science}}; a claimed coupling $\\hat\\alpha_G=6.96\\times10^{{-10}}$ from earlier work is carried \
              as \\emph{{claimed}}, beside the CODATA-derivable proton coupling $Gm_p^2/\\hbar c={}$.\n\\end{{abstract}}\n",
             sci(v1_hbar_factor),
@@ -806,6 +879,88 @@ fn main() {
              clock synchronisation, and $K_C$ is the residual after it."
                 .to_string(),
         ))
+        .add(Block::Section("The Battle Test and the Repaired Gauge (2026-09-14)".into()))
+        .add(para(
+            "Everything up to here is calibration: units, constants, the reason for the boundary. A thermometer can be \
+             perfectly calibrated and still be pointed at the wrong thing, so on 2026-09-14 the dimensionless gauge was \
+             taken out of the paper and driven, as a formula, through the real chain code --- the \\texttt{sigil-dagknight} \
+             Braid with GHOSTDAG colouring, the real \\texttt{SigilSimNode} state chokepoint under \\texttt{flux-chronos}, \
+             two thousand seeded two-node fuzz trials, and the live \\texttt{sigil-g2} network for ten hours --- eight sweeps \
+             in all, every value stored as JSONL and recomputed from its stored inputs by an independent pass (zero \
+             mismatches). Full report and raw data: \\url{https://sigilgraph.org/downloads/sigil-kparam-battle-2026-09-14.pdf}."
+                .to_string(),
+        ))
+        .add(para(
+            "\\textbf{The flaw is not in the arithmetic; it is in what the square root multiplies.} $K^{*}$ is a \\emph{product} \
+             of how much the network disagrees ($\\Delta H$) and how many different producers signed ($\\Delta s$). A product is \
+             zero when either factor is zero, and on the live chain the second factor \\emph{is} zero --- one producer mints \
+             every block. So the dial reads 0 (``stable'') no matter how badly the chain forks. Three smaller flaws ride \
+             along: the factor $t$ makes the same disagreement read $\\sqrt{t}$ worse on a slow chain than a fast one; the \
+             $\\hbar$ form can never land in the ``stable'' band for any physical energy (its floor at $N_{\\mathrm{ML}}=1$, \
+             $\\Delta s=1$ is $2\\pi\\sqrt{\\pi/2}=7.87$, above the critical line, and $K^{*}=1$ corresponds to $0.016$ of a \
+             tick); and read as an entropy \\emph{change}, $\\Delta H$ goes negative and the root is undefined. The identity \
+             of Section~3 stands --- $K^{*}$ \\emph{is} the Margolus--Levitin count in disguise --- but that count is an \
+             \\emph{agreement cost}, not a stress level with a threshold at 1."
+                .to_string(),
+        ))
+        .add(para(
+            "\\textbf{The repair} keeps the shape and changes the two things the test convicted, what multiplies $\\Delta H$ and \
+             what $\\Delta H$ is: \
+             $$K_{\\mathrm{fix}} = 2\\pi\\,\\sqrt{\\Delta H_c\\,\\tau_d\\,w_S},\\qquad \
+             \\tau_d=\\frac{1+\\min(d,D)/D}{2}\\in[\\tfrac12,1],\\qquad w_S = 1-\\frac{H_{\\mathrm{norm}}}{4}\\in[\\tfrac34,1].$$ \
+             $\\Delta H_c\\in[0,1]$ is weighted \\emph{state disagreement} (tip mismatch 0.20, state-root mismatch 0.35, \
+             finality gap 0.20, semantic conflicts 0.25), non-negative by definition; $d$ is how many \\emph{blocks} the \
+             disagreement has persisted against the finality depth $D=512$, replacing the seconds and the $\\hbar$ so that a \
+             chain that speeds up does not ``cool''; $H_{\\mathrm{norm}}=\\Delta s/\\log_2 N$ keeps the proposer entropy, \
+             but as a bounded concentration weight: one key disagreeing with itself is the \\emph{worst} case, zero \
+             disagreement reads 0 for any key count, and rotating keys can move the dial by at most $\\sqrt{4/3}$, about \
+             15\\%. The ladder is unchanged ($<1$ stable, $<3$ elevated, $\\ge3$ critical); the maximum is $2\\pi$. A first \
+             cut used $H_{\\mathrm{norm}}/2$ and let a persistent two-party split read 2.97 (``elevated''); a full state \
+             divergence must stay critical whatever the key count, which is why the weight is $/4$."
+                .to_string(),
+        ))
+        .add(Block::Raw(match &battle {
+            Some(b) => format!(
+                "\\begin{{center}}\\begin{{tabular}}{{p{{6.4cm}}rr}}\\toprule\n\
+                 \\textbf{{scenario (real chain code under chronos)}} & \\textbf{{$K^{{*}}$, $\\hbar:=1$}} & \\textbf{{$K_{{\\mathrm{{fix}}}}$}} \\\\\\midrule\n\
+                 one producer forks against itself (24-block prefix, block 25 minted twice, followers on different wallet roots), fresh & {:.2} & {:.2} \\\\\n\
+                 \\quad the same, after 41 blocks of persistence & {:.2} & {:.2} \\\\\n\
+                 the identical fork signed with two keys, fresh / after 41 blocks & {:.2} / {:.2} & {:.2} / {:.2} \\\\\n\
+                 one entity, same 20\\% sibling blocks, 1 key $\\to$ 1000 rotating keys & {:.2} $\\to$ {:.2} & {:.2} $\\to$ {:.2} \\\\\n\
+                 identical DAG at {} and {} blocks/s & {:.1} $\\to$ {:.2} & {:.2} $\\to$ {:.2} \\\\\n\
+                 one honest producer under latency / loss / partition, {} cells (max) & {:.2} & {:.2} \\\\\n\
+                 {} seeded two-node trials, {} rejected blocks: Spearman $\\rho$ vs rejects & undefined (never moved) & {:.3} \\\\\\bottomrule\n\
+                 \\end{{tabular}}\\end{{center}}\n\n\
+                 The $K_C$ gauge that has run on \\texttt{{sigil-g2}} since 2026-09-07 already kept the lone-producer fork \
+                 visible through an additive $\\epsilon$ floor and reached $\\rho={:.3}$ on the same fuzz; it still carries the \
+                 seconds. $K_{{\\mathrm{{fix}}}}$ was shipped beside it on 2026-09-14 in the MCP gauge, the wallet chip and the \
+                 site modal. Live at generation time ({}): $K_C={}$, $K_{{\\mathrm{{fix}}}}={}$ ({}), persistence $d={}$ blocks. \
+                 Run directory: \\url{{{}}}.\n\n",
+                b.fork_one_key.0, b.fork_one_key.1, b.fork_one_key_41.0, b.fork_one_key_41.1,
+                b.fork_two_keys.0, b.fork_two_keys_41.0, b.fork_two_keys.1, b.fork_two_keys_41.1,
+                b.sybil_1.0, b.sybil_1000.0, b.sybil_1.1, b.sybil_1000.1,
+                b.rate_slow.0, b.rate_fast.0, b.rate_slow.1, b.rate_fast.1, b.rate_slow.2, b.rate_fast.2,
+                b.net_cells, b.net_kstar_max, b.net_kfix_max,
+                b.fuzz_trials, b.fuzz_rejected, b.fuzz_rho_kfix, b.fuzz_rho_kc,
+                sigil_src,
+                b.live_kc.map(|x| format!("{x:.3}")).unwrap_or_else(|| "n/a".into()),
+                b.live_kfix.map(|x| format!("{x:.3}")).unwrap_or_else(|| "n/a".into()),
+                b.live_regime_fix,
+                b.live_persist.map(|x| format!("{x:.0}")).unwrap_or_else(|| "n/a".into()),
+                b.dir.clone()
+            ),
+            None => "\\emph{Battle-test data not found at generation time (set SIGIL\\_KPARAM\\_BATTLE\\_DIR); the numbers are in the linked report.}\n\n".to_string(),
+        }))
+        .add(para(
+            "What the repair does \\emph{not} fix, said plainly: a fork no node ever observes contributes only through the \
+             finality-gap channel; the four channel weights are the provisional ones $K_C$ uses and have not been calibrated \
+             against incidents; the 15\\% key-rotation lever is bounded, not zero; and in the network sweep persistence was \
+             measured as a height gap, so a same-height fork is under-counted there. The three $\\hbar$-free variants that \
+             shared the name $K^{*}$ in the code (a window-time one, an HTTP-round-trip one, and the legacy site modal) are \
+             retired or labelled; the paper's $\\hbar$ form survives as the agreement cost $A=N_{\\mathrm{ML}}$ of the \
+             previous section, which is what it always was."
+                .to_string(),
+        ))
         .add(Block::Section("What Is Measured, Derived, Claimed".into()))
         .add(Block::Raw(
             "\\begin{center}\\begin{tabular}{p{7cm}p{2.4cm}p{5.6cm}}\\toprule\n\
@@ -823,6 +978,9 @@ fn main() {
              three-clock table, $A$, Tolman--Ehrenfest gradient & DERIVED & CODATA, computed here \\\\\n\
              SIGIL block rate, finality time & MEASURED & K-gauge series line named in the text \\\\\n\
              $T_L$, $T_F$ (ledger / finality-horizon temperature) & ANALOGY & thermal-time and Unruh forms applied to a clock \\\\\n\
+             battle-test sweeps (fork, Sybil, rate, loss, fuzz) & MEASURED & real Braid + SigilSimNode under chronos, JSONL recomputed \\\\\n\
+             $K_{\\mathrm{fix}}$ properties (worst case, rate-invariant, bounded lever, max $2\\pi$) & DERIVED + TESTED & unit tests in the harness and the MCP gauge \\\\\n\
+             channel weights 0.20/0.35/0.20/0.25, ladder 1/3 & PROVISIONAL & not calibrated against incidents \\\\\n\
              $n\\ge2f+1$ via Berry phase & CONJECTURE & no proof, no adversarial test \\\\\\bottomrule\n\
              \\end{tabular}\\end{center}\n\n"
                 .to_string(),
@@ -847,7 +1005,8 @@ fn main() {
              calibration is boring, unglamorous, and the only thing that separates a measurement from a mood. This paper \
              is the calibration: the units balanced, the constants traced, the boundary at 1 given a reason, and the live \
              instrument read with its plumbing faults named beside its readings. The invention stands. It now also \
-             stands on something."
+             stands on something --- and, since the battle test, it has been dropped, measured where it broke, and \
+             repaired without losing its shape."
                 .to_string(),
         ));
 

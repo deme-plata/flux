@@ -84,6 +84,11 @@ pub const W_FINALITY: f64 = 0.20;
 pub const W_CONFLICT: f64 = 0.25;
 /// A peer further than this many finality depths from us is catching up, not disagreeing.
 pub const SYNCING_DEPTHS: f64 = 2.0;
+/// K_fix (2026-09-14 battle test, report §5): proposer entropy enters ONLY as a bounded
+/// concentration weight w_S = 1 − H_norm/W_S_DIV ∈ [¾, 1]. /4, not /2: with /2 a persistent
+/// two-party state split read 2.97 "elevated"; a full state divergence must stay critical
+/// whatever the key count.
+pub const W_S_DIV: f64 = 4.0;
 
 static WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -176,6 +181,13 @@ pub(crate) struct ConsensusReading {
     pub k_c: f64,
     pub k_c_low: f64,
     pub k_c_high: f64,
+    pub k_fix: f64,
+    pub k_fix_high: f64,
+    pub regime_fix: &'static str,
+    pub persist_blocks: f64,
+    pub tau_d: f64,
+    pub w_s: f64,
+    pub persist_basis: String,
     pub regime: &'static str,
     pub confidence: &'static str,
     pub delta_h_consensus: f64,
@@ -217,6 +229,21 @@ pub(crate) fn entropy_resolution_bits(n: usize) -> f64 {
 pub(crate) fn k_c_of(delta_h: f64, tau_ratio: f64, h_norm: f64) -> f64 {
     let plur = EPSILON_FLOOR + (1.0 - EPSILON_FLOOR) * h_norm.clamp(0.0, 1.0);
     2.0 * std::f64::consts::PI * (delta_h.max(0.0) * tau_ratio.max(0.0) * plur).sqrt()
+}
+
+/// K_fix = 2π·√(ΔH_c · τ_d · w_S) — the repaired Kristensen gauge, shipped beside K_C.
+///   τ_d = (1 + min(d, final_depth)/final_depth)/2 ∈ [½, 1]: persistence in BLOCKS (mean spine gap
+///         to converged peers + merge-parent blocks + red blocks in the window). Replaces the
+///         seconds and ħ of the paper form: a chain that speeds up does not "cool", a fork that
+///         outlives finality reads worst.
+///   w_S  = 1 − H_norm/4 ∈ [¾, 1]: one key disagreeing with itself is the WORST case; rotating keys
+///         moves K by ≤ 15 % and never raises it; zero disagreement reads 0 for any key count.
+/// Same ΔH_c and the same ladder as K_C; maximum 2π. Measured against every sweep of the battle
+/// test: one-key fork 3.98 (K* read 0), identical DAG 0.80 at 0.1 and 10,000 blk/s, fuzz ρ = 0.97.
+pub(crate) fn tau_d_of(persist_blocks: f64) -> f64 { (1.0 + persist_blocks.clamp(0.0, FINAL_DEPTH) / FINAL_DEPTH) / 2.0 }
+pub(crate) fn w_s_of(h_norm: f64) -> f64 { 1.0 - h_norm.clamp(0.0, 1.0) / W_S_DIV }
+pub(crate) fn k_fix_of(delta_h: f64, persist_blocks: f64, h_norm: f64) -> f64 {
+    2.0 * std::f64::consts::PI * (delta_h.clamp(0.0, 1.0) * tau_d_of(persist_blocks) * w_s_of(h_norm)).sqrt()
 }
 
 pub(crate) fn regime_of(k_c: f64) -> &'static str {
@@ -295,8 +322,16 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
     let d_hi = (seen + (1.0 - omega) * (1.0 - seen)).min(1.0);
 
     let k_c = k_c_of(delta_h, tau_ratio, h_norm);
+
+    // ── K_fix: persistence in blocks, entropy as a bounded weight ──
+    let gap_blocks = if converged.is_empty() { 0.0 } else { converged.iter().map(|&h| (h as f64 - i.local_height as f64).abs()).sum::<f64>() / converged.len() as f64 };
+    let persist_blocks = (gap_blocks + i.merging_blocks as f64 + i.red_blocks as f64).min(FINAL_DEPTH);
+    let persist_basis = format!("mean spine gap to {} converged peer(s) {:.0} blk + {} merge-parent + {} red blocks in the window, capped at final_depth {}", converged.len(), gap_blocks, i.merging_blocks, i.red_blocks, FINAL_DEPTH as u64);
+    let k_fix = k_fix_of(delta_h, persist_blocks, h_norm);
     ConsensusReading {
         k_c, k_c_low: k_c_of(d_lo, tau_ratio, h_norm), k_c_high: k_c_of(d_hi, tau_ratio, h_norm),
+        k_fix, k_fix_high: k_fix_of(d_hi, persist_blocks, h_norm), regime_fix: regime_of(k_fix),
+        persist_blocks, tau_d: tau_d_of(persist_blocks), w_s: w_s_of(h_norm), persist_basis,
         regime: regime_of(k_c), confidence: confidence_of(omega),
         delta_h_consensus: delta_h, missing_weight, channels,
         h_norm, n_eff, dominant_share, entropy_resolution_bits: entropy_resolution_bits(i.blocks),
@@ -457,9 +492,17 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
         "network": "sigil-g2",
         "K_C": c.k_c, "K_C_low": c.k_c_low, "K_C_high": c.k_c_high,
         "regime": c.regime, "confidence": c.confidence,
+        "K_fix": c.k_fix, "K_fix_high": c.k_fix_high, "regime_fix": c.regime_fix,
+        "k_fix": {
+            "definition": "K_fix = 2π·√(ΔH_c · τ_d · w_S); τ_d = (1 + min(d,512)/512)/2 with d = persistence in BLOCKS; w_S = 1 − H_norm/4 ∈ [¾,1] (proposer entropy as a bounded concentration weight). Same ΔH_c and ladder as K_C; no seconds, no ħ, no ε. Shipped 2026-09-14 after the battle test — sigilgraph.org/downloads/sigil-kparam-battle-2026-09-14.pdf §5.",
+            "value": c.k_fix, "high": c.k_fix_high, "regime": c.regime_fix, "lower_bound": true,
+            "persistence_blocks": c.persist_blocks, "tau_d": c.tau_d, "w_s": c.w_s, "h_norm": c.h_norm, "delta_H_consensus": c.delta_h_consensus,
+            "persistence_basis": c.persist_basis,
+            "vs_K_C": "K_C carries τ/τ₀ in seconds, so one and the same disagreement reads ~4× lower at 110 blk/s than at 8 blk/s; K_fix does not move with block rate. Both keep a lone-producer fork visible (K_C by its ε floor); K_fix reads it as the WORST case.",
+        },
         "definition": "K_C = 2π·√(ΔH_c · (τ/τ₀) · [ε + (1−ε)·H_norm]); ΔH_c = Σ wᵢ·Dᵢ over the AVAILABLE state-disagreement channels (tip 0.20, state-root 0.35, finality 0.20, semantic 0.25) — a LOWER bound; ε = 0.1; H_norm = Δs / log₂(N_producers); τ = final_depth/block-rate (measured finality time), τ₀ = 100 s. Dimensionless ENGINEERING score, no ħ — NOT a Margolus–Levitin comparison. Ω sets the confidence band, it does not multiply K_C. Regime: <1 stable · 1–3 elevated · ≥3 critical (provisional thresholds).",
-        "reading": format!("K_C = {:.3} [{:.3}, {:.3}] · Ω = {:.3} ({} confidence) · ΔH_c = {:.4} (lower bound, {:.0}% of channel weight unmeasured) · N_eff = {:.2} of {} producer(s), dominant {:.1}%",
-            c.k_c, c.k_c_low, c.k_c_high, c.omega, c.confidence, c.delta_h_consensus, c.missing_weight * 100.0, c.n_eff, distinct, c.dominant_share * 100.0),
+        "reading": format!("K_C = {:.3} [{:.3}, {:.3}] · K_fix = {:.3} ({}, d = {:.0} blk) · Ω = {:.3} ({} confidence) · ΔH_c = {:.4} (lower bound, {:.0}% of channel weight unmeasured) · N_eff = {:.2} of {} producer(s), dominant {:.1}%",
+            c.k_c, c.k_c_low, c.k_c_high, c.k_fix, c.regime_fix, c.persist_blocks, c.omega, c.confidence, c.delta_h_consensus, c.missing_weight * 100.0, c.n_eff, distinct, c.dominant_share * 100.0),
         "state_disagreement": {
             "delta_H_consensus": c.delta_h_consensus, "lower_bound": true, "missing_weight": c.missing_weight,
             "channels": channels_json,
@@ -658,6 +701,39 @@ mod tests {
         let expected = 2.0 * std::f64::consts::PI * (c.delta_h_consensus * c.tau_ratio * EPSILON_FLOOR).sqrt();
         assert!((c.k_c - expected).abs() < 1e-9);
         assert_ne!(c.regime, "stable");
+    }
+
+    #[test]
+    fn k_fix_ships_beside_k_c_and_keeps_its_battle_test_properties() {
+        // a lone producer forking against itself: K_fix reads it as the WORST case
+        let mut i = base();
+        i.distinct_producers = 1; i.entropy_bits = 0.0; i.dominant_count = 200;
+        i.merging_blocks = 200; i.red_blocks = 200;
+        let one = consensus_gauge(&i);
+        assert!(one.k_fix >= 3.0, "{}", one.k_fix);
+        assert_eq!(one.regime_fix, "critical");
+        // the same disagreement with two keys never reads worse, and at most 15 % lower
+        let mut two = i.clone(); two.distinct_producers = 2; two.entropy_bits = 1.0; two.dominant_count = 100;
+        let t = consensus_gauge(&two);
+        assert!(t.k_fix <= one.k_fix + 1e-12 && t.k_fix >= one.k_fix * 0.75f64.sqrt() - 1e-9, "{} vs {}", t.k_fix, one.k_fix);
+        // block rate does not enter K_fix (it does enter K_C)
+        let mut fast = i.clone(); fast.block_rate_bps = 110.0;
+        let mut slow = i.clone(); slow.block_rate_bps = 8.0;
+        let (f, s) = (consensus_gauge(&fast), consensus_gauge(&slow));
+        assert!((f.k_fix - s.k_fix).abs() < 1e-12);
+        assert!(f.k_c < s.k_c);
+        // zero disagreement reads 0 whatever the key count
+        let mut quiet = base();
+        quiet.merging_blocks = 0; quiet.red_blocks = 0; quiet.rejects_delta.clear();
+        quiet.entropy_bits = 2.0; quiet.distinct_producers = 4; quiet.dominant_count = 50;
+        quiet.peer_heights = vec![quiet.local_height]; quiet.state_root_verdicts = vec![true];
+        let q = consensus_gauge(&quiet);
+        assert_eq!(q.k_fix, 0.0, "{} (ΔH_c {})", q.k_fix, q.delta_h_consensus);
+        // persistence raises, is capped at final_depth, the maximum is 2π, never NaN
+        assert!(k_fix_of(0.5, 0.0, 0.0) < k_fix_of(0.5, 256.0, 0.0));
+        assert_eq!(k_fix_of(0.5, 512.0, 0.0), k_fix_of(0.5, 9999.0, 0.0));
+        assert!((k_fix_of(1.0, 512.0, 0.0) - 2.0 * std::f64::consts::PI).abs() < 1e-9);
+        assert!(!k_fix_of(-1.0, -1.0, 9.0).is_nan());
     }
 
     #[test]

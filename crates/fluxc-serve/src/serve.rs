@@ -1039,8 +1039,9 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
     };
     // rebuild the request line + headers (header keys are already lowercased by the parser)
     let mut head = format!("{} {} HTTP/1.1\r\n", req.method, req.path);
+    let pass_accept_encoding = std::env::var("FLUX_PROXY_PASS_ACCEPT_ENCODING").map(|v| v == "1").unwrap_or(false);
     for (k, v) in &req.headers {
-        if k == "connection" || k == "content-length" { continue; }
+        if !proxy_forwards_header(k, pass_accept_encoding) { continue; }
         // SEC-011: never forward a header carrying CR/LF — header-injection guard
         // at the sink (the parser also drops these, this is defense-in-depth).
         if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
@@ -1061,6 +1062,30 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
     }
     let _ = stream.flush();
     true
+}
+
+/// Which client request headers the reverse proxy forwards upstream.
+///
+/// `accept-encoding` is DROPPED by default (2026-09-15). The gate sits between q-flux
+/// (TLS, public) and sigil-api (:18181). The day sigil-api grew a gzip/zstd
+/// `CompressionLayer` (sigil f4051bd8, deployed 09-14), every HTTP/1.1 client behind
+/// q-flux broke: q-flux relays a compressed chunked upstream body but loses the
+/// `content-encoding` header on its HTTP/1.1 path (a client that never asked for gzip got
+/// 1f 8b… as "JSON" → the Android wallet's "Expected leading [0-9a-fA-F] character but was
+/// 0x1f"), and answers a client that DID ask with the header and an EMPTY body. HTTP/2
+/// (browsers) was fine, which is why the web wallet kept working. q-flux is Quillon's
+/// proxy and off-limits from SIGIL sessions, so the honest place to stop the compression
+/// is here: strip the request header and the node answers identity — exactly the
+/// pre-09-14 wire that every client already handled. Direct clients of :18181 (MCP,
+/// happysrv, curl) still get compression. Opt back in with
+/// `FLUX_PROXY_PASS_ACCEPT_ENCODING=1` on a deployment whose front hop is known to relay
+/// `content-encoding` faithfully.
+fn proxy_forwards_header(key: &str, pass_accept_encoding: bool) -> bool {
+    match key {
+        "connection" | "content-length" => false,
+        "accept-encoding" => pass_accept_encoding,
+        _ => true,
+    }
 }
 
 fn serve_sse<S: Read + Write>(stream: &mut S, stats: &LiveStats) {
@@ -1215,6 +1240,18 @@ fn stream_file_body<S: Write>(stream: &mut S, f: &FileBody) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_drops_accept_encoding_unless_opted_in() {
+        // the 2026-09-15 phone outage: q-flux/HTTP1.1 cannot relay a compressed upstream body
+        assert!(!super::proxy_forwards_header("accept-encoding", false));
+        assert!(super::proxy_forwards_header("accept-encoding", true));
+        assert!(!super::proxy_forwards_header("connection", true));
+        assert!(!super::proxy_forwards_header("content-length", true));
+        assert!(super::proxy_forwards_header("accept", false));
+        assert!(super::proxy_forwards_header("user-agent", false));
+        assert!(super::proxy_forwards_header("content-type", false));
+    }
+
     /// A shielded-spend-sized body (210 KB) must arrive whole. Before `read_request`
     /// the server read one 8 KiB buffer and 413'd anything larger — every private
     /// payment posted through sigilgraph.org, measured 2026-09-05.

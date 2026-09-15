@@ -52,6 +52,18 @@
 use crate::PI;
 use serde::{Deserialize, Serialize};
 
+/// serde_json cannot carry a u128 above u64::MAX without `arbitrary_precision` ("number out
+/// of range" — measured 2026-09-15 when four 10^5 hands gave a 10^20 range), so u128 fields
+/// travel as decimal strings.
+pub mod u128_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> { s.serialize_str(&v.to_string()) }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse::<u128>().map_err(serde::de::Error::custom)
+    }
+}
+
 /// One hand of the clock: a truncated oscillator with integer period `period` and `Z·period`
 /// states (Z = the paper's truncation-scale multiplier).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +138,7 @@ pub fn mulmod(a: u128, b: u128, m: u128) -> u128 {
 pub struct Reconstruction {
     /// `t' + r'`.
     pub t: f64,
+    #[serde(with = "u128_str")]
     pub integer: u128,
     pub fractional: f64,
     /// The fractional parts straddled an integer boundary (nearest-rounding branch).
@@ -136,6 +149,7 @@ pub struct Reconstruction {
     pub residual_std: f64,
     /// `Δ/√m`.
     pub uncertainty: f64,
+    #[serde(with = "u128_str")]
     pub range: u128,
 }
 
@@ -179,6 +193,7 @@ pub struct BoundedReconstruction {
     pub consistent: bool,
     /// Index of the hand whose remainder is inconsistent with the others (if identifiable).
     pub suspect: Option<usize>,
+    #[serde(with = "u128_str")]
     pub bound: u128,
     /// Probability that a subset still containing a liar lands inside the bound by chance.
     pub false_accept_p: f64,
@@ -288,6 +303,7 @@ pub struct SimulationReport {
     pub periods: Vec<u64>,
     pub z: u32,
     pub trials: u32,
+    #[serde(with = "u128_str")]
     pub range: u128,
     /// `P(|error| < 1)` — the number printed in each panel of Fig. 2.
     pub p_err_lt_1: f64,
@@ -416,6 +432,18 @@ mod tests {
         // Z = 1 fails mostly by catastrophic integer errors; Z = 7 almost never.
         assert!(reps[0].catastrophic > 700);
         assert!(reps[3].catastrophic < 15);
+    }
+
+    #[test]
+    fn u128_fields_survive_json_above_u64() {
+        let p = [100_003u64, 100_019, 100_043, 100_049]; // range 1.0e20 > u64::MAX
+        let m: Vec<f64> = p.iter().map(|&x| (1_789_496_985u64 % x) as f64 + 0.73).collect();
+        let r = reconstruct(&m, &p).unwrap();
+        assert!(r.range > u64::MAX as u128);
+        let js = serde_json::to_string(&r).expect("u128 as string");
+        let back: Reconstruction = serde_json::from_str(&js).unwrap();
+        assert_eq!(back.range, r.range);
+        assert_eq!(back.integer, 1_789_496_985);
     }
 
     #[test]

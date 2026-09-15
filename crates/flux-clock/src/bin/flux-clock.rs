@@ -74,7 +74,15 @@ fn main() {
                     let r = col.reading(bound);
                     let local = if unit.starts_with("block") { height(&node) } else { None };
                     let scale: f64 = unit.split('/').nth(1).and_then(|s| s.parse().ok()).unwrap_or(1.0);
-                    let v = json!({"event": "flux_clock", "kind": "decentralized", "peers_connected": nm.peer_count(), "reading": r, "local_for_comparison": if unit.starts_with("block") { local.map(|h| h as f64 / scale) } else { Some(flux_clock::now_unix()) }, "local_height": local});
+                    let newest_s = r.newest_envelope_ts_ms as f64 / 1000.0;
+                    // seconds: the composed UT1 vs the newest envelope's wall clock (UT1−UTC applied) = peer clock skew
+                    let ut1 = get_json(&format!("{earth_url}/v1/earth/latest")).ok().and_then(|e| e["now"]["ut1utc_today"].as_f64()).unwrap_or(0.0);
+                    let composed_t = r.result.reconstruction.as_ref().map(|x| x.t);
+                    let skew_s = if unit == "second" { composed_t.map(|t| t - (newest_s + ut1)) } else { None };
+                    let v = json!({"event": "flux_clock", "kind": "decentralized", "hands_heard": r.hands, "reading": r,
+                        "newest_envelope_iso_utc": newest_s, "composed_minus_newest_envelope_s": skew_s,
+                        "local_now_for_comparison": if unit.starts_with("block") { local.map(|h| h as f64 / scale) } else { Some(flux_clock::now_unix() + ut1) },
+                        "local_height_now": local, "note_on_comparison": "block units: the local height is read AFTER the window, the chain moved on; seconds: composed − newest envelope wall-clock = skew between the peers' clocks"});
                     if webhook { fluxc_webhooks::webhook::auto_dispatch("flux_clock", v.clone()); }
                     println!("{}", serde_json::to_string_pretty(&v).unwrap());
                 }

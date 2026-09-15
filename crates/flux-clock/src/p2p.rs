@@ -78,6 +78,8 @@ pub struct CollectorReading {
     pub bound: String,
     pub covers_bound: bool,
     pub result: crt::BoundedReconstruction,
+    /// Newest envelope timestamp — compare the composed time against THIS instant, not "now".
+    pub newest_envelope_ts_ms: u64,
     pub note: String,
 }
 
@@ -99,7 +101,11 @@ impl HandCollector {
     /// Reconstruct against a known bound (e.g. "heights are below 10^8").
     pub fn reading(&self, bound: u128) -> CollectorReading {
         let periods = self.periods();
-        let remainders: Vec<f64> = self.hands.values().map(|h| h.remainder).collect();
+        // unit "second": a hand's remainder is its own clock mod P at its own instant ts; shift
+        // every hand to the newest instant along its own clock (rate 1) so the composition
+        // refers to ONE moment and the residual measures clock offsets, not sampling skew.
+        let newest_ts = self.hands.values().map(|h| h.ts_ms).max().unwrap_or(0) as f64 / 1000.0;
+        let remainders: Vec<f64> = self.hands.values().map(|h| if self.unit == "second" { (h.remainder + (newest_ts - h.ts_ms as f64 / 1000.0)).rem_euclid(h.period as f64) } else { h.remainder }).collect();
         let peers: Vec<String> = self.hands.values().map(|h| h.node.clone()).collect();
         let range = self.range();
         let covers = range >= bound && !periods.is_empty();
@@ -113,7 +119,8 @@ impl HandCollector {
             crt::BoundedReconstruction { reconstruction: r, consistent: false, suspect: None, bound, false_accept_p: 1.0, note: format!("only {} hand(s): time known modulo {} (< bound {}) — need more independent peers", periods.len(), range, bound) }
         };
         let note = if covers { "the time exists only as this composition; no single peer published it".into() } else { "partial composition".into() };
-        CollectorReading { unit: self.unit.clone(), hands: periods.len(), peers, periods, remainders, range: range.to_string(), bound: bound.to_string(), covers_bound: covers, result, note }
+        let newest = self.hands.values().map(|h| h.ts_ms).max().unwrap_or(0);
+        CollectorReading { unit: self.unit.clone(), hands: periods.len(), peers, periods, remainders, range: range.to_string(), bound: bound.to_string(), covers_bound: covers, result, newest_envelope_ts_ms: newest, note }
     }
 }
 
@@ -137,15 +144,22 @@ pub mod net {
         Ok(nm)
     }
 
-    /// Publish one hand `ticks` times, `interval` apart, reading the time from `read_time`.
+    /// Publish one hand `ticks` times, reading the time from `read_time` at SHARED instants:
+    /// every hand samples at the next wall-clock multiple of `interval` (UTC), so hands on
+    /// NTP-disciplined machines measure within milliseconds of each other. The paper measures
+    /// every hand at the same `t`; without this alignment the collector composes readings taken
+    /// seconds apart and a perfectly honest peer looks like a liar (measured 2026-09-15).
     pub async fn run_hand<F: Fn() -> Option<f64>>(nm: &NetworkManager, node: &str, unit: &str, period: u64, z: u32, ticks: u32, interval: std::time::Duration, read_time: F) -> Vec<HandEnvelope> {
         let mut out = Vec::new();
+        let step = interval.as_secs_f64().max(0.05);
         for _ in 0..ticks {
+            let now = crate::now_unix();
+            let next = (now / step).floor() * step + step;
+            tokio::time::sleep(std::time::Duration::from_secs_f64((next - now).max(0.0))).await;
             if let Some(t) = read_time() {
                 let e = HandEnvelope::new(node, unit, period, t.rem_euclid(period as f64), z);
                 if nm.publish(CLOCK_TOPIC, e.encode()).is_ok() { out.push(e); }
             }
-            tokio::time::sleep(interval).await;
         }
         out
     }

@@ -11,7 +11,12 @@ pub fn get_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(&s).map_err(|e| format!("{url}: not JSON: {e}"))
 }
 
-pub fn height(node: &str) -> Option<u64> { get_json(&format!("{node}/v1/mining/challenge")).ok()?.get("height")?.as_u64() }
+/// The node's height. Producers answer `/v1/mining/challenge`; a FOLLOWER returns 503 there
+/// (it cannot hand out work), so fall back to `/v1/network/topology → data.local_view.height`.
+pub fn height(node: &str) -> Option<u64> {
+    if let Some(h) = get_json(&format!("{node}/v1/mining/challenge")).ok().and_then(|c| c.get("height")?.as_u64()) { return Some(h); }
+    get_json(&format!("{node}/v1/network/topology")).ok()?["data"]["local_view"]["height"].as_u64()
+}
 
 fn first_follower_height(topo: &Option<Value>) -> Option<u64> {
     topo.as_ref().and_then(|t| t["data"]["peer_views"].as_object()).and_then(|pv| pv.values().next()).and_then(|v| v["height"].as_u64())

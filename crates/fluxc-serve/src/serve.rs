@@ -1051,17 +1051,124 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
     head.push_str(&format!("content-length: {}\r\n\r\n", req.body.len()));
     if up.write_all(head.as_bytes()).is_err() || up.write_all(&req.body).is_err() { return true; }
     let _ = up.flush();
-    // copy the upstream response straight back (it is already valid HTTP)
+    // Read the upstream head first: a chunked, non-streaming response is DE-CHUNKED here and
+    // re-emitted with `content-length` (see `dechunk_response`). Everything else (SSE, an
+    // upstream that already sent content-length) is copied straight back.
+    let mut raw: Vec<u8> = Vec::with_capacity(16384);
     let mut buf = [0u8; 16384];
+    let mut head_end: Option<usize> = None;
     loop {
         match up.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => { if stream.write_all(&buf[..n]).is_err() { break; } }
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if head_end.is_none() {
+                    head_end = find_head_end(&raw);
+                    if let Some(he) = head_end {
+                        let head = String::from_utf8_lossy(&raw[..he]).to_string();
+                        if !needs_dechunk(&head) {
+                            // stream mode: forward what we have, then copy the rest as it comes
+                            if stream.write_all(&raw).is_err() { return true; }
+                            raw.clear();
+                            loop {
+                                match up.read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => { if stream.write_all(&buf[..n]).is_err() { break; } }
+                                    Err(_) => break,
+                                }
+                            }
+                            let _ = stream.flush();
+                            return true;
+                        }
+                    }
+                }
+                if raw.len() > PROXY_DECHUNK_MAX { break; }
+            }
             Err(_) => break,
         }
     }
+    let out = match head_end {
+        Some(he) => dechunk_response(&raw[..he], &raw[he..]).unwrap_or_else(|| raw.clone()),
+        None => raw,
+    };
+    let _ = stream.write_all(&out);
     let _ = stream.flush();
     true
+}
+
+/// Largest de-chunked upstream response the proxy will buffer (a full
+/// `/v1/shielded/leaves` at pool capacity is ~40 MB).
+const PROXY_DECHUNK_MAX: usize = 96 * 1024 * 1024;
+
+fn find_head_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Does this upstream response need de-chunking before it goes back out?
+///
+/// 2026-09-15, the phone outage's SECOND layer: q-flux (the public TLS hop, Quillon's, off
+/// limits from a SIGIL session) relays an HTTP/1.1 `transfer-encoding: chunked` upstream
+/// body with the chunk FRAMING removed but the header kept. Every HTTP/1.1 client then reads
+/// the first body byte as a chunk size — OkHttp's "Expected leading [0-9a-fA-F] character but
+/// was 0x7b" ('{'), curl's "Illegal or missing hexadecimal sequence in chunked-encoding".
+/// It surfaced when sigil-api's CompressionLayer (09-14) turned fixed-length JSON replies
+/// into chunked ones. HTTP/2 clients never saw it. So the gate turns a chunked, finite
+/// response back into a `content-length` one — the wire shape those routes had before —
+/// and leaves genuinely streaming bodies (SSE) alone.
+fn needs_dechunk(head: &str) -> bool {
+    let mut chunked = false;
+    let mut streaming = false;
+    for line in head.lines().skip(1) {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase());
+        if k == "transfer-encoding" && v.contains("chunked") { chunked = true; }
+        if k == "content-type" && v.starts_with("text/event-stream") { streaming = true; }
+    }
+    chunked && !streaming
+}
+
+/// Decode a chunked body. `None` if the framing is malformed or incomplete (the caller then
+/// forwards the bytes untouched rather than inventing a body).
+fn dechunk_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0usize;
+    loop {
+        let line_end = body[i..].windows(2).position(|w| w == b"\r\n")? + i;
+        let size_str = std::str::from_utf8(&body[i..line_end]).ok()?;
+        let size_str = size_str.split(';').next()?.trim();
+        let size = usize::from_str_radix(size_str, 16).ok()?;
+        i = line_end + 2;
+        if size == 0 {
+            return Some(out); // trailers, if any, are dropped
+        }
+        if i + size + 2 > body.len() { return None; }
+        out.extend_from_slice(&body[i..i + size]);
+        if &body[i + size..i + size + 2] != b"\r\n" { return None; }
+        i += size + 2;
+    }
+}
+
+/// Rebuild `head` without `transfer-encoding`, with `content-length`, followed by the
+/// de-chunked body. `None` when the body cannot be decoded.
+fn dechunk_response(head: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+    let decoded = dechunk_body(body)?;
+    let head = String::from_utf8_lossy(head);
+    let mut out = String::new();
+    for (n, line) in head.lines().enumerate() {
+        if n > 0 {
+            if let Some((k, _)) = line.split_once(':') {
+                let k = k.trim().to_ascii_lowercase();
+                if k == "transfer-encoding" || k == "content-length" { continue; }
+            }
+            if line.is_empty() { continue; }
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("content-length: {}\r\n\r\n", decoded.len()));
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&decoded);
+    Some(bytes)
 }
 
 /// Which client request headers the reverse proxy forwards upstream.
@@ -1240,6 +1347,33 @@ fn stream_file_body<S: Write>(stream: &mut S, f: &FileBody) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chunked_json_is_rewritten_to_content_length_but_sse_is_streamed() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nvary: accept-encoding\r\n\r\n";
+        assert!(super::needs_dechunk(head));
+        let sse = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+        assert!(!super::needs_dechunk(sse));
+        let fixed = "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n";
+        assert!(!super::needs_dechunk(fixed));
+        // the exact body the gate saw on 2026-09-15: one 0x10C chunk, then the terminator
+        let json = "{\"ok\":true,\"x\":1}";
+        let body = format!("{:x}\r\n{}\r\n0\r\n\r\n", json.len(), json);
+        let out = super::dechunk_response(head.as_bytes(), body.as_bytes()).unwrap();
+        let out_s = String::from_utf8(out).unwrap();
+        assert!(out_s.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(!out_s.to_ascii_lowercase().contains("transfer-encoding"));
+        assert!(out_s.contains("vary: accept-encoding\r\n"));
+        assert!(out_s.contains(&format!("content-length: {}\r\n\r\n{}", json.len(), json)));
+        assert!(out_s.ends_with(json));
+        // multi-chunk + chunk extension
+        let multi = b"3;ext=1\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
+        assert_eq!(super::dechunk_body(multi).unwrap(), b"abcde");
+        // malformed / truncated framing is refused, never guessed
+        assert!(super::dechunk_body(b"{\"ok\":true}").is_none());
+        assert!(super::dechunk_body(b"5\r\nab").is_none());
+        assert_eq!(super::find_head_end(b"HTTP/1.1 200 OK\r\na: b\r\n\r\nBODY"), Some(25));
+    }
+
     #[test]
     fn proxy_drops_accept_encoding_unless_opted_in() {
         // the 2026-09-15 phone outage: q-flux/HTTP1.1 cannot relay a compressed upstream body

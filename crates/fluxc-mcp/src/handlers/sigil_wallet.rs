@@ -550,7 +550,8 @@ fn wallet_setup_script(_a: &Value) -> String {
             "flux_sigil_wallet_network_status","flux_sigil_wallet_economy","flux_sigil_wallet_pools",
             "flux_sigil_wallet_tokens","flux_sigil_wallet_mining_status","flux_sigil_wallet_recent",
             "flux_sigil_wallet_faucet","flux_sigil_wallet_send",
-            "flux_sigil_wallet_openapi","flux_sigil_wallet_sdk"
+            "flux_sigil_wallet_openapi","flux_sigil_wallet_sdk",
+            "flux_sigil_wallet_clock","flux_sigil_clock_crt","flux_sigil_clock_hand","flux_sigil_clock_collect"
         ]
     }).to_string()
 }

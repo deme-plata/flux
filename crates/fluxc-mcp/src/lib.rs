@@ -38,6 +38,7 @@ fn build_registry() -> ToolRegistry {
     handlers::sigil_shielded::register(&mut registry);
     handlers::sigil_court::register(&mut registry);
     handlers::sigil_kgauge::register(&mut registry);
+    handlers::sigil_clock::register(&mut registry);
     handlers::sigil_realization::register(&mut registry);
     handlers::sigil_forge::register(&mut registry);
     handlers::agora_stargate::register(&mut registry);

@@ -62,3 +62,5 @@ sigil-dao-bridge-mcp = { path = "../sigil-dao-bridge-mcp" }
 # sigil-node/sigil-api already use for the flux crates.
 sigil-shield = { path = "../../../sigil/crates/sigil-shield" }
 flux-kgauge = { path = "../../../sigil/crates/flux-kgauge" }
+# Kristensen Time + the arXiv:2608.07938 Chinese-remainder clock (flux_sigil_wallet_clock).
+flux-clock = { path = "../flux-clock" }

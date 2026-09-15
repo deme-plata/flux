@@ -1,0 +1,27 @@
+[package]
+name = "flux-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kristensen Time for the SIGIL datacenter: the three clocks (seconds / Margolus–Levitin ticks / agreed ticks), the quantum Chinese-remainder clock of arXiv:2608.07938 (Nagar, Hamma, Palmero, Radzihovsky, Yang, Lloyd) as a reference implementation with its fault-tolerant reconstruction, the Earth-rotation hand (IERS ERA) and a decentralized CRT clock whose hands live on different flux-p2p peers"
+
+[features]
+default = ["p2p"]
+# The decentralized clock: each peer holds ONE hand (one coprime period) and gossips only its
+# remainder; the time exists only as the CRT composition of independent peers.
+p2p = ["dep:flux-p2p", "dep:tokio"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+flux-p2p = { path = "../flux-p2p", optional = true }
+tokio = { workspace = true, optional = true }
+# The CLI reads the live node + earth feed and fires the `flux_clock` webhook event.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+fluxc-webhooks = { path = "../fluxc-webhooks" }
+
+[[bin]]
+name = "flux-clock"
+path = "src/bin/flux-clock.rs"

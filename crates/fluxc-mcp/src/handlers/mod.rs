@@ -316,6 +316,7 @@ pub mod sigil_wallet;
 pub mod sigil_shielded;
 pub mod sigil_court;
 pub mod sigil_kgauge;
+pub mod sigil_clock;
 pub mod sigil_forge;
 pub mod sigil_realization;
 pub mod flux_error;

@@ -89,10 +89,22 @@ fn load_live(path: &str) -> Option<Live> {
     })
 }
 
+struct Breath { scenario: String, s_max: f64, s_end: f64, i_min: f64, i_max: f64, slope: Option<f64>, signs: u64, kf_max: f64, kf_end: f64, rejected: u64 }
+fn load_breath(path: &str) -> Vec<Breath> {
+    let Ok(txt) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { return vec![] };
+    v["summaries"].as_array().map(|a| a.iter().map(|x| Breath {
+        scenario: x["scenario"].as_str().unwrap_or("?").into(), s_max: x["s_max"].as_f64().unwrap_or(0.0), s_end: x["s_end"].as_f64().unwrap_or(0.0),
+        i_min: x["iota2_min"].as_f64().unwrap_or(0.0), i_max: x["iota2_max"].as_f64().unwrap_or(0.0), slope: x["loglog_slope_iota2_vs_s"].as_f64(),
+        signs: x["theta_sign_changes_after_heal"].as_u64().unwrap_or(0), kf_max: x["k_fix_max"].as_f64().unwrap_or(0.0), kf_end: x["k_fix_end"].as_f64().unwrap_or(0.0),
+        rejected: x["rejected_total"].as_u64().unwrap_or(0) }).collect()).unwrap_or_default()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out_dir = args.get(1).map(String::as_str).unwrap_or("/home/storage/sigil-scratch/null-rays-k-gauge");
     let series = args.get(2).map(String::as_str).unwrap_or("/home/storage/claude-code/k-parameter-paper/gauge-series/sigil-kgauge.jsonl");
+    let breath = load_breath(&std::env::var("SIGIL_BREATHING_JSON").unwrap_or_else(|_| "/home/storage/sigil-scratch/sigil-breathing-2026-09-17/breathing.json".into()));
     let pi = std::f64::consts::PI;
 
     // ── 1. Kerr: Aazami's (1) and (2) checked by finite differences ────────────────────────
@@ -444,6 +456,23 @@ $K_{{\\mathrm{{fix}}}}$; that is the right behaviour, and now the gauge says why
         .add(Block::Section("The live SIGIL chain, read through the dictionary (MEASURED)".into()))
         .add(raw(live_sec));
 
+    // ── 6b the breathing test, run ──
+    let breath_sec = if breath.is_empty() {
+        "The harness had not been run when this copy was generated; no result is quoted.".to_string()
+    } else {
+        let mut tab = String::from("\\begin{table}[H]\\centering\\small\\begin{tabular}{lrrlllr}\\toprule\nscenario & $s_{\\max}$ & $s_{\\mathrm{end}}$ & $\\iota^2$ min..max & slope $\\log\\iota^2$ vs $\\log s$ (pred.\\ $-4$) & $\\theta$ sign changes & $K_{\\mathrm{fix}}$ max$\\to$end \\\\\\midrule\n");
+        for b in &breath {
+            tab.push_str(&format!("{} & {:.2} & {:.2} & {:.2}..{:.2} & {} & {} & {:.3}$\\to${:.3} \\\\\n", b.scenario.replace('_', "\\_"), b.s_max, b.s_end, b.i_min, b.i_max,
+                b.slope.map(|x| format!("{x:.2}")).unwrap_or_else(|| "undefined ($\\iota^2=0$)".into()), b.signs, b.kf_max, b.kf_end));
+        }
+        tab.push_str("\\bottomrule\\end{tabular}\\caption{The breathing test on the real \\texttt{SigilSimNode} chokepoint: 240 blocks, a follower partitioned for blocks 60--120, catch-up 4 blocks per produced block; width $s=\\sqrt{1+\\text{mean gap}+64(\\text{tips}-1)}$, twist $\\iota^2$ = interleave fraction of the last 16 spine blocks. MEASURED.}\\end{table}\n");
+        let two = breath.iter().find(|b| b.scenario == "twosheet");
+        format!("We ran it before publishing (\\texttt{{sigil-chronos/src/bin/sigil-breathing.rs}}, three scenarios, every block sampled; report at \\url{{https://sigilgraph.org/downloads/sigil-breathing-2026-09-17.md}}). \\textbf{{Statement 1 is falsified}} for the current chain, and for a design reason. On the twisted spine (A and B alternating) the twist stays at $\\iota^2=1$ while the width rises from 1 to {:.0} during the partition and falls back after the heal --- the slope is {} where $-4$ was predicted: equation (2) does not govern proposer entropy, because who signs is not a function of how many views exist. The width contracts monotonically ({} sign changes of $\\theta$ after the heal): a follower catching up is the untwisted caustic, and it is benign --- two rays meeting is agreement when one of them is a follower. In the two-sheet scenario, the only one where two \\emph{{producers'}} views would have to meet, nothing contracts at all: {} cross-sheet blocks are refused and $K_{{\\mathrm{{fix}}}}$ sits at {:.2} with no way down, because a SIGIL follower cannot reorg (the 2026-09-08 finding). The geometric twist of a DAG would be its merge structure; SIGIL's linear followers have none, so the sheets never re-braid. The dictionary stays an analogy. What the run does confirm is the gauge's behaviour: the finality-gap channel rises with the partition and falls with the heal in every scenario ($K_{{\\mathrm{{fix}}}}$ {:.3}$\\to$0 on the twisted spine), and the one-key run reads slightly \\emph{{worse}} than the two-key run at the same width, as the battle test required.{}",
+            breath[0].s_max, breath[0].slope.map(|x| format!("{x:.2}")).unwrap_or("undefined".into()), breath[0].signs,
+            two.map(|b| b.rejected).unwrap_or(0), two.map(|b| b.kf_end).unwrap_or(0.0), breath[0].kf_max, tab)
+    };
+    doc = doc.add(Block::Section("The breathing test, run (MEASURED on chronos)".into())).add(raw(breath_sec));
+
     // ── 7 CCC margin ──
     doc = doc
         .add(Block::Section("The CCC margin: rescaling, exactness, and the Hawking point".into()))
@@ -510,7 +539,7 @@ Energy drift over $\\lambda={}$ & ${}$ & DERIVED \\\\\n\
 Live $K_C$ / $K_{{\\mathrm{{fix}}}}$ & {} & MEASURED \\\\\n\
 Live $N_{{\\mathrm{{eff}}}}$ of producers & {} & MEASURED \\\\\n\
 The dictionary & --- & ANALOGY \\\\\n\
-Breathing mode on the real chain & --- & PRETEND \\\\\n\
+Breathing mode on chronos (two producers) & slope 0, no oscillation, a fork never contracts & MEASURED (falsified) \\\\\n\
 Garden paper's $8.7\\sigma$ etc. & --- & CLAIMED (not used) \\\\\n\
 \\bottomrule\\end{{tabular}}\\caption{{The ledger. DERIVED = computed here from the paper's formulas; MEASURED = read from the live chain; ANALOGY = the dictionary; PRETEND = not yet run.}}\\end{{table}}\n",
         n_pts, sci(max_res_2), sci(max_res_1), sci(det_rows[0].2), sci(det_rows[5].2), sci(det_rows[6].2),
@@ -526,7 +555,7 @@ Garden paper's $8.7\\sigma$ etc. & --- & CLAIMED (not used) \\\\\n\
         .add(raw(String::from(
             "\\begin{enumerate}\n\
 \\item On a two-producer chronos run with a healed partition, $\\log\\iota^2$ against $\\log s$ has slope $-4\\pm0.5$ over the \
-healing. If the slope is not near $-4$, equation (2) does not govern proposer entropy and the twist reading of $\\Delta s$ is wrong.\n\
+healing. \\textbf{Run, and failed:} the slope is $0$ (see the chronos section). Equation (2) does not govern proposer entropy.\n\
 \\item A window in which the settled height does not advance while blocks are produced will, from this commit, carry \
 \\texttt{focusing = 0} and \\texttt{finality\\_frozen = true}; the 2026-09-15 freeze replayed through the gauge must show it.\n\
 \\item With one effective producer the \\texttt{verdict} starts with \\texttt{twist-degenerate} and $K^*$ reads $0$ for any fork; \
@@ -537,7 +566,7 @@ with two it does not. Both halves were measured on 2026-09-14; the verdict is th
         .add(raw(String::from(
             "The dictionary is not a derivation; a chain has no metric, and ``expansion'', ``shear'' and ``twist'' are names we \
 give to three channels because they transform the way the geometric ones do under the operations we care about (one key \
-kills twist; a stall kills the clock; finality focuses). The breathing mode has not been observed on any chain. The focusing \
+kills twist; a stall kills the clock; finality focuses). The breathing mode was looked for on chronos and is not there (falsified; the reason is the missing follower reorg); it has not been looked for on the live chain, which has one producer. The focusing \
 observable is published but not yet weighted into $\\Delta H_c$. The live reading is one 30-second window on a chain with one \
 producer, which is precisely the case the theorem cannot speak to. Nothing here alters consensus; the only code that changed \
 is a read-only gauge.",

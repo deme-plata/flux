@@ -246,6 +246,58 @@ pub(crate) fn k_fix_of(delta_h: f64, persist_blocks: f64, h_norm: f64) -> f64 {
     2.0 * std::f64::consts::PI * (delta_h.clamp(0.0, 1.0) * tau_d_of(persist_blocks) * w_s_of(h_norm)).sqrt()
 }
 
+/// ── Raychaudhuri decomposition (2026-09-17, after Aazami, arXiv:1504.06425) ──
+/// Aazami's Theorem 1: on a Lorentzian 4-manifold a COMPLETE geodesic null congruence k with
+/// Ric(k,k) > 0 is twisted everywhere (ι ≠ 0 — its normal bundle is nowhere integrable, so no
+/// null hypersurface, no global "now"), and ω = d g(e^f k,·) is then symplectic with
+/// det ω = e^{4f}·k(f)²·ι². The gauge is that determinant read on the chain: k(f) is the
+/// CLOCK (does height advance along the ray), ι the TWIST (independent proposers), θ = div k
+/// the EXPANSION (fork spread), σ the SHEAR (peer height skew) and Ric(k,k) the FOCUSING
+/// (finality pulling views together). K = 0 has two degenerate causes — a dead clock or a
+/// vanished twist — and this block names which, instead of letting a stalled chain and a
+/// single-key chain read the same "0 stable". Kerr's equatorial plane (ι² = 4a²cos²ϑ/ρ⁴ = 0)
+/// is the one-key chain; the battle test measured exactly that blindness (K* 0 vs 5.88).
+pub(crate) const TWIST_MIN_N_EFF: f64 = 1.1;
+#[derive(Debug, Clone)]
+pub(crate) struct Raychaudhuri {
+    pub clock_blocks: u64,
+    pub clock_alive: bool,
+    pub twist_h_norm: f64,
+    pub twist_n_eff: f64,
+    pub twist_degenerate: bool,
+    pub expansion: f64,
+    pub shear: Option<f64>,
+    pub focusing: Option<f64>,
+    pub finality_frozen: bool,
+    pub det_omega_norm: f64,
+    pub caustic_warning: bool,
+    pub verdict: String,
+}
+pub(crate) fn raychaudhuri_of(blocks_added: u64, settled_advance: Option<u64>, d_tip: f64, d_finality: Option<f64>, n_eff: f64, h_norm: f64) -> Raychaudhuri {
+    let clock_alive = blocks_added > 0;
+    let twist_degenerate = n_eff < TWIST_MIN_N_EFF;
+    let focusing = if blocks_added > 0 { settled_advance.map(|s| (s as f64 / blocks_added as f64).min(1.0)) } else { None };
+    let finality_frozen = clock_alive && focusing == Some(0.0);
+    let det_omega_norm = if clock_alive { h_norm.clamp(0.0, 1.0) } else { 0.0 };
+    // Theorem 1's contradiction: Ric > 0 on an UNTWISTED complete congruence forces a caustic
+    // in finite affine parameter — finality pulling on one writer collapses every view to a
+    // point (the n = 2 replicated-single-writer freeze, 2026-09-15). Either the flow is about
+    // to be incomplete (stall) or a second proposer must appear.
+    let caustic_warning = clock_alive && twist_degenerate && matches!(focusing, Some(f) if f > 0.0);
+    let verdict = if !clock_alive {
+        "clock-stalled: k(f) = 0 — height did not advance in the window; every K reads 0 for the wrong reason (a stall is not agreement)".to_string()
+    } else if twist_degenerate {
+        format!("twist-degenerate: ι ≈ 0 (N_eff = {:.2}) — one effective key; the product form K* is BLIND to a fork here (battle test 0 vs 5.88), K_fix reads it as the worst case (w_S → 1). Aazami: the rays lie in a null hypersurface, the Kerr equatorial plane{}", n_eff,
+            if caustic_warning { "; focusing > 0 on an untwisted congruence → caustic (Theorem 1 forbids this persisting on a complete flow)" } else { "" })
+    } else if finality_frozen {
+        format!("focusing-zero: {} blocks produced, finality advanced 0 — Ric(k,k) = 0, nothing pulls views together (the 2026-09-15 freeze shape)", blocks_added)
+    } else {
+        format!("nondegenerate: clock alive ({} blk), twist ι² ∝ {:.3} (N_eff {:.2}), expansion θ = {:.3}, shear σ² = {}, focusing = {} — ω is symplectic, the gauge can see a fork", blocks_added, h_norm, n_eff, d_tip,
+            d_finality.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".into()), focusing.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".into()))
+    };
+    Raychaudhuri { clock_blocks: blocks_added, clock_alive, twist_h_norm: h_norm, twist_n_eff: n_eff, twist_degenerate, expansion: d_tip, shear: d_finality, focusing, finality_frozen, det_omega_norm, caustic_warning, verdict }
+}
+
 pub(crate) fn regime_of(k_c: f64) -> &'static str {
     if k_c < 1.0 { "stable" } else if k_c < 3.0 { "elevated" } else { "critical" }
 }
@@ -447,6 +499,10 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
         block_rate_bps: obs_bps, peers: b.peers, tau_window_secs: tau,
     };
     let c = consensus_gauge(&inputs);
+    let settled_advance = match (a.settled_height, b.settled_height) { (Some(x), Some(y)) => Some(y.saturating_sub(x)), _ => None };
+    let d_fin_val = c.channels.iter().find(|ch| ch.name == "finality_divergence").and_then(|ch| ch.value);
+    let d_tip_val = c.channels.iter().find(|ch| ch.name == "tip_divergence").and_then(|ch| ch.value).unwrap_or(0.0);
+    let ray = raychaudhuri_of(d_commit, settled_advance, d_tip_val, d_fin_val, c.n_eff, c.h_norm);
 
     // ── legacy v1 (retained for series continuity; NOT the headline) ──
     let dh_v1 = rej_ratio + churn;
@@ -512,6 +568,15 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
             "active_producers": distinct, "dominant_share": c.dominant_share,
             "entropy_resolution_bits": c.entropy_resolution_bits,
             "note": format!("Δs over {} blocks is a staircase with step {:.4} bits (199/1 → 0.0454, 198/2 → 0.0808); N_eff = 2^Δs is the intuitive figure", blocks.len(), c.entropy_resolution_bits),
+        },
+        "raychaudhuri": {
+            "definition": "det ω = e^{4f}·k(f)²·ι² read on the chain (Aazami, arXiv:1504.06425, Thm 1): clock k(f) = blocks added in the window; twist ι² ∝ H_norm (N_eff = 2^Δs, degenerate below 1.1); expansion θ = tip_divergence; shear σ² = finality_divergence; focusing Ric(k,k) = settled-height advance / blocks added. Names WHICH plane of ω degenerated when K reads 0.",
+            "clock_blocks": ray.clock_blocks, "clock_alive": ray.clock_alive,
+            "twist_h_norm": ray.twist_h_norm, "twist_n_eff": ray.twist_n_eff, "twist_degenerate": ray.twist_degenerate,
+            "expansion": ray.expansion, "shear": ray.shear, "focusing": ray.focusing, "finality_frozen": ray.finality_frozen,
+            "det_omega_norm": ray.det_omega_norm, "caustic_warning": ray.caustic_warning,
+            "verdict": ray.verdict,
+            "settled_advance": settled_advance,
         },
         "network_diagnostics": {
             "peers": b.peers, "peers_start": a.peers, "peer_churn": churn, "syncing_peers": c.syncing_peers,
@@ -701,6 +766,25 @@ mod tests {
         let expected = 2.0 * std::f64::consts::PI * (c.delta_h_consensus * c.tau_ratio * EPSILON_FLOOR).sqrt();
         assert!((c.k_c - expected).abs() < 1e-9);
         assert_ne!(c.regime, "stable");
+    }
+
+    #[test]
+    fn raychaudhuri_names_the_degenerate_plane() {
+        // one key, chain alive, finality pulling → twist-degenerate AND the caustic warning
+        let r = raychaudhuri_of(240, Some(240), 0.0, Some(0.376), 1.03, 0.045);
+        assert!(r.clock_alive && r.twist_degenerate && r.caustic_warning, "{r:?}");
+        assert!(r.verdict.starts_with("twist-degenerate"), "{}", r.verdict);
+        // no blocks in the window → clock-stalled, never "agreement"
+        let r = raychaudhuri_of(0, Some(0), 0.0, None, 1.0, 0.0);
+        assert!(!r.clock_alive && r.verdict.starts_with("clock-stalled") && r.det_omega_norm == 0.0, "{}", r.verdict);
+        // two real keys, blocks flowing, finality frozen → focusing-zero (the 2026-09-15 shape)
+        let r = raychaudhuri_of(200, Some(0), 0.0, Some(0.2), 1.9, 0.93);
+        assert!(r.finality_frozen && !r.twist_degenerate && r.verdict.starts_with("focusing-zero"), "{}", r.verdict);
+        // twisted, focusing, alive → nondegenerate, det ω ∝ H_norm
+        let r = raychaudhuri_of(200, Some(190), 0.02, Some(0.1), 1.9, 0.93);
+        assert!(r.verdict.starts_with("nondegenerate") && (r.det_omega_norm - 0.93).abs() < 1e-12 && r.focusing == Some(0.95), "{r:?}");
+        // focusing is a fraction of the blocks added, capped at 1 (heartbeat jitter can put settled ahead)
+        assert_eq!(raychaudhuri_of(10, Some(30), 0.0, None, 2.0, 1.0).focusing, Some(1.0));
     }
 
     #[test]

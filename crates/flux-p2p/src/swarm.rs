@@ -1342,7 +1342,9 @@ pub fn sigil_topic(network: &str, kind: &str) -> String {
     format!("/sigil/{}/{}", network, kind)
 }
 
-/// The canonical SIGIL block sync topic for network g0.
+/// The canonical SIGIL block sync topic for network g0 — DEAD since the 2026-08-28/29 reset
+/// to g2 (kept only so old code links; nothing publishes there). Live: `/sigil/g2/blocks`.
+#[deprecated(note = "g0 is dead; use sigil_net::TOPIC_BLOCKS (/sigil/g2/blocks)")]
 pub const SIGIL_G0_BLOCKS_TOPIC: &str = "/sigil/g0/blocks";
 #[cfg(test)]
 mod swarm_addr_tests {

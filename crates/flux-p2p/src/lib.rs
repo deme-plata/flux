@@ -34,6 +34,7 @@ use swarm::{FluxSwarmManager, FluxSwarmConfig, TransportMode, PeerInfo};
 pub use swarm::SwarmAppEvent;
 
 /// Re-export SIGIL block topic helpers for sigil-top integration.
+#[allow(deprecated)]
 pub use swarm::{sigil_topic, SIGIL_G0_BLOCKS_TOPIC, COMBO_AFFINITY_TOPIC};
 
 /// Re-export so callers (e.g. sigil-node's peer-affinity tracking) can name
@@ -153,12 +154,18 @@ fn detect_local_producer() -> Option<String> {
 }
 
 /// SIGIL gossipsub topics — matches sigil-net crate constants.
+// 2026-09-17: g0 is dead (chain reset g1 → g2 on 2026-08-28/29; sigil-net's PROTOCOL_PREFIX
+// is "/sigil/g2/"). A client that keeps this list receives NO block gossip and no error —
+// measured: a fully synced producer-mode sigil-top sat 1,000 blocks behind the tip. The
+// live list is the network's own (`sigil_net::ALL_TOPICS`); callers pass it through
+// `with_gossipsub_topics`. This default only has to be a g2 list, not the complete one.
 pub const SIGIL_TOPICS: &[&str] = &[
-    "/sigil/g0/blocks",
-    "/sigil/g0/peer-heights",
-    "/sigil/g0/tip-proofs",
-    "/sigil/g0/txs",
-    "/sigil/g0/release",
+    "/sigil/g2/blocks",
+    "/sigil/g2/peer-heights",
+    "/sigil/g2/tip-proofs",
+    "/sigil/g2/txs",
+    "/sigil/g2/release",
+    "/sigil/g2/finality-votes",
 ];
 
 /// How many top-entangled peers `entangled_publish` targets when
@@ -1106,6 +1113,17 @@ impl NetworkManager {
 
     /// Create a NetworkManager pre-configured for the SIGIL block mesh.
     /// Uses port 9501, SIGIL topics, and the 4-node testnet bootstrap.
+    /// Replace the gossipsub topic list before `start()`. The swarm subscribes to exactly
+    /// these when it is built, and gossipsub only delivers a topic's messages to peers
+    /// that subscribed to it — so a client on the wrong list receives NOTHING and sees no
+    /// error. `for_sigil` seeds the legacy `/sigil/g0/*` list; the live SIGIL network is
+    /// `sigil-g2` (`sigil_net::ALL_TOPICS`), and 2026-09-17 a fully synced producer-mode
+    /// sigil-top sat 1,000 blocks behind the tip for exactly this reason.
+    pub fn with_gossipsub_topics(mut self, topics: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config.gossipsub_topics = topics.into_iter().map(Into::into).collect();
+        self
+    }
+
     pub fn for_sigil(node_name: &str) -> Self {
         let mut config = NetworkConfig::default();
         // v0.31: STABLE per-install identity. node_id used to embed `{pid}`, and the libp2p

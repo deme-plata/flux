@@ -144,7 +144,7 @@ fn main() {
         ("Gulvpolish bortfalder (gulvbehandling er vedligeholdelse i boperioden, § 26, stk. 1 — ikke normalistandsættelse; kun misligholdelse efter § 25, stk. 4 kan kræves)", bundlinje + gulv),
         ("Rengøring flyttes til normalistandsættelse med 66 pct. fradrag (§ 26, stk. 2 nævner rengøring udtrykkeligt)", bundlinje + (rengoering - rengoering_som_normal)),
         ("Hele misligholdelsen + advokat bortfalder (intet syn/ingen rapport dokumenterer misligholdelse)", bundlinje + mislig_anden),
-        ("Alt, lejer ikke selv har valgt, bortfalder: normalistandsættelse + misligholdelse + advokat (§ 94, stk. 2 bortfald)", bundlinje + normal_lejer + mislig_anden),
+        ("Alt, lejer ikke selv har valgt, bortfalder: normalistandsættelse + misligholdelse + advokat (§ 94, stk. 2 bortfald — lejer oplyser: ikke indkaldt til syn)", bundlinje + normal_lejer + mislig_anden),
         ("Som ovenfor, og afdelingen viser sig at være B-ordning (§ 27): samme resultat, men vedligeholdelseskontoens saldo skal desuden oplyses", bundlinje + normal_lejer + mislig_anden),
     ];
 
@@ -215,6 +215,14 @@ Boligforeningen siger, du skylder \textbf{{kr. {bund}}}. Det tal er summen af \e
 \textbf{{Fortegnet på regningen afgøres af punkt 2 og 3.}} Står huslejen ved magt, men falder alt det, du ikke har valgt (kr. {alt}), skylder \emph{{de dig}} kr. {plus}. Falder kun misligholdelse og advokat, skylder de dig kr. {plus2}. Falder kun advokatregningen, skylder du stadig kr. {min_adv}.
 \end{{svar}}
 
+\begin{{svar}}{{Oplyst af lejeren, 21. september 2026}}
+\begin{{itemize}}
+\item \textbf{{Nøglerne blev lagt på køkkenbordet}} i lejligheden ved fraflytningen 06-05-2026. Boligforeningens eget flyttefirma var inde i lejligheden 07-05-2026 og havde dermed både adgang og nøglerne fra den dag.
+\item \textbf{{Ingen indkaldelse til fraflytningssyn er modtaget}} — hverken skriftligt med en uges varsel (§ 94, stk. 1) eller på anden måde. Lejeren har ikke set en fraflytningsrapport.
+\end{{itemize}}
+Det flytter to poster fra "kræver fakta" til "plausibelt/sikkert" nedenfor: låsesmeden og hele § 94-spørgsmålet.
+\end{{svar}}
+
 \noindent Der er to ting, du kan gøre med det samme, og de koster tilsammen under 200 kr.: (a) et skriftligt krav om dokumentation og indsigelse til boligforeningen (bilag A), og (b) en klage til Frederikshavn Kommune — både til \textbf{{beboerklagenævnet}} (§ 96; gebyr 100 kr. i 1998-niveau, dvs. ca. 170 kr. i dag) og til kommunen som \textbf{{tilsynsmyndighed}} for almene boligorganisationer (almenboligloven kap. 12). Kommunen fik desuden efter § 92, stk. 2 besked om udsættelsessagen, mens den løb — spørg dem, hvad de gjorde med den besked.
 "##,
         bund = dkk(-bundlinje), hus = dkk(husleje_blok), hl = dkk(huslejelinjer_sum), sh = dkk(SKYLDIG_HUSLEJE), ufo = dkk(uforklaret),
@@ -280,7 +288,7 @@ Frederikshavn Boligforening er en almen boligorganisation, og afd. 35 er almene 
 Mærkning: \ok{{}} = følger direkte af lovteksten og tallene; \pl{{}} = stærkt argument, men afhænger af en vurdering (beboerklagenævn/boligret); \fa{{}} = svaret afhænger af oplysninger, kun du har (se afsnit 6).
 
 \subsection{{Formkravene — nøglen til hele istandsættelsesblokken}}
-§ 94 er bygget som en \emph{{fælde for udlejeren}}, ikke for lejeren: der skal holdes syn senest 2 uger efter, at udlejer vidste, du var flyttet (fraflytningsdato 06-05-2026 $\Rightarrow$ senest 20-05-2026); du skal indkaldes \emph{{skriftligt med mindst 1 uges varsel}}; og senest 2 uger efter synet skal du have skriftlig besked om \emph{{arbejdernes omfang, den anslåede udgift og din andel}}. Mangler ét af leddene, \textbf{{bortfalder kravet}} (§ 94, stk. 2) — hele normalistandsættelsen og hele misligholdelsen, på én gang. Afregningen henviser til et "tidligere fremsendt budget over forventet istandsættelsesudgift"; om det budget findes, hvornår det kom, og om du blev indkaldt til et syn, er \fa{{}}. Der er én undtagelse, som boligforeningen vil gribe efter: bortfaldet gælder ikke, hvis du flyttede \emph{{uden at oplyse din nye adresse}} (§ 93, stk. 2). De havde din e-mail (afregningen er sendt til den), så argumentet er svagt, men det skal imødegås: skriv, hvornår og hvordan du gav adresse/kontakt.
+§ 94 er bygget som en \emph{{fælde for udlejeren}}, ikke for lejeren: der skal holdes syn senest 2 uger efter, at udlejer vidste, du var flyttet (fraflytningsdato 06-05-2026 $\Rightarrow$ senest 20-05-2026); du skal indkaldes \emph{{skriftligt med mindst 1 uges varsel}}; og senest 2 uger efter synet skal du have skriftlig besked om \emph{{arbejdernes omfang, den anslåede udgift og din andel}}. Mangler ét af leddene, \textbf{{bortfalder kravet}} (§ 94, stk. 2) — hele normalistandsættelsen og hele misligholdelsen, på én gang. Afregningen henviser til et "tidligere fremsendt budget over forventet istandsættelsesudgift"; om det budget findes og hvornår det kom, er \fa{{}}; \textbf{{at du ikke blev indkaldt til syn, er oplyst af dig}} — kan boligforeningen ikke fremlægge en skriftlig indkaldelse og en fraflytningsrapport, er der ikke holdt et gyldigt syn, og så er der intet at underrette om inden for § 94, stk. 2's frist: kravet bortfalder (\pl{{}}, fordi nævnet skal lægge din oplysning til grund over for deres manglende papir). Der er én undtagelse, som boligforeningen vil gribe efter: bortfaldet gælder ikke, hvis du flyttede \emph{{uden at oplyse din nye adresse}} (§ 93, stk. 2). De havde din e-mail (afregningen er sendt til den), så argumentet er svagt, men det skal imødegås: skriv, hvornår og hvordan du gav adresse/kontakt.
 
 \subsection{{De enkelte poster}}
 \begin{{longtable}}{{@{{}}p{{0.30\linewidth}}rp{{0.52\linewidth}}@{{}}}}
@@ -291,7 +299,7 @@ Mærkning: \ok{{}} = følger direkte af lovteksten og tallene; \pl{{}} = stærkt
 Normalistandsættelse, maling (66 pct. fradrag) & {nl} & \ok{{}} Fradraget er § 26, stk. 2 — de 66 måneder er allerede krediteret. \pl{{}} Falder helt, hvis afdelingen er B-ordning (§ 27) — så findes en vedligeholdelseskonto, og dens saldo skal oplyses. \pl{{}} Falder helt ved formmangel (§ 94, stk. 2). Kræv: vedligeholdelsesreglement, lejekontrakt, indflytningsrapport (§ 25, stk. 3: ikke bedre stand end ved overtagelsen). \\
 Rengøring (ført som misligholdelse) & {ren} & \ok{{}} Rengøring er normalistandsættelse efter § 26, stk. 2 og skal have 66 pct. fradrag (din andel højst kr. {ren34}), medmindre en fraflytningsrapport dokumenterer misligholdelse efter § 25, stk. 4. Ingen faktura vedlagt. \\
 Gulvpolish 2X, 28,54 m² & {gulv} & \ok{{}} Gulvbehandling er vedligeholdelse \emph{{i boperioden}} (§ 26, stk. 1) og indgår \emph{{ikke}} i normalistandsættelsen ved fraflytning (§ 26, stk. 2 nævner kun vægge, lofter og rengøring). Kan kun kræves som misligholdelse (§ 25, stk. 4), dvs. skade ved fejlagtig brug/uforsvarlig adfærd — det skal stå i fraflytningsrapporten med begrundelse. En polishbehandling er normal klargøring til næste lejer. \\
-Låsesmed: opluk + ny cylinder (12-05-2026) & {laas} & \fa{{}} Afleverede du nøgler? Hvis ja, er cylinderskift udlejers egen udgift. Bemærk rækkefølgen: flyttefirmaet tømte lejligheden 07-05, låsesmeden "lukkede op" 12-05 — hvordan kom flyttefirmaet ind fem dage før? Fakturaen er rekvireret af FBF (Jens Rusgaard) og hører til den udsættelse, advokaten selv skriver blev \emph{{tilbagekaldt}}. \\
+Låsesmed: opluk + ny cylinder (12-05-2026) & {laas} & \pl{{}} Nøglerne lå på køkkenbordet fra 06-05, og FBF's eget flyttefirma var inde 07-05 — fra den dag havde de adgang og nøgler. Et "udkald til opluk" 12-05, fem dage \emph{{efter}}, og et skift "til HV cylinder" (hovednøgle-cylinder, dvs. boligforeningens eget låsesystem) er udlejers egen drift, ikke skade forvoldt af lejer (§ 25, stk. 4). Fakturaen er rekvireret af FBF (Jens Rusgaard) til den udsættelse, advokaten selv skriver blev \emph{{tilbagekaldt}}. Svaghed: nøgler lagt i lejligheden er ikke en kvitteret aflevering — skriv præcis hvor og hvornår. \\
 Flyttefirma: tømning til genbrugspladsen (07-05-2026) & {flyt} & \fa{{}} Kan kun kræves, hvis du efterlod ting, og lejligheden skulle ryddes. Men: dine ejendele blev kørt på genbrugspladsen dagen efter fraflytningsdatoen, \emph{{uden fogedforretning}} (den blev tilbagekaldt). Hvad var der, og fik du besked? Det kan være et \emph{{modkrav}}, ikke en regning. \\
 Advokat (Advodan): fogedgebyr, salær m.m. & {adv} & \pl{{}} Hjemlen er § 92, stk. 1 ("omkostningerne ved lejerens udsættelse") — men den forudsætter en \emph{{gyldig ophævelse}}, dvs. et påkrav efter § 90, stk. 2 med 14 dages frist og udtrykkelig ophævelsestrussel, og derefter en ophævelsesskrivelse. Udsættelsen blev tilbagekaldt før den begyndte. Kræv: påkrav, ophævelse, fogedrettens sagsnr., tilbagekaldelsen, og advokatens specifikation. Salæret (3.000 + moms) er advokatens regning til FBF; om hele beløbet er dit "tab" at bære, er en rimelighedsvurdering. \\
 Påkravsgebyr $\times$ {npk} & {pgs} & \pl{{}} Ét pr. gyldigt skriftligt påkrav (§ 90, stk. 2). Kræv alle fem breve. \\
@@ -344,8 +352,8 @@ Aktindsigt i begge spor er gratis (forvaltningsloven § 9 / offentlighedsloven �
 \section{Spørgsmål, kun du kan svare på}
 Notatets \fa{}-poster afgøres af disse ti svar. Skriv dem ned, før brevene sendes:
 \begin{enumerate}
-\item Afleverede du nøgler (hvornår, til hvem)? Fik du kvittering?
-\item Blev du \emph{skriftligt} indkaldt til fraflytningssyn med mindst en uges varsel? Deltog du?
+\item \textcolor{greenx}{\textbf{Besvaret:}} nøglerne lå på køkkenbordet ved fraflytningen 06-05-2026. (Skriv gerne klokkeslæt, og om andre så det.)
+\item \textcolor{greenx}{\textbf{Besvaret:}} ingen indkaldelse til syn modtaget, intet syn med lejer, ingen fraflytningsrapport set.
 \item Har du modtaget en fraflytningsrapport? Har du modtaget "budget over forventet istandsættelsesudgift" — med dato?
 \item Gav du boligforeningen din nye adresse (eller e-mail/telefon) senest 8 dage før fraflytning — hvordan?
 \item Hvad stod der i lejligheden den 06-05-2026? Fik du besked, før det blev kørt på genbrugspladsen?
@@ -380,10 +388,13 @@ Jeg gør hermed indsigelse mod flytteafregningen af 15. juni 2026 for Sæbygård
 (c) afdelingens vedligeholdelsesreglement og min lejekontrakt, herunder om afdelingen er A- eller B-ordning (§§ 25–27), samt indflytningsrapporten;
 (d) fuldt kontoudtog for lejemålet 01-01-2026 til dato med alle betalinger og krediteringer — afregningens huslejelinjer summerer til 27.289,97 kr., ikke de anførte 26.505,47 kr.;
 (e) kopi af samtlige påkrav (5 stk. à 329 kr.), ophævelsesskrivelsen, udsættelsesbegæringen til fogedretten med sagsnummer, tilbagekaldelsen og underretningen til Frederikshavn Kommune (§ 92, stk. 2);
-(f) faktura og begrundelse for "Rengøring" (960 kr.), og oplysning om, hvornår lejligheden blev genudlejet (§ 92, stk. 3).
+(f) faktura og begrundelse for "Rengøring" (960 kr.), og oplysning om, hvornår lejligheden blev genudlejet (§ 92, stk. 3);
+(g) dokumentation for, hvad der befandt sig i lejligheden den 07-05-2026, og hvilket varsel jeg fik, før mine ejendele blev kørt på genbrugspladsen.
+
+\textbf{Faktiske forhold:} Jeg fraflyttede 06-05-2026 og lagde nøglerne på køkkenbordet. Boligforeningens flyttefirma var i lejligheden 07-05-2026 og havde dermed adgang og nøgler. Jeg er ikke blevet indkaldt til fraflytningssyn og har ikke modtaget nogen fraflytningsrapport.
 
 \textbf{2. Indsigelser:}
-Rengøring er normalistandsættelse (§ 26, stk. 2) og kan højst kræves med 34 pct. Gulvbehandling er vedligeholdelse i boperioden (§ 26, stk. 1) og indgår ikke i normalistandsættelsen; den kan kun kræves som dokumenteret misligholdelse (§ 25, stk. 4). Låsesmed og flyttefirma vedrører en udsættelse, der blev tilbagekaldt; jeg har ikke bestilt, godkendt eller fået forelagt nogen af arbejderne eller beløbene. Advokatomkostninger forudsætter gyldig ophævelse efter § 90, stk. 2. Kan dokumentationen under pkt. 1 (a)–(b) ikke fremlægges, bortfalder istandsættelseskravet efter § 94, stk. 2, og afregningen skal opgøres på ny.
+Rengøring er normalistandsættelse (§ 26, stk. 2) og kan højst kræves med 34 pct. Gulvbehandling er vedligeholdelse i boperioden (§ 26, stk. 1) og indgår ikke i normalistandsættelsen; den kan kun kræves som dokumenteret misligholdelse (§ 25, stk. 4). Låsesmedens "opluk" 12-05-2026 og skift til HV-cylinder skete fem dage efter, at boligforeningen selv var inde i lejligheden, og vedrører boligforeningens eget låsesystem. Låsesmed og flyttefirma hører til en udsættelse, der blev tilbagekaldt; jeg har ikke bestilt, godkendt eller fået forelagt nogen af arbejderne eller beløbene. Advokatomkostninger forudsætter gyldig ophævelse efter § 90, stk. 2. Kan dokumentationen under pkt. 1 (a)–(b) ikke fremlægges, bortfalder istandsættelseskravet efter § 94, stk. 2, og afregningen skal opgøres på ny.
 
 Besvares henvendelsen ikke fyldestgørende, indbringer jeg sagen for beboerklagenævnet i Frederikshavn Kommune og orienterer kommunens tilsyn med almene boligorganisationer.
 

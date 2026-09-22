@@ -62,3 +62,4 @@ pub fn set_predictor(p: Predictor) {
 pub fn predict_build(pkg: &str, release: bool) -> BuildPrediction {
     PREDICTOR.get().map(|p| p(pkg, release)).unwrap_or_default()
 }
+

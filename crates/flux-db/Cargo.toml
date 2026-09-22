@@ -12,6 +12,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 crc32fast = "1"
+# At-rest encryption (src/crypt.rs). OPTIONAL and default-off on purpose: this
+# crate is in the dependency closure of every SIGIL binary, so turning these on
+# unconditionally would change the build fingerprint for the whole shared tree.
+# Enable with `--features encryption`.
+chacha20poly1305 = { version = "0.10", optional = true }
+zeroize = { version = "1", optional = true }
+
+[features]
+default = []
+# Sealed SST blocks + sealed WAL records. See src/crypt.rs.
+encryption = ["dep:chacha20poly1305", "dep:zeroize"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"

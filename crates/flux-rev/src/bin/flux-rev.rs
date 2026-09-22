@@ -5,8 +5,10 @@
 //!   flux-rev log <dir>                                                   lineage from HEAD
 //!   flux-rev diff <dir> <a> <b>                                          exact path-level diff
 //!   flux-rev head <dir>                                                  print HEAD revision id
+//!   flux-rev roadmap [--out <f>] [--flux-root <d>] [--sigil-root <d>]    signed roadmap attestation
+//!   flux-rev roadmap --verify <f> [--recheck] [--allow-unsigned]         re-check hash + signature
 use flux_rev::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
@@ -90,8 +92,129 @@ fn main() {
             let store = Store::open(Path::new(&dir)).expect("open store");
             println!("{}", store.read_head().unwrap_or_else(|| "(none)".into()));
         }
+        "roadmap" => cmd_roadmap(&a, &author),
         _ => {
-            eprintln!("flux-rev — content-addressed version control (git replacement)\n  genesis|snapshot|checkout|log|diff|head <dir> …");
+            eprintln!("flux-rev — content-addressed version control (git replacement)\n  genesis|snapshot|checkout|log|diff|head <dir> …\n  roadmap [--out <f>] | roadmap --verify <f> [--recheck] [--allow-unsigned]");
         }
     }
+}
+
+// ── roadmap attestation ──
+
+/// Resolve `--flux-root` / `--sigil-root`. Defaults are the two checkouts this tool is normally
+/// run from; both are overridable because the attestation must be reproducible on another machine.
+fn roots(a: &[String]) -> roadmap::Roots {
+    let mut r = roadmap::Roots::new();
+    let flux = arg(a, "--flux-root")
+        .or_else(|| std::env::var("FLUX_ROOT").ok())
+        .unwrap_or_else(|| "/home/storage/deepseek-codewhale/flux".into());
+    let sigil = arg(a, "--sigil-root")
+        .or_else(|| std::env::var("SIGIL_ROOT").ok())
+        .unwrap_or_else(|| "/home/storage/deepseek-codewhale/sigil".into());
+    r.insert("flux".into(), PathBuf::from(flux));
+    r.insert("sigil".into(), PathBuf::from(sigil));
+    r
+}
+
+/// The fluxc version the attestation is stamped with. Read from the workspace manifest of the
+/// flux root — anchored to line start and first match only, because the `version =` line in that
+/// file carries a long trailing comment that a loose grep happily matches inside.
+fn fluxc_version(flux_root: &Path) -> String {
+    std::fs::read_to_string(flux_root.join("Cargo.toml"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("version = \""))
+                .and_then(|l| l.split('"').nth(1).map(str::to_string))
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn fluxc_git(flux_root: &Path) -> String {
+    std::process::Command::new("git")
+        .args(["-C", &flux_root.to_string_lossy(), "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn cmd_roadmap(a: &[String], author: &str) {
+    let rs = roots(a);
+    let has = |f: &str| a.iter().any(|x| x == f);
+
+    if let Some(file) = arg(a, "--verify") {
+        let bytes = match std::fs::read(&file) {
+            Ok(b) => b,
+            Err(e) => { eprintln!("✗ read {file}: {e}"); std::process::exit(2); }
+        };
+        let att = match roadmap::from_json(&bytes) {
+            Ok(x) => x,
+            Err(e) => { eprintln!("✗ VERIFY FAILED — {e}"); std::process::exit(3); }
+        };
+        match roadmap::verify(&att, has("--allow-unsigned")) {
+            Ok(v) => {
+                println!("✅ ROADMAP ATTESTATION VERIFIED");
+                println!("   bundle   {}", v.bundle_id);
+                println!("   layers   entries→tree_id ✓   body→bundle_id ✓   signature {}",
+                    if v.hybrid { "✓ require-both SQIsign-L5 + Ed25519" }
+                    else if v.signed { "✓ (single leg)" } else { "· UNSIGNED (accepted by --allow-unsigned)" });
+                if v.signed { println!("   signer   sqisign pk {}…", &v.signer_sqisign_pk_hex[..32.min(v.signer_sqisign_pk_hex.len())]); }
+                println!("   project  {}  ·  fluxc {} ({})", att.body.project, att.body.fluxc_version, att.body.fluxc_git);
+                for (id, st, tid) in &v.items {
+                    println!("   · {:<13} {:<11} {}", id, st.as_str(), tid);
+                }
+                if has("--recheck") {
+                    match roadmap::recheck(&att, &rs) {
+                        Ok(d) if d.is_empty() => println!("   recheck  ✓ working tree still matches every attested byte"),
+                        Ok(d) => {
+                            println!("   recheck  ⚠ {} attested path(s) have DRIFTED since this attestation", d.len());
+                            for line in &d { println!("            - {line}"); }
+                            println!("            (drift is not tamper — the attestation is still authentic for the tree it named)");
+                        }
+                        Err(e) => println!("   recheck  ✗ {e}"),
+                    }
+                }
+            }
+            Err(e) => { eprintln!("✗ VERIFY FAILED — {e}"); std::process::exit(3); }
+        }
+        return;
+    }
+
+    let flux_root = rs.get("flux").cloned().unwrap_or_default();
+    let body = match roadmap::build_body(
+        &rs,
+        &fluxc_version(&flux_root),
+        &fluxc_git(&flux_root),
+        author,
+        roadmap::now(),
+    ) {
+        Ok(b) => b,
+        Err(e) => { eprintln!("✗ {e}"); std::process::exit(2); }
+    };
+
+    let att = if has("--unsigned") {
+        roadmap::unsigned(body)
+    } else {
+        match roadmap::load_agent_keys_hybrid(arg(a, "--key").as_deref()) {
+            Ok(k) => roadmap::sign_body(body, &k),
+            Err(e) => { eprintln!("✗ {e}\n   (use --key <file>, or --unsigned to emit hash-only)"); std::process::exit(2); }
+        }
+    };
+    let att = match att { Ok(x) => x, Err(e) => { eprintln!("✗ {e}"); std::process::exit(2); } };
+
+    let out = arg(a, "--out").unwrap_or_else(|| "roadmap-attestation.json".into());
+    let json = roadmap::to_json(&att).expect("serialize");
+    if let Err(e) = std::fs::write(&out, &json) { eprintln!("✗ write {out}: {e}"); std::process::exit(2); }
+
+    println!("🗺️  roadmap attestation — {} item(s), {} bytes", att.body.items.len(), json.len());
+    for it in &att.body.items {
+        println!("   · {:<13} {:<11} {}  ({} files, {} B)", it.id, it.status.as_str(), it.tree_id, it.files, it.bytes);
+    }
+    println!("   bundle   {}", att.bundle_id);
+    println!("   signed   {}", if att.is_hybrid() { "require-both SQIsign-L5 + Ed25519" } else if att.is_signed() { "SQIsign only" } else { "NO (--unsigned)" });
+    println!("   → {out}");
+    println!("   verify:  flux-rev roadmap --verify {out} --recheck");
 }

@@ -318,6 +318,7 @@ impl BatchStarkProver {
         Ok(StarkProof {
             execution_trace_commitment: trace_commitment,
             constraint_evaluations,
+            air_commitment: [0u8; 32], // batch path: no AIR bound
             fri_proof,
             public_inputs: witness.public_inputs.clone(),
             proof_size_bytes: 45_000, // Slightly smaller due to batch optimizations

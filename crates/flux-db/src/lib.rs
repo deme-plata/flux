@@ -56,6 +56,7 @@ macro_rules! db_eprintln {
     ($($arg:tt)*) => { crate::db_log(&format!($($arg)*)) };
 }
 
+
 // v0.37: background/async compaction (918a3b2e) renames a merge's outputs into
 // place, invalidates the shared SST-path cache, THEN deletes the old inputs one
 // at a time -- a reader whose pread() (index build or block read) lands on one
@@ -71,8 +72,39 @@ thread_local! {
     static SST_VANISHED_RACE: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
+/// 2026-08-23 (grogu-windows-sst-vanished-race): is this open/read failure the
+/// SAME benign compact_async() vanished-file race the `NotFound` check already
+/// tolerates, just wearing a different `ErrorKind` on this platform?
+///
+/// On POSIX, `unlink()`-ing a file that's still open elsewhere always succeeds —
+/// a *fresh* `open()` of the now-unlinked name correctly and immediately returns
+/// `NotFound`, which is exactly what the two call sites below already handle.
+/// Windows has no such guarantee: `DeleteFile`/rename-over-open-handle can leave
+/// a file in a "pending delete" state where a fresh `open()` attempt returns
+/// `ERROR_ACCESS_DENIED` (mapped to `PermissionDenied`) instead of "not found" —
+/// confirmed live 2026-08-23 against a real Windows `sigil-top` client mid-sync:
+/// `pread open ...: Adgang nægtet. (os error 5)` ("access denied" in Danish) on
+/// an SST that a concurrent compaction was actively superseding. Same race,
+/// same correct response (skip this file, retry once against a fresh SST list)
+/// — the bug was that only the POSIX error shape was recognized, so on Windows
+/// this ordinary, already-anticipated race surfaced as a hard, user-visible
+/// error instead of the transparent retry every other platform gets.
+///
+/// Gated to `cfg(windows)` deliberately: on Linux/macOS, `PermissionDenied`
+/// reading an SST is far more likely to mean a REAL permission misconfiguration
+/// (e.g. the store directory owned by a different uid) — that must keep
+/// surfacing as a hard error there, not get silently swallowed as "maybe raced".
+fn is_vanished_race_error(kind: std::io::ErrorKind) -> bool {
+    kind == std::io::ErrorKind::NotFound
+        || (cfg!(windows) && kind == std::io::ErrorKind::PermissionDenied)
+}
+
 pub mod block;
 pub mod cache;
+/// At-rest encryption: sealed SST blocks and sealed WAL records.
+/// Behind `--features encryption` so the default build fingerprint is unchanged.
+#[cfg(feature = "encryption")]
+pub mod crypt;
 pub mod cf;
 pub mod filter;
 pub mod ingest;
@@ -989,6 +1021,11 @@ impl Database {
             // just walked may predate the rename that superseded it. Force a fresh
             // re-list (compact() always renames outputs in before removing inputs,
             // so the next list is guaranteed consistent) and try exactly once more.
+            // 2026-08-24: a short backoff before that re-list — on Windows the
+            // rename/delete this races against can hold its lock for several ms
+            // (antivirus, etc.), not the near-instant window a bare retry assumes
+            // on POSIX; see `list_ssts_leveled`'s matching fix for the same reasoning.
+            std::thread::sleep(std::time::Duration::from_millis(2));
             self.invalidate_sst_paths();
         }
         Ok(None)
@@ -1065,6 +1102,8 @@ impl Database {
             if pending.is_empty() || !raced || attempt == 1 {
                 break;
             }
+            // Same reasoning as `get()`'s matching backoff — see that comment.
+            std::thread::sleep(std::time::Duration::from_millis(2));
             self.invalidate_sst_paths();
         }
         Ok(out)
@@ -1940,7 +1979,44 @@ pub struct SstHandle {
 ///   * `flux_L{lvl:02}_{seq:016x}.sst` — v0.15+ with explicit level
 fn list_ssts_leveled(path: &std::path::Path) -> Result<Vec<SstHandle>, String> {
     let mut out: Vec<SstHandle> = Vec::new();
-    let entries = fs::read_dir(path).map_err(|e| format!("read_dir: {}", e))?;
+    // 2026-08-24: this `read_dir` was the ONE place in the SST-listing path
+    // with zero tolerance for the same benign compaction race
+    // `is_vanished_race_error` exists to name — every per-file open
+    // downstream of here (`SstReader::open`, `pread`) already retries a
+    // transient NotFound/Windows-PermissionDenied, but a rename racing the
+    // directory scan ITSELF (not any one file) hit this call raw and
+    // aborted the whole listing — surfaced live as an unhandled "os error
+    // 5"/"os error 2" bleeding into sigil-top's sync UI on Windows after
+    // hours of uptime (real report, not synthetic). Windows also holds
+    // these locks measurably longer than the POSIX rename-is-atomic case,
+    // so unlike the zero-delay retries elsewhere in this file, this one
+    // backs off briefly between attempts — an instant retry against a
+    // lock still held by the OS/antivirus/compaction's own rename is just
+    // as likely to race a second time.
+    let mut last_err = None;
+    let mut entries = None;
+    for attempt in 0..3 {
+        match fs::read_dir(path) {
+            Ok(e) => {
+                entries = Some(e);
+                break;
+            }
+            Err(e) if is_vanished_race_error(e.kind()) && attempt < 2 => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(2 << attempt)); // 2ms, 4ms
+            }
+            Err(e) => return Err(format!("read_dir: {e}")),
+        }
+    }
+    let entries = match entries {
+        Some(e) => e,
+        None => {
+            // Exhausted retries still racing — the LAST error is what a
+            // human needs to see, not a generic "gave up" message.
+            let e = last_err.expect("loop only exits None via a real Err");
+            return Err(format!("read_dir (persisted after retries): {e}"));
+        }
+    };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if !name.starts_with("flux_") {
@@ -2036,7 +2112,7 @@ impl SstReader {
     pub fn open(path: &std::path::Path) -> Result<Self, String> {
         use std::io::Read;
         let mut f = fs::File::open(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if is_vanished_race_error(e.kind()) {
                 SST_VANISHED_RACE.with(|c| c.set(true));
                 format!("VANISHED read sst {}: {}", path.display(), e)
             } else {
@@ -2425,7 +2501,7 @@ impl SstIndex {
 fn pread(path: &std::path::Path, off: u64, len: usize) -> Result<Vec<u8>, String> {
     use std::io::{Seek, SeekFrom};
     let mut f = fs::File::open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if is_vanished_race_error(e.kind()) {
             SST_VANISHED_RACE.with(|c| c.set(true));
             format!("VANISHED pread open {}: {}", path.display(), e)
         } else {
@@ -4720,7 +4796,13 @@ mod tests {
         fs::write(&wal, &bytes).unwrap();
 
         let mut mt: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        replay_wal_streaming(&wal, &mut mt).unwrap();
+        // 2026-08-24: minimal unblock, not a feature edit — `replay_wal_streaming`
+        // gained a mandatory `on_progress` callback (line ~270) in someone else's
+        // in-flight WIP on this shared checkout, leaving these two pre-existing
+        // test call sites uncompiled and blocking ALL flux-db verification. Only
+        // the missing no-op argument is added here; their actual progress-callback
+        // feature is untouched.
+        replay_wal_streaming(&wal, &mut mt, &mut |_, _| {}).unwrap();
 
         assert_eq!(mt.get(b"a".as_slice()).map(|v| v.as_slice()), Some(b"333".as_slice()));
         assert_eq!(mt.get(b"big".as_slice()).map(|v| v.len()), Some(big.len()));
@@ -4797,7 +4879,13 @@ mod tests {
         let rss_before = vm_rss_kb();
         peak.fetch_max(rss_before, Ordering::Relaxed);
         let mut mt: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        replay_wal_streaming(&wal, &mut mt).unwrap();
+        // 2026-08-24: minimal unblock, not a feature edit — `replay_wal_streaming`
+        // gained a mandatory `on_progress` callback (line ~270) in someone else's
+        // in-flight WIP on this shared checkout, leaving these two pre-existing
+        // test call sites uncompiled and blocking ALL flux-db verification. Only
+        // the missing no-op argument is added here; their actual progress-callback
+        // feature is untouched.
+        replay_wal_streaming(&wal, &mut mt, &mut |_, _| {}).unwrap();
         stop.store(true, Ordering::Relaxed);
         sampler.join().unwrap();
 

@@ -35,7 +35,13 @@ impl StarkVerifier {
         }
     }
 
-    /// Verify STARK proof
+    fn air_is_empty(air: &crate::air::AirConstraints) -> bool {
+    air.boundary_constraints.is_empty()
+        && air.transition_constraints.is_empty()
+        && air.global_constraints.is_empty()
+}
+
+/// Verify STARK proof
     pub async fn verify(&mut self, proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
         let start = Instant::now();
 
@@ -67,6 +73,30 @@ impl StarkVerifier {
         );
 
         Ok(fri_valid && constraints_valid && commitment_valid)
+    }
+
+    /// Verify a proof against a SPECIFIC AIR.
+    ///
+    /// `verify()` alone answers "were the constraints in this proof satisfied?",
+    /// and an empty constraint set answers that trivially. This method answers
+    /// the question that actually matters: "were MY rules satisfied?" — by
+    /// pinning the AIR digest before checking anything else.
+    pub async fn verify_with_air(
+        &mut self,
+        proof: &StarkProof,
+        public_inputs: &[u64],
+        air: &crate::air::AirConstraints,
+    ) -> Result<bool> {
+        let expected = air.digest();
+        if proof.air_commitment != expected {
+            tracing::warn!("[STARK] AIR-forpligtelsen matcher ikke - beviset er lavet under andre regler");
+            return Ok(false);
+        }
+        if proof.constraint_evaluations.is_empty() && !Self::air_is_empty(air) {
+            tracing::warn!("[STARK] Beviset baerer ingen constraint-evalueringer, men AIR har regler");
+            return Ok(false);
+        }
+        self.verify(proof, public_inputs).await
     }
 
     /// Get verification performance statistics
@@ -574,5 +604,96 @@ impl BatchVerifier {
     /// Get batch verification statistics
     pub fn batch_stats(&self) -> &VerificationStats {
         self.verifier.verification_stats()
+    }
+}
+
+// ============================================================================
+// AIR wiring tests (added 2026-08-11)
+//
+// These are the tests the crate could not pass before `prove_with_air`: the
+// prover ignored the caller AIR, emitted an empty evaluation vector, and the
+// verifier read empty as "nothing to violate". A cheating trace verified fine.
+// ============================================================================
+#[cfg(test)]
+mod air_wiring_tests {
+    use crate::air::{AirConstraintBuilder, AirConstraints, ExecutionTrace};
+    use crate::stark_prover::StarkProver;
+    use crate::stark_verifier::StarkVerifier;
+
+    /// Counter 0,1,2,...,15 in a single register.
+    fn honest_trace() -> ExecutionTrace {
+        ExecutionTrace::new((0u64..16).map(|i| vec![i]).collect(), vec![0])
+    }
+
+    /// Same, but step 5 is a lie.
+    fn cheating_trace() -> ExecutionTrace {
+        let mut m: Vec<Vec<u64>> = (0u64..16).map(|i| vec![i]).collect();
+        m[5][0] = 999;
+        ExecutionTrace::new(m, vec![0])
+    }
+
+    fn counter_air() -> AirConstraints {
+        let mut a = AirConstraints::new();
+        a.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 0));
+        a.add_boundary_constraint(AirConstraintBuilder::final_value(0, 15));
+        a.add_transition_constraint(AirConstraintBuilder::arithmetic_sequence(0));
+        a
+    }
+
+    #[tokio::test]
+    async fn honest_trace_verifies() {
+        let air = counter_air();
+        let trace = honest_trace();
+        let proof = StarkProver::new().prove_with_air(&trace, &air).await.unwrap();
+        assert!(proof.constraint_evaluations.iter().all(|&e| e == 0),
+                "aerlig trace gav evalueringer != 0: {:?}", proof.constraint_evaluations);
+        let ok = StarkVerifier::new().verify_with_air(&proof, &trace.public_inputs, &air).await.unwrap();
+        assert!(ok, "aerlig trace blev afvist");
+    }
+
+    #[tokio::test]
+    async fn cheating_trace_is_rejected() {
+        // THE regression this whole change exists for.
+        let air = counter_air();
+        let trace = cheating_trace();
+        let proof = StarkProver::new().prove_with_air(&trace, &air).await.unwrap();
+        assert!(proof.constraint_evaluations.iter().any(|&e| e != 0),
+                "snydt trace gav kun nuller - AIR blev ikke evalueret");
+        let ok = StarkVerifier::new().verify_with_air(&proof, &trace.public_inputs, &air).await.unwrap();
+        assert!(!ok, "SNYDT TRACE BLEV ACCEPTERET");
+    }
+
+    #[tokio::test]
+    async fn legacy_prove_cannot_claim_constraints() {
+        // A proof from the old byte-based API binds no AIR, so it must not pass
+        // a verification that demands one.
+        let trace = honest_trace();
+        let proof = StarkProver::new().prove(&trace.trace_matrix, b"opaque").await.unwrap();
+        assert_eq!(proof.air_commitment, [0u8; 32]);
+        let ok = StarkVerifier::new()
+            .verify_with_air(&proof, &proof.public_inputs.clone(), &counter_air()).await.unwrap();
+        assert!(!ok, "bevis uden AIR bestod en AIR-verifikation");
+    }
+
+    #[tokio::test]
+    async fn a_proof_under_other_rules_is_rejected() {
+        let trace = honest_trace();
+        let proof = StarkProver::new().prove_with_air(&trace, &counter_air()).await.unwrap();
+        let mut other = AirConstraints::new();
+        other.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 42));
+        let ok = StarkVerifier::new()
+            .verify_with_air(&proof, &trace.public_inputs, &other).await.unwrap();
+        assert!(!ok, "bevis lavet under andre regler blev accepteret");
+    }
+
+    #[test]
+    fn digest_covers_content_not_just_shape() {
+        // Two AIRs with identical COUNTS but different values must differ.
+        let mut a = AirConstraints::new();
+        a.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 0));
+        let mut b = AirConstraints::new();
+        b.add_boundary_constraint(AirConstraintBuilder::initial_value(0, 1));
+        assert_ne!(a.digest(), b.digest(), "digest ser kun paa antal, ikke indhold");
+        assert_eq!(a.digest(), a.clone().digest(), "digest er ikke deterministisk");
     }
 }

@@ -9,6 +9,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 flux-p2p = { path = "../flux-p2p" }
+# Roadmap attestations are signed require-BOTH (SQIsign L5 + Ed25519). This crate calls
+# flux-sqisign DIRECTLY rather than reusing fluxc-core::provenance: fluxc-core already
+# depends on flux-rev, so the reverse edge would be a dependency cycle. The two share an
+# identity through the agent key FILE FORMAT, not through a function call.
+flux-sqisign = { path = "../flux-sqisign" }
 tokio = { workspace = true }
 toml = "0.8"
 

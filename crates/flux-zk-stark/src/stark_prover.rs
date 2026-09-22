@@ -34,6 +34,7 @@ impl StarkProver {
         let proof = StarkProof {
             execution_trace_commitment: self.compute_trace_commitment(trace),
             constraint_evaluations: self.evaluate_constraints_cpu(trace, constraints),
+            air_commitment: [0u8; 32], // legacy path: no AIR bound
             fri_proof: self.generate_fri_proof_cpu(trace).await,
             public_inputs: trace.first().unwrap_or(&vec![]).clone(),
             proof_size_bytes: 50_000, // Estimated proof size
@@ -43,6 +44,46 @@ impl StarkProver {
         let duration = start.elapsed();
         self.performance_stats
             .record_proving_time(trace.len(), duration);
+
+        Ok(StarkProof {
+            proving_time_ms: duration.as_millis() as u64,
+            ..proof
+        })
+    }
+
+    /// Generate a STARK proof that actually EVALUATES the caller's AIR.
+    ///
+    /// This is the method `prove()` should always have been. `prove()` receives
+    /// constraints as opaque bytes and therefore emits an empty evaluation
+    /// vector, which the verifier accepts as "nothing to violate". Here the
+    /// constraints are a real `AirConstraints`, so they can be evaluated into
+    /// the proof — and a verifier can finally check them.
+    ///
+    /// A violated constraint is NOT an error: the non-zero evaluations are
+    /// written into the proof and the verifier rejects it. Refusing to build the
+    /// proof here would once again put the honesty check on the prover's side.
+    pub async fn prove_with_air(
+        &mut self,
+        trace: &crate::air::ExecutionTrace,
+        air: &crate::air::AirConstraints,
+    ) -> Result<StarkProof> {
+        let start = Instant::now();
+        let evaluations = air.evaluate_constraints(trace).flatten();
+        let matrix = &trace.trace_matrix;
+
+        let proof = StarkProof {
+            execution_trace_commitment: self.compute_trace_commitment(matrix),
+            constraint_evaluations: evaluations,
+            air_commitment: air.digest(),
+            fri_proof: self.generate_fri_proof_cpu(matrix).await,
+            public_inputs: trace.public_inputs.clone(),
+            proof_size_bytes: 50_000,
+            proving_time_ms: 0,
+        };
+
+        let duration = start.elapsed();
+        self.performance_stats
+            .record_proving_time(matrix.len(), duration);
 
         Ok(StarkProof {
             proving_time_ms: duration.as_millis() as u64,
@@ -289,6 +330,11 @@ pub struct StarkProof {
     pub execution_trace_commitment: [u8; 32],
     /// Evaluated constraints
     pub constraint_evaluations: Vec<u64>,
+    /// Commitment to the AIR (the constraint RULES) this proof was made under.
+    /// Zero means "no AIR was bound" — i.e. a proof from the legacy byte-based
+    /// `prove()`, which cannot make any statement about constraints.
+    #[serde(default)]
+    pub air_commitment: [u8; 32],
     /// FRI low-degree proof
     pub fri_proof: Vec<u8>,
     /// Public inputs
@@ -305,6 +351,7 @@ impl StarkProof {
         Self {
             execution_trace_commitment: gpu_proof.trace_commitment,
             constraint_evaluations: vec![], // GPU proof doesn't expose this directly
+            air_commitment: [0u8; 32], // legacy path: no AIR bound
             fri_proof: gpu_proof
                 .fri_proof
                 .commitment_layers

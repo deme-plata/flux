@@ -174,6 +174,41 @@ impl AirConstraints {
         evaluations
     }
 
+    /// Commit to the RULES themselves.
+    ///
+    /// Without this, a proof says "some constraint set was satisfied" — which a
+    /// dishonest prover satisfies by supplying an empty constraint set. The
+    /// verifier must be able to say "I demand THESE rules", and that requires a
+    /// digest over the constraints' CONTENT, not merely their count.
+    ///
+    /// Caveat, stated rather than hidden: the encoding below uses the derived
+    /// `Debug` form of the constraint expressions. That is stable for a given
+    /// build and covers every field, but it is not a wire format — two
+    /// different compiler versions could in principle render it differently.
+    /// Prover and verifier must therefore run the same build. Replacing this
+    /// with an explicit encoding is the natural next step if AIRs ever have to
+    /// be verified across versions.
+    pub fn digest(&self) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"flux-zk-stark/air/v1");
+        h.update((self.constraint_degree as u64).to_le_bytes());
+        h.update((self.blowup_factor as u64).to_le_bytes());
+        h.update((self.boundary_constraints.len() as u64).to_le_bytes());
+        for c in &self.boundary_constraints {
+            h.update(format!("B|{:?}|{}|{}|{}", c.step, c.register, c.value, c.description).as_bytes());
+        }
+        h.update((self.transition_constraints.len() as u64).to_le_bytes());
+        for c in &self.transition_constraints {
+            h.update(format!("T|{:?}|{}|{}", c.expression, c.degree, c.description).as_bytes());
+        }
+        h.update((self.global_constraints.len() as u64).to_le_bytes());
+        for c in &self.global_constraints {
+            h.update(format!("G|{:?}", c).as_bytes());
+        }
+        h.finalize().into()
+    }
+
     /// Check if all constraints are satisfied
     pub fn verify_constraints(&self, trace: &ExecutionTrace) -> bool {
         let evaluations = self.evaluate_constraints(trace);
@@ -347,6 +382,21 @@ impl ConstraintEvaluations {
         self.boundary_results.iter().all(|&x| x == 0)
             && self.transition_results.iter().all(|&x| x == 0)
             && self.global_results.iter().all(|&x| x == 0)
+    }
+
+    /// Flatten every evaluation into the single vector a STARK proof carries.
+    ///
+    /// The order (boundary -> transition -> global) is part of the proof format:
+    /// a verifier that recomputes evaluations must use the same order, or the
+    /// comparison is meaningless.
+    pub fn flatten(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(
+            self.boundary_results.len() + self.transition_results.len() + self.global_results.len(),
+        );
+        out.extend_from_slice(&self.boundary_results);
+        out.extend_from_slice(&self.transition_results);
+        out.extend_from_slice(&self.global_results);
+        out
     }
 
     /// Count number of violated constraints

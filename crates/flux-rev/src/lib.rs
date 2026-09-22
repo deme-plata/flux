@@ -33,6 +33,10 @@ pub mod hooks;
 /// Content-addressed blob search (replaces find + grep).
 pub mod search;
 
+/// Signed, content-addressed ROADMAP ATTESTATIONS — proving a claim ABOUT a tree,
+/// not just the tree's contents.
+pub mod roadmap;
+
 /// Directories never captured (build output, vcs metadata, vendored deps).
 pub const SKIP_DIRS: &[&str] = &[
     ".git", ".flux-rev", "target", "node_modules", "dist", "build", ".cargo",

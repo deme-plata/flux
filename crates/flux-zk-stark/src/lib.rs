@@ -101,6 +101,26 @@ impl StarkSystem {
         }
     }
 
+    /// Prove with a real AIR (CPU path only - the GPU prover does not carry
+    /// constraint evaluations, so it cannot make a constraint statement).
+    pub async fn prove_with_air(
+        &mut self,
+        trace: &crate::air::ExecutionTrace,
+        air: &crate::air::AirConstraints,
+    ) -> Result<StarkProof> {
+        self.cpu_prover.prove_with_air(trace, air).await
+    }
+
+    /// Verify against a specific AIR.
+    pub async fn verify_with_air(
+        &mut self,
+        proof: &StarkProof,
+        public_inputs: &[u64],
+        air: &crate::air::AirConstraints,
+    ) -> Result<bool> {
+        self.verifier.verify_with_air(proof, public_inputs, air).await
+    }
+
     /// Verify STARK proof
     pub async fn verify(&mut self, proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
         let start = std::time::Instant::now();

@@ -1,0 +1,11 @@
+[package]
+name = "flux-soundtrack"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hound = "3.5"
+
+[[bin]]
+name = "flux-soundtrack"
+path = "src/main.rs"

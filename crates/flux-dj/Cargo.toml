@@ -1,0 +1,32 @@
+[package]
+name = "flux-dj"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-dj — DJ/live-performance track logging, Camelot-wheel harmonic-mixing compatibility, and autocorrelation-based tempo estimation, ported from flux-arxiv-latex's ai_dj_live.rs (\"The Beat Budget\"). HTTP webhook receiver + set history API + standalone MCP tool server."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+# Auto-updater (modeled on gui/slint-wallet/src/updater.rs's proven precedent):
+# semver for version comparison, sha2 for mandatory checksum verification,
+# self-replace for the cross-platform atomic running-binary swap.
+semver = "1"
+sha2 = "0.10"
+self-replace = "1.5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "flux-dj-server"
+path = "src/bin/flux-dj-server.rs"
+
+[[bin]]
+name = "flux-dj-mcp"
+path = "src/bin/flux-dj-mcp.rs"

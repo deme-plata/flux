@@ -1,0 +1,614 @@
+{
+ "papers": [
+  {
+   "id": "2605.12287",
+   "title": "The SMC Blind Spot: A Failure Mode Analysis of State-of-the-Art Beat Tracking",
+   "authors": [
+    "Jaehoon Ahn",
+    "Tae Gum Hwang",
+    "Moon-Ryul Jung"
+   ],
+   "summary": "Over the past two decades, the task of musical beat tracking has transitioned from heuristic onset detection algorithms to highly capable deep neural networks (DNN). Although DNN-based beat tracking models achieve near-perfect performance on mainstream, percussive datasets, the SMC dataset has stubbornly yielded low F-measure scores. By testing how well state-of-the-art models detect beats on individual tracks in the SMC dataset, we identify three distinct failure modes: octave errors, continuity errors, and complete tracking failure where all metrics fall below 0.3. We reveal that state-of-the-art models tend to generate \"confident-but-wrong\" activations. Furthermore, we show that the standard DBN's default minimum tempo of 55 BPM prevents it from inferring the correct tempo for 21\\% of SMC tracks, forcing double-tempo predictions on slow music. By exposing such fundamental oversights, we provide concrete directions for improving beat and downbeat detection, specifically emphasizing training data diversification and multi-hypothesis tempo estimation.",
+   "published": "2026-05-12",
+   "categories": [
+    "eess.AS",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/2605.12287v1"
+  },
+  {
+   "id": "1704.02216",
+   "title": "OBTAIN: Real-Time Beat Tracking in Audio Signals",
+   "authors": [
+    "Ali Mottaghi",
+    "Kayhan Behdin",
+    "Ashkan Esmaeili",
+    "Mohammadreza Heydari",
+    "Farokh Marvasti"
+   ],
+   "summary": "In this paper, we design a system in order to perform the real-time beat tracking for an audio signal. We use Onset Strength Signal (OSS) to detect the onsets and estimate the tempos. Then, we form Cumulative Beat Strength Signal (CBSS) by taking advantage of OSS and estimated tempos. Next, we perform peak detection by extracting the periodic sequence of beats among all CBSS peaks. In simulations, we can see that our proposed algorithm, Online Beat TrAckINg (OBTAIN), outperforms state-of-art results in terms of prediction accuracy while maintaining comparable and practical computational complexity. The real-time performance is tractable visually as illustrated in the simulations.",
+   "published": "2017-04-07",
+   "categories": [
+    "cs.SD",
+    "cs.IR",
+    "cs.LG",
+    "cs.MM"
+   ],
+   "url": "http://arxiv.org/abs/1704.02216v2"
+  },
+  {
+   "id": "2308.10355",
+   "title": "Local Periodicity-Based Beat Tracking for Expressive Classical Piano Music",
+   "authors": [
+    "Ching-Yu Chiu",
+    "Meinard M\u00fcller",
+    "Matthew E. P. Davies",
+    "Alvin Wen-Yu Su",
+    "Yi-Hsuan Yang"
+   ],
+   "summary": "To model the periodicity of beats, state-of-the-art beat tracking systems use \"post-processing trackers\" (PPTs) that rely on several empirically determined global assumptions for tempo transition, which work well for music with a steady tempo. For expressive classical music, however, these assumptions can be too rigid. With two large datasets of Western classical piano music, namely the Aligned Scores and Performances (ASAP) dataset and a dataset of Chopin's Mazurkas (Maz-5), we report on experiments showing the failure of existing PPTs to cope with local tempo changes, thus calling for new methods. In this paper, we propose a new local periodicity-based PPT, called predominant local pulse-based dynamic programming (PLPDP) tracking, that allows for more flexible tempo transitions. Specifically, the new PPT incorporates a method called \"predominant local pulses\" (PLP) in combination with a dynamic programming (DP) component to jointly consider the locally detected periodicity and beat activation strength at each time instant. Accordingly, PLPDP accounts for the local periodicity, rather than relying on a global tempo assumption. Compared to existing PPTs, PLPDP particularly enhances the recall values at the cost of a lower precision, resulting in an overall improvement of F1-score for beat tracking in ASAP (from 0.473 to 0.493) and Maz-5 (from 0.595 to 0.838).",
+   "published": "2023-08-20",
+   "categories": [
+    "eess.AS",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/2308.10355v1"
+  },
+  {
+   "id": "2608.04624",
+   "title": "Masked diffusion enables coherent beat tracking",
+   "authors": [
+    "Francesco Foscarin",
+    "Filip Korzeniowski",
+    "Richard Vogl"
+   ],
+   "summary": "Current neural networks for beat tracking generate invalid outputs, such as consecutive downbeats and erratic tempo changes, even when these are not present in the training data. Heavy post-processing techniques can alleviate these problems, but the original cause of this inconsistent behaviour remains unknown. We hypothesise that it stems from inadequate modelling of multiple plausible output beat grids, resulting in an invalid mixture of competing interpretations. We propose a masked diffusion approach that properly models multiple outputs and enables the model to build coherent predictions through iterative inference. We devise three modifications to standard masked diffusion that enable its application to beat tracking: independent masking of beats and downbeats during training and inference, a balanced masking scheduler for inference, and peak-picking across inference steps. Our approach reduces erratic behaviours and improves beat-tracking performance.",
+   "published": "2026-08-05",
+   "categories": [
+    "cs.SD",
+    "cs.AI"
+   ],
+   "url": "http://arxiv.org/abs/2608.04624v1"
+  },
+  {
+   "id": "2507.04858",
+   "title": "Towards Human-in-the-Loop Onset Detection: A Transfer Learning Approach for Maracatu",
+   "authors": [
+    "Ant\u00f3nio S\u00e1 Pinto"
+   ],
+   "summary": "We explore transfer learning strategies for musical onset detection in the Afro-Brazilian Maracatu tradition, which features complex rhythmic patterns that challenge conventional models. We adapt two Temporal Convolutional Network architectures: one pre-trained for onset detection (intra-task) and another for beat tracking (inter-task). Using only 5-second annotated snippets per instrument, we fine-tune these models through layer-wise retraining strategies for five traditional percussion instruments. Our results demonstrate significant improvements over baseline performance, with F1 scores reaching up to 0.998 in the intra-task setting and improvements of over 50 percentage points in best-case scenarios. The cross-task adaptation proves particularly effective for time-keeping instruments, where onsets naturally align with beat positions. The optimal fine-tuning configuration varies by instrument, highlighting the importance of instrument-specific adaptation strategies. This approach addresses the challenges of underrepresented musical traditions, offering an efficient human-in-the-loop methodology that minimizes annotation effort while maximizing performance. Our findings contribute to more inclusive music information retrieval tools applicable beyond Western musical contexts.",
+   "published": "2025-07-07",
+   "categories": [
+    "cs.SD",
+    "cs.AI",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2507.04858v1"
+  },
+  {
+   "id": "1712.02567",
+   "title": "On Musical Onset Detection via the S-Transform",
+   "authors": [
+    "Nishal Silva",
+    "Chathuranga Weeraddana",
+    "Carlo Fischione"
+   ],
+   "summary": "Musical onset detection is a key component in any beat tracking system. Existing onset detection methods are based on temporal/spectral analysis, or methods that integrate temporal and spectral information together with statistical estimation and machine learning models. In this paper, we propose a method to localize onset components in music by using the S-transform, and thus, the method is purely based on temporal/spectral data. Unlike the other methods based on temporal/spectral data, which usually rely short time Fourier transform (STFT), our method enables effective isolation of crucial frequency subbands due to the frequency dependent resolution of S-transform. Moreover, numerical results show, even with less computationally intensive steps, the proposed method can closely resemble the performance of more resource intensive statistical estimation based approaches.",
+   "published": "2017-12-07",
+   "categories": [
+    "eess.AS",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/1712.02567v2"
+  },
+  {
+   "id": "2401.08891",
+   "title": "Tempo estimation as fully self-supervised binary classification",
+   "authors": [
+    "Florian Henkel",
+    "Jaehun Kim",
+    "Matthew C. McCallum",
+    "Samuel E. Sandberg",
+    "Matthew E. P. Davies"
+   ],
+   "summary": "This paper addresses the problem of global tempo estimation in musical audio. Given that annotating tempo is time-consuming and requires certain musical expertise, few publicly available data sources exist to train machine learning models for this task. Towards alleviating this issue, we propose a fully self-supervised approach that does not rely on any human labeled data. Our method builds on the fact that generic (music) audio embeddings already encode a variety of properties, including information about tempo, making them easily adaptable for downstream tasks. While recent work in self-supervised tempo estimation aimed to learn a tempo specific representation that was subsequently used to train a supervised classifier, we reformulate the task into the binary classification problem of predicting whether a target track has the same or a different tempo compared to a reference. While the former still requires labeled training data for the final classification model, our approach uses arbitrary unlabeled music data in combination with time-stretching for model training as well as a small set of synthetically created reference samples for predicting the final tempo. Evaluation of our approach in comparison with the state-of-the-art reveals highly competitive performance when the constraint of finding the precise tempo octave is relaxed.",
+   "published": "2024-01-17",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2401.08891v1"
+  },
+  {
+   "id": "2504.18502",
+   "title": "Music Tempo Estimation on Solo Instrumental Performance",
+   "authors": [
+    "Zhanhong He",
+    "Roberto Togneri",
+    "Xiangyu Zhang"
+   ],
+   "summary": "Recently, automatic music transcription has made it possible to convert musical audio into accurate MIDI. However, the resulting MIDI lacks music notations such as tempo, which hinders its conversion into sheet music. In this paper, we investigate state-of-the-art tempo estimation techniques and evaluate their performance on solo instrumental music. These include temporal convolutional network (TCN) and recurrent neural network (RNN) models that are pretrained on massive of mixed vocals and instrumental music, as well as TCN models trained specifically with solo instrumental performances. Through evaluations on drum, guitar, and classical piano datasets, our TCN models with the new training scheme achieved the best performance. Our newly trained TCN model increases the Acc1 metric by 38.6% for guitar tempo estimation, compared to the pretrained TCN model with an Acc1 of 61.1%. Although our trained TCN model is twice as accurate as the pretrained TCN model in estimating classical piano tempo, its Acc1 is only 50.9%. To improve the performance of deep learning models, we investigate their combinations with various post-processing methods. These post-processing techniques effectively enhance the performance of deep learning models when they struggle to estimate the tempo of specific instruments.",
+   "published": "2025-04-25",
+   "categories": [
+    "eess.AS",
+    "cs.IR"
+   ],
+   "url": "http://arxiv.org/abs/2504.18502v1"
+  },
+  {
+   "id": "1706.02921",
+   "title": "End-to-End Musical Key Estimation Using a Convolutional Neural Network",
+   "authors": [
+    "Filip Korzeniowski",
+    "Gerhard Widmer"
+   ],
+   "summary": "We present an end-to-end system for musical key estimation, based on a convolutional neural network. The proposed system not only out-performs existing key estimation methods proposed in the academic literature; it is also capable of learning a unified model for diverse musical genres that performs comparably to existing systems specialised for specific genres. Our experiments confirm that different genres do differ in their interpretation of tonality, and thus a system tuned e.g. for pop music performs subpar on pieces of electronic music. They also reveal that such cross-genre setups evoke specific types of error (predicting the relative or parallel minor). However, using the data-driven approach proposed in this paper, we can train models that deal with multiple musical styles adequately, and without major losses in accuracy.",
+   "published": "2017-06-09",
+   "categories": [
+    "cs.LG",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/1706.02921v1"
+  },
+  {
+   "id": "2303.02599",
+   "title": "Hybrid Y-Net Architecture for Singing Voice Separation",
+   "authors": [
+    "Rashen Fernando",
+    "Pamudu Ranasinghe",
+    "Udula Ranasinghe",
+    "Janaka Wijayakulasooriya",
+    "Pantaleon Perera"
+   ],
+   "summary": "This research paper presents a novel deep learning-based neural network architecture, named Y-Net, for achieving music source separation. The proposed architecture performs end-to-end hybrid source separation by extracting features from both spectrogram and waveform domains. Inspired by the U-Net architecture, Y-Net predicts a spectrogram mask to separate vocal sources from a mixture signal. Our results demonstrate the effectiveness of the proposed architecture for music source separation with fewer parameters. Overall, our work presents a promising approach for improving the accuracy and efficiency of music source separation.",
+   "published": "2023-03-05",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2303.02599v1"
+  },
+  {
+   "id": "1805.08559",
+   "title": "Music Source Separation Using Stacked Hourglass Networks",
+   "authors": [
+    "Sungheon Park",
+    "Taehoon Kim",
+    "Kyogu Lee",
+    "Nojun Kwak"
+   ],
+   "summary": "In this paper, we propose a simple yet effective method for multiple music source separation using convolutional neural networks. Stacked hourglass network, which was originally designed for human pose estimation in natural images, is applied to a music source separation task. The network learns features from a spectrogram image across multiple scales and generates masks for each music source. The estimated mask is refined as it passes over stacked hourglass modules. The proposed framework is able to separate multiple music sources using a single network. Experimental results on MIR-1K and DSD100 datasets validate that the proposed method achieves competitive results comparable to the state-of-the-art methods in multiple music source separation and singing voice separation tasks.",
+   "published": "2018-05-22",
+   "categories": [
+    "cs.SD",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/1805.08559v2"
+  },
+  {
+   "id": "2402.18407",
+   "title": "Why does music source separation benefit from cacophony?",
+   "authors": [
+    "Chang-Bin Jeon",
+    "Gordon Wichern",
+    "Fran\u00e7ois G. Germain",
+    "Jonathan Le Roux"
+   ],
+   "summary": "In music source separation, a standard training data augmentation procedure is to create new training samples by randomly combining instrument stems from different songs. These random mixes have mismatched characteristics compared to real music, e.g., the different stems do not have consistent beat or tonality, resulting in a cacophony. In this work, we investigate why random mixing is effective when training a state-of-the-art music source separation model in spite of the apparent distribution shift it creates. Additionally, we examine why performance levels off despite potentially limitless combinations, and examine the sensitivity of music source separation performance to differences in beat and tonality of the instrumental sources in a mixture.",
+   "published": "2024-02-28",
+   "categories": [
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2402.18407v1"
+  },
+  {
+   "id": "2410.20773",
+   "title": "An Ensemble Approach to Music Source Separation: A Comparative Analysis of Conventional and Hierarchical Stem Separation",
+   "authors": [
+    "Saarth Vardhan",
+    "Pavani R Acharya",
+    "Samarth S Rao",
+    "Oorjitha Ratna Jasthi",
+    "S Natarajan"
+   ],
+   "summary": "Music source separation (MSS) is a task that involves isolating individual sound sources, or stems, from mixed audio signals. This paper presents an ensemble approach to MSS, combining several state-of-the-art architectures to achieve superior separation performance across traditional Vocal, Drum, and Bass (VDB) stems, as well as expanding into second-level hierarchical separation for sub-stems like kick, snare, lead vocals, and background vocals. Our method addresses the limitations of relying on a single model by utilising the complementary strengths of various models, leading to more balanced results across stems. For stem selection, we used the harmonic mean of Signal-to-Noise Ratio (SNR) and Signal-to-Distortion Ratio (SDR), ensuring that extreme values do not skew the results and that both metrics are weighted effectively. In addition to consistently high performance across the VDB stems, we also explored second-level hierarchical separation, revealing important insights into the complexities of MSS and how factors like genre and instrumentation can influence model performance. While the second-level separation results show room for improvement, the ability to isolate sub-stems marks a significant advancement. Our findings pave the way for further research in MSS, particularly in expanding model capabilities beyond VDB and improving niche stem separations such as guitar and piano.",
+   "published": "2024-10-28",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2410.20773v1"
+  },
+  {
+   "id": "2608.05442",
+   "title": "Diff2Mix: Controllable Music Mixing via Diffusion Models and Differentiable Audio Effects",
+   "authors": [
+    "Yisu Zong",
+    "Jinjie Shi",
+    "Joshua Reiss"
+   ],
+   "summary": "Automatic music mixing aims to combine multitrack recordings into a balanced and coherent musical piece. Because the content of different songs and the subjective preferences of mixing engineers jointly shape the final outcome, a practical system should deliver well-balanced mixes while allowing for controllable stylistic variation. However, most existing methods treat automatic mixing and mixing style control as separate tasks, making it difficult for a single system to produce high-quality mixes while remaining editable and style-aware. To address this limitation, this paper presents Diff2Mix, a generative automatic mixing system based on diffusion models and a differentiable mixing console. This system offers two levels of optional user control: a reference audio enables overall production style control, and the differentiable mixing console provides explicit audio effects parameters for interpretability and fine-grained optimization. We demonstrate our system's competitive performance through both objective and subjective evaluations in terms of mixing quality and control ability. We provide code and audio samples at our project page https://zys711.github.io/Diff2Mix .",
+   "published": "2026-08-05",
+   "categories": [
+    "eess.AS",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/2608.05442v1"
+  },
+  {
+   "id": "2208.11428",
+   "title": "Automatic music mixing with deep learning and out-of-domain data",
+   "authors": [
+    "Marco A. Mart\u00ednez-Ram\u00edrez",
+    "Wei-Hsiang Liao",
+    "Giorgio Fabbro",
+    "Stefan Uhlich",
+    "Chihiro Nagashima",
+    "Yuki Mitsufuji"
+   ],
+   "summary": "Music mixing traditionally involves recording instruments in the form of clean, individual tracks and blending them into a final mixture using audio effects and expert knowledge (e.g., a mixing engineer). The automation of music production tasks has become an emerging field in recent years, where rule-based methods and machine learning approaches have been explored. Nevertheless, the lack of dry or clean instrument recordings limits the performance of such models, which is still far from professional human-made mixes. We explore whether we can use out-of-domain data such as wet or processed multitrack music recordings and repurpose it to train supervised deep learning models that can bridge the current gap in automatic mixing quality. To achieve this we propose a novel data preprocessing method that allows the models to perform automatic music mixing. We also redesigned a listening test method for evaluating music mixing systems. We validate our results through such subjective tests using highly experienced mixing engineers as participants.",
+   "published": "2022-08-24",
+   "categories": [
+    "eess.AS",
+    "cs.LG",
+    "cs.SD",
+    "eess.SP"
+   ],
+   "url": "http://arxiv.org/abs/2208.11428v2"
+  },
+  {
+   "id": "2202.01664",
+   "title": "Distortion Audio Effects: Learning How to Recover the Clean Signal",
+   "authors": [
+    "Johannes Imort",
+    "Giorgio Fabbro",
+    "Marco A. Mart\u00ednez Ram\u00edrez",
+    "Stefan Uhlich",
+    "Yuichiro Koyama",
+    "Yuki Mitsufuji"
+   ],
+   "summary": "Given the recent advances in music source separation and automatic mixing, removing audio effects in music tracks is a meaningful step toward developing an automated remixing system. This paper focuses on removing distortion audio effects applied to guitar tracks in music production. We explore whether effect removal can be solved by neural networks designed for source separation and audio effect modeling.   Our approach proves particularly effective for effects that mix the processed and clean signals. The models achieve better quality and significantly faster inference compared to state-of-the-art solutions based on sparse optimization. We demonstrate that the models are suitable not only for declipping but also for other types of distortion effects. By discussing the results, we stress the usefulness of multiple evaluation metrics to assess different aspects of reconstruction in distortion effect removal.",
+   "published": "2022-02-03",
+   "categories": [
+    "eess.AS",
+    "cs.LG",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/2202.01664v3"
+  },
+  {
+   "id": "2507.02273",
+   "title": "Fx-Encoder++: Extracting Instrument-Wise Audio Effects Representations from Mixtures",
+   "authors": [
+    "Yen-Tung Yeh",
+    "Junghyun Koo",
+    "Marco A. Mart\u00ednez-Ram\u00edrez",
+    "Wei-Hsiang Liao",
+    "Yi-Hsuan Yang",
+    "Yuki Mitsufuji"
+   ],
+   "summary": "General-purpose audio representations have proven effective across diverse music information retrieval applications, yet their utility in intelligent music production remains limited by insufficient understanding of audio effects (Fx). Although previous approaches have emphasized audio effects analysis at the mixture level, this focus falls short for tasks demanding instrument-wise audio effects understanding, such as automatic mixing. In this work, we present Fx-Encoder++, a novel model designed to extract instrument-wise audio effects representations from music mixtures. Our approach leverages a contrastive learning framework and introduces an \"extractor\" mechanism that, when provided with instrument queries (audio or text), transforms mixture-level audio effects embeddings into instrument-wise audio effects embeddings. We evaluated our model across retrieval and audio effects parameter matching tasks, testing its performance across a diverse range of instruments. The results demonstrate that Fx-Encoder++ outperforms previous approaches at mixture level and show a novel ability to extract effects representation instrument-wise, addressing a critical capability gap in intelligent music production systems.",
+   "published": "2025-07-03",
+   "categories": [
+    "cs.SD",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2507.02273v1"
+  },
+  {
+   "id": "2008.10267",
+   "title": "A Computational Analysis of Real-World DJ Mixes using Mix-To-Track Subsequence Alignment",
+   "authors": [
+    "Taejun Kim",
+    "Minsuk Choi",
+    "Evan Sacks",
+    "Yi-Hsuan Yang",
+    "Juhan Nam"
+   ],
+   "summary": "A DJ mix is a sequence of music tracks concatenated seamlessly, typically rendered for audiences in a live setting by a DJ on stage. As a DJ mix is produced in a studio or the live version is recorded for music streaming services, computational methods to analyze DJ mixes, for example, extracting track information or understanding DJ techniques, have drawn research interests. Many of previous works are, however, limited to identifying individual tracks in a mix or segmenting it, and the sizes of the datasets are usually small. In this paper, we provide an in-depth analysis of DJ music by aligning a mix to its original music tracks. We set up the subsequence alignment such that the audio features are less sensitive to the tempo or key change of the original track in a mix. This approach provides temporally tight mix-to-track matching from which we can obtain cue-points, transition length, mix segmentation, and musical changes in DJ performance. Using 1,557 mixes from 1001Tracklists including 13,728 tracks and 20,765 transitions, we conduct the proposed analysis and show a wide range of statistics, which may elucidate the creative process of DJ music making.",
+   "published": "2020-08-24",
+   "categories": [
+    "eess.AS",
+    "cs.IR"
+   ],
+   "url": "http://arxiv.org/abs/2008.10267v1"
+  },
+  {
+   "id": "2411.12209",
+   "title": "Zero-Shot Crate Digging: DJ Tool Retrieval Using Speech Activity, Music Structure And CLAP Embeddings",
+   "authors": [
+    "Iroro Orife"
+   ],
+   "summary": "In genres like Hip-Hop, RnB, Reggae, Dancehall and just about every Electronic/Dance/Club style, DJ tools are a special set of audio files curated to heighten the DJ's musical performance and creative mixing choices. In this work we demonstrate an approach to discovering DJ tools in personal music collections. Leveraging open-source libraries for speech/music activity, music boundary analysis and a Contrastive Language-Audio Pretraining (CLAP) model for zero-shot audio classification, we demonstrate a novel system designed to retrieve (or rediscover) compelling DJ tools for use live or in the studio.",
+   "published": "2024-11-19",
+   "categories": [
+    "cs.SD",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2411.12209v1"
+  },
+  {
+   "id": "2007.08411",
+   "title": "Automatic Detection of Cue Points for DJ Mixing",
+   "authors": [
+    "Micka\u00ebl Zehren",
+    "Marco Alunno",
+    "Paolo Bientinesi"
+   ],
+   "summary": "The automatic identification of cue points is a central task in applications as diverse as music thumbnailing, mash-ups generation, and DJ mixing. Our focus lies in electronic dance music and in specific cue points, the \"switch points\", that make it possible to automatically construct transitions among tracks, mimicking what professional DJs do. We present an approach for the detection of switch points that embody a few general rules we established from interviews with professional DJs; the implementation of these rules is based on features extraction and novelty analysis. The quality of the generated switch points is assessed both by comparing them with a manually annotated dataset that we curated, and by evaluating them individually. We found that about 96\\% of the points generated by our methodology are of good quality for use in a DJ mix.",
+   "published": "2020-07-16",
+   "categories": [
+    "cs.SD",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2007.08411v1"
+  },
+  {
+   "id": "2410.04198",
+   "title": "DJ Mix Transcription with Multi-Pass Non-Negative Matrix Factorization",
+   "authors": [
+    "\u00c9tienne Paul Andr\u00e9",
+    "Dominique Fourer",
+    "Diemo Schwarz"
+   ],
+   "summary": "DJ mix transcription is a crucial step towards DJ mix reverse engineering, which estimates the set of parameters and audio effects applied to a set of existing tracks to produce a performative DJ mix. We introduce a new approach based on a multi-pass NMF algorithm where the dictionary matrix corresponds to a set of spectrogram slices of the source tracks present in the mix.   The multi-pass strategy is motivated by the high computational cost resulting from the use of a large NMF dictionary. The proposed method uses inter-pass filtering to favor temporal continuity and sparseness and is evaluated on a publicly available dataset.   Our comparative results considering a baseline method based on dynamic time warping (DTW) are promising and pave the way of future NMF-based applications.",
+   "published": "2024-10-05",
+   "categories": [
+    "eess.AS",
+    "eess.SP"
+   ],
+   "url": "http://arxiv.org/abs/2410.04198v1"
+  },
+  {
+   "id": "1511.07004",
+   "title": "Understanding Music Playlists",
+   "authors": [
+    "Keunwoo Choi",
+    "George Fazekas",
+    "Mark Sandler"
+   ],
+   "summary": "As music streaming services dominate the music industry, the playlist is becoming an increasingly crucial element of music consumption. Con- sequently, the music recommendation problem is often casted as a playlist generation prob- lem. Better understanding of the playlist is there- fore necessary for developing better playlist gen- eration algorithms. In this work, we analyse two playlist datasets to investigate some com- monly assumed hypotheses about playlists. Our findings indicate that deeper understanding of playlists is needed to provide better prior infor- mation and improve machine learning algorithms in the design of recommendation systems.",
+   "published": "2015-11-22",
+   "categories": [
+    "cs.MM",
+    "cs.IR"
+   ],
+   "url": "http://arxiv.org/abs/1511.07004v1"
+  },
+  {
+   "id": "1807.05858",
+   "title": "Machine Learning Approaches to Hybrid Music Recommender Systems",
+   "authors": [
+    "Andreu Vall",
+    "Gerhard Widmer"
+   ],
+   "summary": "Music recommender systems have become a key technology supporting the access to increasingly larger music catalogs in on-line music streaming services, on-line music shops, and private collections. The interaction of users with large music catalogs is a complex phenomenon researched from different disciplines. We survey our works investigating the machine learning and data mining aspects of hybrid music recommender systems (i.e., systems that integrate different recommendation techniques). We proposed hybrid music recommender systems based solely on data and robust to the so-called \"cold-start problem\" for new music items, favoring the discovery of relevant but non-popular music. We thoroughly studied the specific task of music playlist continuation, by analyzing fundamental playlist characteristics, song feature representations, and the relationship between playlists and the songs therein.",
+   "published": "2018-07-16",
+   "categories": [
+    "cs.IR"
+   ],
+   "url": "http://arxiv.org/abs/1807.05858v1"
+  },
+  {
+   "id": "1907.08687",
+   "title": "Evaluating Recommender System Algorithms for Generating Local Music Playlists",
+   "authors": [
+    "Daniel Akimchuk",
+    "Timothy Clerico",
+    "Douglas Turnbull"
+   ],
+   "summary": "We explore the task of local music recommendation: provide listeners with personalized playlists of relevant tracks by artists who play most of their live events within a small geographic area. Most local artists tend to be obscure, long-tail artists and generally have little or no available user preference data associated with them. This creates a cold-start problem for collaborative filtering-based recommendation algorithms that depend on large amounts of such information to make accurate recommendations. In this paper, we compare the performance of three standard recommender system algorithms (Item-Item Neighborhood (IIN), Alternating Least Squares for Implicit Feedback (ALS), and Bayesian Personalized Ranking (BPR)) on the task of local music recommendation using the Million Playlist Dataset. To do this, we modify the standard evaluation procedure such that the algorithms only rank tracks by local artists for each of the eight different cities. Despite the fact that techniques based on matrix factorization (ALS, BPR) typically perform best on large recommendation tasks, we find that the neighborhood-based approach (IIN) performs best for long-tail local music recommendation.",
+   "published": "2019-07-17",
+   "categories": [
+    "cs.IR",
+    "cs.LG",
+    "stat.ML"
+   ],
+   "url": "http://arxiv.org/abs/1907.08687v1"
+  },
+  {
+   "id": "2503.17646",
+   "title": "Leveraging Audio Representations for Vibration-Based Crowd Monitoring in Stadiums",
+   "authors": [
+    "Yen Cheng Chang",
+    "Jesse Codling",
+    "Yiwen Dong",
+    "Jiale Zhang",
+    "Jiasi Chen",
+    "Hae Young Noh",
+    "Pei Zhang"
+   ],
+   "summary": "Crowd monitoring in sports stadiums is important to enhance public safety and improve the audience experience. Existing approaches mainly rely on cameras and microphones, which can cause significant disturbances and often raise privacy concerns. In this paper, we sense floor vibration, which provides a less disruptive and more non-intrusive way of crowd sensing, to predict crowd behavior. However, since the vibration-based crowd monitoring approach is newly developed, one main challenge is the lack of training data due to sports stadiums being large public spaces with complex physical activities.   In this paper, we present ViLA (Vibration Leverage Audio), a vibration-based method that reduces the dependency on labeled data by pre-training with unlabeled cross-modality data. ViLA is first pre-trained on audio data in an unsupervised manner and then fine-tuned with a minimal amount of in-domain vibration data. By leveraging publicly available audio datasets, ViLA learns the wave behaviors from audio and then adapts the representation to vibration, reducing the reliance on domain-specific vibration data. Our real-world experiments demonstrate that pre-training the vibration model using publicly available audio data (YouTube8M) achieved up to a 5.8x error reduction compared to the model without audio pre-training.",
+   "published": "2025-03-22",
+   "categories": [
+    "cs.SD",
+    "cs.CV"
+   ],
+   "url": "http://arxiv.org/abs/2503.17646v1"
+  },
+  {
+   "id": "2112.07192",
+   "title": "Embedding-based Music Emotion Recognition Using Composite Loss",
+   "authors": [
+    "Naoki Takashima",
+    "Fr\u00e9d\u00e9ric Li",
+    "Marcin Grzegorzek",
+    "Kimiaki Shirahama"
+   ],
+   "summary": "Most music emotion recognition approaches perform classification or regression that estimates a general emotional category from a distribution of music samples, but without considering emotional variations (e.g., happiness can be further categorised into much, moderate or little happiness). We propose an embedding-based music emotion recognition approach that associates music samples with emotions in a common embedding space by considering both general emotional categories and fine-grained discrimination within each category. Since the association of music samples with emotions is uncertain due to subjective human perceptions, we compute composite loss-based embeddings obtained to maximise two statistical characteristics, one being the correlation between music samples and emotions based on canonical correlation analysis, and the other being a probabilistic similarity between a music sample and an emotion with KL-divergence. The experiments on two benchmark datasets demonstrate the effectiveness of our embedding-based approach, the composite loss and learned acoustic features. In addition, detailed analysis shows that our approach can accomplish robust bidirectional music emotion recognition that not only identifies music samples matching with a specific emotion but also detects emotions expressed in a certain music sample.",
+   "published": "2021-12-14",
+   "categories": [
+    "cs.SD",
+    "cs.HC",
+    "cs.MM",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2112.07192v5"
+  },
+  {
+   "id": "2101.02051",
+   "title": "Transformer-based approach towards music emotion recognition from lyrics",
+   "authors": [
+    "Yudhik Agrawal",
+    "Ramaguru Guru Ravi Shanker",
+    "Vinoo Alluri"
+   ],
+   "summary": "The task of identifying emotions from a given music track has been an active pursuit in the Music Information Retrieval (MIR) community for years. Music emotion recognition has typically relied on acoustic features, social tags, and other metadata to identify and classify music emotions. The role of lyrics in music emotion recognition remains under-appreciated in spite of several studies reporting superior performance of music emotion classifiers based on features extracted from lyrics. In this study, we use the transformer-based approach model using XLNet as the base architecture which, till date, has not been used to identify emotional connotations of music based on lyrics. Our proposed approach outperforms existing methods for multiple datasets. We used a robust methodology to enhance web-crawlers' accuracy for extracting lyrics. This study has important implications in improving applications involved in playlist generation of music based on emotions in addition to improving music recommendation systems.",
+   "published": "2021-01-06",
+   "categories": [
+    "cs.IR"
+   ],
+   "url": "http://arxiv.org/abs/2101.02051v1"
+  },
+  {
+   "id": "2204.07064",
+   "title": "Streamable Neural Audio Synthesis With Non-Causal Convolutions",
+   "authors": [
+    "Antoine Caillon",
+    "Philippe Esling"
+   ],
+   "summary": "Deep learning models are mostly used in an offline inference fashion. However, this strongly limits the use of these models inside audio generation setups, as most creative workflows are based on real-time digital signal processing. Although approaches based on recurrent networks can be naturally adapted to this buffer-based computation, the use of convolutions still poses some serious challenges. To tackle this issue, the use of causal streaming convolutions have been proposed. However, this requires specific complexified training and can impact the resulting audio quality.   In this paper, we introduce a new method allowing to produce non-causal streaming models. This allows to make any convolutional model compatible with real-time buffer-based processing. As our method is based on a post-training reconfiguration of the model, we show that it is able to transform models trained without causal constraints into a streaming model. We show how our method can be adapted to fit complex architectures with parallel branches. To evaluate our method, we apply it on the recent RAVE model, which provides high-quality real-time audio synthesis. We test our approach on multiple music and speech datasets and show that it is faster than overlap-add methods, while having no impact on the generation quality. Finally, we introduce two open-source implementation of our work as Max/MSP and PureData externals, and as a VST audio plugin. This allows to endow traditional digital audio workstation with real-time neural audio synthesis on a laptop CPU.",
+   "published": "2022-04-14",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS",
+    "stat.ML"
+   ],
+   "url": "http://arxiv.org/abs/2204.07064v1"
+  },
+  {
+   "id": "2503.11562",
+   "title": "Designing Neural Synthesizers for Low-Latency Interaction",
+   "authors": [
+    "Franco Caspe",
+    "Jordie Shier",
+    "Mark Sandler",
+    "Charalampos Saitis",
+    "Andrew McPherson"
+   ],
+   "summary": "Neural Audio Synthesis (NAS) models offer interactive musical control over high-quality, expressive audio generators. While these models can operate in real-time, they often suffer from high latency, making them unsuitable for intimate musical interaction. The impact of architectural choices in deep learning models on audio latency remains largely unexplored in the NAS literature. In this work, we investigate the sources of latency and jitter typically found in interactive NAS models. We then apply this analysis to the task of timbre transfer using RAVE, a convolutional variational autoencoder for audio waveforms introduced by Caillon et al. in 2021. Finally, we present an iterative design approach for optimizing latency. This culminates with a model we call BRAVE (Bravely Realtime Audio Variational autoEncoder), which is low-latency and exhibits better pitch and loudness replication while showing timbre modification capabilities similar to RAVE. We implement it in a specialized inference framework for low-latency, real-time inference and present a proof-of-concept audio plugin compatible with audio signals from musical instruments. We expect the challenges and guidelines described in this document to support NAS researchers in designing models for low-latency inference from the ground up, enriching the landscape of possibilities for musicians.",
+   "published": "2025-03-14",
+   "categories": [
+    "cs.SD",
+    "cs.AI",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2503.11562v2"
+  },
+  {
+   "id": "2103.07220",
+   "title": "Real-time Timbre Transfer and Sound Synthesis using DDSP",
+   "authors": [
+    "Francesco Ganis",
+    "Erik Frej Knudesn",
+    "S\u00f8ren V. K. Lyster",
+    "Robin Otterbein",
+    "David S\u00fcdholt",
+    "Cumhur Erkut"
+   ],
+   "summary": "Neural audio synthesis is an actively researched topic, having yielded a wide range of techniques that leverages machine learning architectures. Google Magenta elaborated a novel approach called Differential Digital Signal Processing (DDSP) that incorporates deep neural networks with preconditioned digital signal processing techniques, reaching state-of-the-art results especially in timbre transfer applications. However, most of these techniques, including the DDSP, are generally not applicable in real-time constraints, making them ineligible in a musical workflow. In this paper, we present a real-time implementation of the DDSP library embedded in a virtual synthesizer as a plug-in that can be used in a Digital Audio Workstation. We focused on timbre transfer from learned representations of real instruments to arbitrary sound inputs as well as controlling these models by MIDI. Furthermore, we developed a GUI for intuitive high-level controls which can be used for post-processing and manipulating the parameters estimated by the neural network. We have conducted a user experience test with seven participants online. The results indicated that our users found the interface appealing, easy to understand, and worth exploring further. At the same time, we have identified issues in the timbre transfer quality, in some components we did not implement, and in installation and distribution of our plugin. The next iteration of our design will address these issues. Our real-time MATLAB and JUCE implementations are available at https://github.com/SMC704/juce-ddsp and https://github.com/SMC704/matlab-ddsp , respectively.",
+   "published": "2021-03-12",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2103.07220v1"
+  },
+  {
+   "id": "2107.05050",
+   "title": "Neural Waveshaping Synthesis",
+   "authors": [
+    "Ben Hayes",
+    "Charalampos Saitis",
+    "Gy\u00f6rgy Fazekas"
+   ],
+   "summary": "We present the Neural Waveshaping Unit (NEWT): a novel, lightweight, fully causal approach to neural audio synthesis which operates directly in the waveform domain, with an accompanying optimisation (FastNEWT) for efficient CPU inference. The NEWT uses time-distributed multilayer perceptrons with periodic activations to implicitly learn nonlinear transfer functions that encode the characteristics of a target timbre. Once trained, a NEWT can produce complex timbral evolutions by simple affine transformations of its input and output signals. We paired the NEWT with a differentiable noise synthesiser and reverb and found it capable of generating realistic musical instrument performances with only 260k total model parameters, conditioned on F0 and loudness features. We compared our method to state-of-the-art benchmarks with a multi-stimulus listening test and the Fr\u00e9chet Audio Distance and found it performed competitively across the tested timbral domains. Our method significantly outperformed the benchmarks in terms of generation speed, and achieved real-time performance on a consumer CPU, both with and without FastNEWT, suggesting it is a viable basis for future creative sound design tools.",
+   "published": "2021-07-11",
+   "categories": [
+    "cs.SD",
+    "cs.LG",
+    "eess.AS",
+    "eess.SP"
+   ],
+   "url": "http://arxiv.org/abs/2107.05050v2"
+  },
+  {
+   "id": "2503.19161",
+   "title": "Pitch Contour Exploration Across Audio Domains: A Vision-Based Transfer Learning Approach",
+   "authors": [
+    "Jakob Abe\u00dfer",
+    "Simon Schw\u00e4r",
+    "Meinard M\u00fcller"
+   ],
+   "summary": "This study examines pitch contours as a unifying semantic construct prevalent across various audio domains including music, speech, bioacoustics, and everyday sounds. Analyzing pitch contours offers insights into the universal role of pitch in the perceptual processing of audio signals and contributes to a deeper understanding of auditory mechanisms in both humans and animals. Conventional pitch-tracking methods, while optimized for music and speech, face challenges in handling much broader frequency ranges and more rapid pitch variations found in other audio domains. This study introduces a vision-based approach to pitch contour analysis that eliminates the need for explicit pitch-tracking. The approach uses a convolutional neural network, pre-trained for object detection in natural images and fine-tuned with a dataset of synthetically generated pitch contours, to extract key contour parameters from the time-frequency representation of short audio segments. A diverse set of eight downstream tasks from four audio domains were selected to provide a challenging evaluation scenario for cross-domain pitch contour analysis. The results show that the proposed method consistently surpasses traditional techniques based on pitch-tracking on a wide range of tasks. This suggests that the vision-based approach establishes a foundation for comparative studies of pitch contour characteristics across diverse audio domains.",
+   "published": "2025-03-24",
+   "categories": [
+    "eess.AS",
+    "cs.SD"
+   ],
+   "url": "http://arxiv.org/abs/2503.19161v1"
+  },
+  {
+   "id": "1802.06182",
+   "title": "CREPE: A Convolutional Representation for Pitch Estimation",
+   "authors": [
+    "Jong Wook Kim",
+    "Justin Salamon",
+    "Peter Li",
+    "Juan Pablo Bello"
+   ],
+   "summary": "The task of estimating the fundamental frequency of a monophonic sound recording, also known as pitch tracking, is fundamental to audio processing with multiple applications in speech processing and music information retrieval. To date, the best performing techniques, such as the pYIN algorithm, are based on a combination of DSP pipelines and heuristics. While such techniques perform very well on average, there remain many cases in which they fail to correctly estimate the pitch. In this paper, we propose a data-driven pitch tracking algorithm, CREPE, which is based on a deep convolutional neural network that operates directly on the time-domain waveform. We show that the proposed model produces state-of-the-art results, performing equally or better than pYIN. Furthermore, we evaluate the model's generalizability in terms of noise robustness. A pre-trained version of CREPE is made freely available as an open-source Python module for easy application.",
+   "published": "2018-02-17",
+   "categories": [
+    "eess.AS",
+    "cs.LG",
+    "cs.SD",
+    "stat.ML"
+   ],
+   "url": "http://arxiv.org/abs/1802.06182v1"
+  },
+  {
+   "id": "2011.04297",
+   "title": "Knowledge Distillation for Singing Voice Detection",
+   "authors": [
+    "Soumava Paul",
+    "Gurunath Reddy M",
+    "K Sreenivasa Rao",
+    "Partha Pratim Das"
+   ],
+   "summary": "Singing Voice Detection (SVD) has been an active area of research in music information retrieval (MIR). Currently, two deep neural network-based methods, one based on CNN and the other on RNN, exist in literature that learn optimized features for the voice detection (VD) task and achieve state-of-the-art performance on common datasets. Both these models have a huge number of parameters (1.4M for CNN and 65.7K for RNN) and hence not suitable for deployment on devices like smartphones or embedded sensors with limited capacity in terms of memory and computation power. The most popular method to address this issue is known as knowledge distillation in deep learning literature (in addition to model compression) where a large pre-trained network known as the teacher is used to train a smaller student network. Given the wide applications of SVD in music information retrieval, to the best of our knowledge, model compression for practical deployment has not yet been explored. In this paper, efforts have been made to investigate this issue using both conventional as well as ensemble knowledge distillation techniques.",
+   "published": "2020-11-09",
+   "categories": [
+    "cs.SD",
+    "cs.CL",
+    "cs.LG",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/2011.04297v2"
+  },
+  {
+   "id": "1906.03870",
+   "title": "Deep Learning-Based Automatic Downbeat Tracking: A Brief Review",
+   "authors": [
+    "Bijue Jia",
+    "Jiancheng Lv",
+    "Dayiheng Liu"
+   ],
+   "summary": "As an important format of multimedia, music has filled almost everyone's life. Automatic analyzing music is a significant step to satisfy people's need for music retrieval and music recommendation in an effortless way. Thereinto, downbeat tracking has been a fundamental and continuous problem in Music Information Retrieval (MIR) area. Despite significant research efforts, downbeat tracking still remains a challenge. Previous researches either focus on feature engineering (extracting certain features by signal processing, which are semi-automatic solutions); or have some limitations: they can only model music audio recordings within limited time signatures and tempo ranges. Recently, deep learning has surpassed traditional machine learning methods and has become the primary algorithm in feature learning; the combination of traditional and deep learning methods also has made better performance. In this paper, we begin with a background introduction of downbeat tracking problem. Then, we give detailed discussions of the following topics: system architecture, feature extraction, deep neural network algorithms, datasets, and evaluation strategy. In addition, we take a look at the results from the annual benchmark evaluation--Music Information Retrieval Evaluation eXchange (MIREX)--as well as the developments in software implementations. Although much has been achieved in the area of automatic downbeat tracking, some problems still remain. We point out these problems and conclude with possible directions and challenges for future research.",
+   "published": "2019-06-10",
+   "categories": [
+    "cs.IR",
+    "cs.SD",
+    "eess.AS"
+   ],
+   "url": "http://arxiv.org/abs/1906.03870v1"
+  }
+ ]
+}

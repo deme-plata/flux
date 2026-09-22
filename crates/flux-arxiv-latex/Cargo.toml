@@ -12,3 +12,10 @@ anyhow = { workspace = true }
 flux-science = { path = "../flux-science" }
 flux-whitehole = { path = "../flux-whitehole" }
 flux-qwalk = { path = "../flux-qwalk" }
+# QTFT collision-resistance whitepaper: real Alexander-polynomial computation
+# (not hand-copied numbers). Lives in the SIGIL repo's own workspace — a
+# normal cross-workspace path dependency; flux-topology itself has zero deps
+# beyond serde, so this adds no meaningful coupling risk.
+flux-topology = { path = "../../../sigil/crates/flux-topology" }
+blake3 = { workspace = true }
+hex = { workspace = true }

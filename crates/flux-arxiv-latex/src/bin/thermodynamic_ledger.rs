@@ -29,6 +29,41 @@ fn sci(x: f64) -> String {
     }
 }
 
+/// Comma-group an integer for math mode: 103000 -> "103{,}000".
+fn group_thousands(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::new();
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push_str("{,}");
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Human-friendly LaTeX snippet (carries its own math mode) for the
+/// engineering-scale SIGIL numbers in prose: "$103{,}000$" / "$1.9$~million".
+/// Deep-physics magnitudes stay with sci() — "million" stops meaning anything
+/// around 10^{50}.
+fn human(x: f64) -> String {
+    if !x.is_finite() || x <= 0.0 {
+        return format!("${}$", sci(x));
+    }
+    if x >= 1e6 {
+        let s = format!("{:.1}", x / 1e6);
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        format!("${s}$~million")
+    } else if x >= 1e3 {
+        format!("${}$", group_thousands(x.round() as i64))
+    } else {
+        format!("${}$", sci(x))
+    }
+}
+
 fn para(s: String) -> Block {
     Block::Raw(format!("{s}\n\n"))
 }
@@ -113,6 +148,12 @@ fn main() {
     // 6) Planck-scale trivia.
     let slot_planck = slot_s / planck_time();
 
+    // 6b) Intuition anchors for the Landauer aside — a transaction's floor in
+    // photons of green light (532 nm), and the share of measured cost that is
+    // NOT bit-erasure (i.e. the cost of agreement, not thermodynamics).
+    let green_photon_j = h_planck * SPEED_OF_LIGHT / 532e-9;
+    let tx_in_photons = e_tx_floor / green_photon_j;
+
     // ---------------------------------------------------------------- LaTeX
     let mut doc = Document::new("article")
         .option("11pt")
@@ -133,23 +174,23 @@ fn main() {
         .add(Block::Raw(format!(
             "\\begin{{abstract}}\nEvery quantitative claim in this paper was \\emph{{calculated at document-generation time}} \
              by the \\texttt{{flux-science}} crate --- none is quoted from literature. We take the SIGIL ledger's \
-             measured throughput (${}$ transactions per second at 64 operations per signature; ladder target ${}$\\,TPS) \
+             measured throughput ({} transactions per second at 64 operations per signature; ladder target {}\\,TPS) \
              and ask how far it sits from the limits physics imposes on \\emph{{any}} ledger: the Landauer erasure floor, \
              the Margolus--Levitov quantum speed limit, the covariant holographic entropy bound, Hawking evaporation as a \
              retention policy, and gravitational time dilation as a Byzantine-fault-tolerance constraint. The answer, in \
              every direction, is: physics is not the bottleneck for a very long time. The engineering, as usual, is.\n\\end{{abstract}}\n",
-            sci(tps_measured), sci(tps_ladder)
+            human(tps_measured), human(tps_ladder)
         )))
         .add(Block::Section("Introduction".into()))
         .add(para(format!(
-            "SIGIL currently applies a state transition in ${}$\\,s per operation, sustains ${}$\\,TPS with batched \
-             authentication, and targets ${}$\\,TPS via lane-sharded execution (PRISM). Its adaptive producer idles at \
+            "SIGIL currently applies a state transition in ${}$\\,$\\mu$s per operation, sustains {}\\,TPS with batched \
+             authentication, and targets {}\\,TPS via lane-sharded execution (PRISM). Its adaptive producer idles at \
              a ${}$\\,ms slot. These are engineering numbers, and engineering numbers invite a physicist's question: \
              \\emph{{how much runway is there before the universe itself objects?}} This paper computes that runway. \
              The generator is a Rust binary in the Flux tree; rerunning it refetches the bibliography from the arXiv API \
              and recomputes every figure from CODATA constants. If a number below surprises you, you can recompile the paper \
              and watch it be derived.",
-            sci(apply_s_per_op), sci(tps_measured), sci(tps_ladder), sci(slot_s * 1000.0)
+            sci(apply_s_per_op * 1e6), human(tps_measured), human(tps_ladder), sci(slot_s * 1000.0)
         )))
         .add(Block::Section("The Landauer Floor".into()))
         .add(para(format!(
@@ -160,13 +201,26 @@ fn main() {
             sci(t_room), sci(landauer_bit), sci(tx_bits), sci(e_tx_floor)
         )))
         .add(para(format!(
-            "Our measured cost is ${}$\\,s of one core; at a conservative ${}$\\,W per active core that is \
+            "Our measured cost is ${}$\\,$\\mu$s of one core; at a conservative ${}$\\,W per active core that is \
              ${}$\\,J per operation --- a factor of $\\mathbf{{{}}}$ above the floor. Read that as good news: \
              consensus at planetary scale is nowhere near thermodynamically expensive. The \\emph{{entire}} \
-             ${}$\\,TPS PRISM ladder, executed at the Landauer floor, would dissipate ${}$\\,W --- \
+             {}\\,TPS PRISM ladder, executed at the Landauer floor, would dissipate ${}$\\,W --- \
              picowatts. A single LED consumes ten orders of magnitude more.",
-            sci(apply_s_per_op), sci(watts_per_core), sci(e_tx_real), sci(landauer_headroom),
-            sci(tps_ladder), sci(ladder_floor_watts)
+            sci(apply_s_per_op * 1e6), sci(watts_per_core), sci(e_tx_real), sci(landauer_headroom),
+            human(tps_ladder), sci(ladder_floor_watts)
+        )))
+        .add(para(format!(
+            "It helps to make that floor tangible. A photon of green light ($532$\\,nm) carries ${}$\\,J, so the entire \
+             thermodynamic price of settling one transaction --- ${}$\\,J --- is about $\\mathbf{{{:.1}}}$ photons. \
+             That is the whole mandatory fee the universe charges to move value on the chain: a small handful of photons. \
+             Everything above it --- the factor of $\\mathbf{{{}}}$ --- is not paid to physics. It is spent on signatures, \
+             replication, and proofs: the machinery of convincing strangers, at a distance, that the bits were flipped \
+             honestly. The true cost of a transaction is not erasing its bits; it is \\emph{{agreement}}, and agreement \
+             appears in no table of physical constants. Two honesties keep this a lower bound, not a prophecy: Landauer \
+             prices only \\emph{{irreversible}} operations, so a reversible computer could in principle slip beneath even \
+             this floor; and the ${}$-bit figure is an accounting of what a transfer overwrites, exact only up to that \
+             modelling choice. The floor beneath it is not negotiable; the bookkeeping on top of it is.",
+            sci(green_photon_j), sci(e_tx_floor), tx_in_photons, sci(landauer_headroom), sci(tx_bits)
         )))
         .add(Block::Section("The Ultimate TPS: Margolus--Levitov and Bremermann".into()))
         .add(para(format!(
@@ -178,10 +232,10 @@ fn main() {
         )))
         .add(para(format!(
             "Charging a generous ${}$ elementary operations per transaction (signature verification dominates), the \
-             one-kilogram ledger settles ${}$\\,TPS. SIGIL's ladder target of ${}$\\,TPS is \
+             one-kilogram ledger settles ${}$\\,TPS. SIGIL's ladder target of {}\\,TPS is \
              $\\mathbf{{{:.0}}}$ \\emph{{doublings}} below that --- at one throughput doubling per two years, \
              roughly {:.0} years of Moore-style scaling before quantum mechanics has an opinion about SIGIL.",
-            sci(ops_per_tx), sci(tps_ultimate), sci(tps_ladder), tps_doublings, tps_doublings * 2.0
+            sci(ops_per_tx), sci(tps_ultimate), human(tps_ladder), tps_doublings, tps_doublings * 2.0
         )))
         .add(Block::Section("The Holographic Ledger".into()))
         .add(para(format!(
@@ -233,13 +287,13 @@ fn main() {
             "\\begin{{center}}\\begin{{tabular}}{{lll}}\\toprule\n\
              \\textbf{{Quantity}} & \\textbf{{SIGIL today}} & \\textbf{{Physical limit}} \\\\\\midrule\n\
              Energy / tx & ${}$\\,J & ${}$\\,J (Landauer) \\\\\n\
-             Throughput & ${}$\\,TPS measured & ${}$\\,TPS (Margolus--Levitov, 1\\,kg) \\\\\n\
+             Throughput & {}\\,TPS measured & ${}$\\,TPS (Margolus--Levitov, 1\\,kg) \\\\\n\
              State size & ${}$\\,bits & ${}$\\,bits (holographic, drive-sized) \\\\\n\
              Retention & 2\\,TB soak, kill-9 clean & ${}$\\,yr (solar-mass hole) \\\\\n\
              Clock skew & NTP $\\sim$ms & ${:.1}\\%$ at Sgr A$^*$ ISCO \\\\\\bottomrule\n\
              \\end{{tabular}}\\end{{center}}\n\n",
             sci(e_tx_real), sci(e_tx_floor),
-            sci(tps_measured), sci(tps_ultimate),
+            human(tps_measured), sci(tps_ultimate),
             sci(state_bits), sci(drive_bits),
             sci(sun_life_yr),
             isco_deficit * 100.0

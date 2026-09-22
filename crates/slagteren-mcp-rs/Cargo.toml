@@ -1,0 +1,11 @@
+[package]
+name = "slagteren-mcp"
+version = "0.2.0"
+edition = "2021"
+description = "Secure Rust MCP server for Slagteren paa Suensonsvej with crypto-agile order provenance"
+
+[dependencies]
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde_json = "1"
+blake3 = "1.5"
+flux-sqisign = { path = "../flux-sqisign" }

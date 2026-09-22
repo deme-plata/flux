@@ -1,0 +1,18 @@
+[package]
+name = "flux-groot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NVIDIA Isaac GR00T reference-humanoid control surface — flux-api spec + Quillon-wallet-signed command envelope + mock daemon"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+ed25519-dalek = "2"
+flux-api = { path = "../flux-api" }
+
+[dev-dependencies]
+rand = { workspace = true }
+oas3 = "0.16"

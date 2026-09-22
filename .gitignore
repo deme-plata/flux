@@ -29,3 +29,16 @@ dist/
 
 # generated context engine output (regenerable)
 .whale/
+
+# accidental build dir (723 MB, intent-to-add 2026-09) — never commit
+target-fluxdb-check/
+# scratch + build artifacts swept 2026-09-22
+.flux-*.patch
+.swarm_call.sh
+*.bak-*
+mir-corpus/*.o
+docs/**/*.aux
+docs/**/*.out
+flux-bitunix-before-aggregator-*
+aggregator-probe.json
+aggregator-live-http.json

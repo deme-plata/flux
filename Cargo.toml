@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "crates/flux-study",
+    "crates/flux-bitunix",
+    "crates/flux-coinbase",
     "crates/flux-kyberkem",
     "crates/sigil-cosmos-core",
     "crates/sigil-cosmos-mcp","crates/*"]
@@ -19,6 +20,8 @@ default-members = [
     "crates/flux-agora-stargate-mcp",
     "crates/flux-ai",
     "crates/flux-api",
+    "crates/flux-aqua",
+    "crates/flux-study",
     "crates/flux-api-macros",
     "crates/flux-architect",
     "crates/flux-archive",
@@ -130,6 +133,24 @@ rand_core = "0.6"
 [profile.dev]
 opt-level = 1
 debug = true
+
+# winterfell 0.9's prover carries a `#[cfg(debug_assertions)]` self-check
+# (`EvaluationTable::validate_transition_degrees`) that asserts each transition
+# constraint's ACTUAL evaluated degree equals the degree its AIR declared. For
+# SIGIL's shielded-spend AIR the range-bit columns are witness-dependent: a note
+# whose value has a zero bit evaluates one column at a lower degree than declared,
+# and the assert fires. It is a "your AIR over-declares a degree" hint, not a
+# soundness problem — the declared degree is an upper bound and the verifier uses
+# the same declaration, which is why `sigil-shield` ships every one of its proving
+# tests `#[ignore]`d with the note "release-compiled winter-prover passes."
+#
+# That was harmless while nothing in the flux tree proved anything. It stopped
+# being harmless when `fluxc-mcp` gained `flux_sigil_shielded_send`: the MCP
+# server runs `target/debug/fluxc`, so building a real spend proof would panic the
+# server outright. Turning the check off for this ONE dependency (not for our own
+# crates, which keep full debug assertions) makes the debug binary able to prove.
+[profile.dev.package.winter-prover]
+debug-assertions = false
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,17 @@
+[package]
+name = "flux-bitunix"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flux-api = { path = "../flux-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+hex = { workspace = true }
+rand = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+[[bin]]
+name = "flux-bitunix"
+path = "src/bin/flux-bitunix.rs"

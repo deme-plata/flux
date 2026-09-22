@@ -24,6 +24,8 @@ base64 = "0.21"
 flux-gpu = { path = "../flux-gpu" }
 flux-gpu-market = { path = "../flux-gpu-market" }
 flux-0x = { path = "../flux-0x" }
+flux-bitunix = { path = "../flux-bitunix" }
+flux-coinbase = { path = "../flux-coinbase" }
 flux-zk = { path = "../flux-zk", features = ["pq"] }
 flux-sniff = { path = "../flux-sniff" }
 flux-refactor = { path = "../flux-refactor" }
@@ -64,3 +66,6 @@ sigil-shield = { path = "../../../sigil/crates/sigil-shield" }
 flux-kgauge = { path = "../../../sigil/crates/flux-kgauge" }
 # Kristensen Time + the arXiv:2608.07938 Chinese-remainder clock (flux_sigil_wallet_clock).
 flux-clock = { path = "../flux-clock" }
+# The Kristensen Realization Functional K_R — the engineering counterpart to the
+# K-gauge: which constraint is binding, and what would relieving it be worth.
+flux-realization = { path = "../../../sigil/crates/flux-realization" }

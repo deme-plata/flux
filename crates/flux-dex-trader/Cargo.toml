@@ -1,0 +1,17 @@
+[package]
+name = "flux-dex-trader"
+version = "0.1.0"
+edition = "2021"
+description = "User-directed Uniswap-V2-style DEX trade executor (buy AND sell, explicit per call) — NOT an autonomous price bot. See src/main.rs module docs for the design constraints this exists to enforce."
+
+[[bin]]
+name = "flux-dex-trader"
+path = "src/main.rs"
+
+[dependencies]
+alloy = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

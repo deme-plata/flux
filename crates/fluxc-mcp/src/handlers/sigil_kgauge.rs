@@ -302,6 +302,155 @@ pub(crate) fn regime_of(k_c: f64) -> &'static str {
     if k_c < 1.0 { "stable" } else if k_c < 3.0 { "elevated" } else { "critical" }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The WITNESS term W — absence of conflict is not presence of consensus
+// (2026-09-22, after three measured freezes: 09-08, 09-15, 09-22)
+// ─────────────────────────────────────────────────────────────────────────────
+/// Every K on this gauge is a LOWER BOUND assembled from disagreement that was
+/// OBSERVED. So K = 0 has two utterly different causes and the gauge has, until
+/// now, printed the same word for both:
+///
+///   * many independent nodes looked at each other and agreed            → stable
+///   * there was nobody to disagree with, or nobody was asked            → BLIND
+///
+/// `Raychaudhuri` (2026-09-17) already NAMED which plane of ω degenerated, but it
+/// only ever wrote a verdict string: `regime` and `regime_fix` still came from
+/// `regime_of(k)` alone, so a stalled chain with K = 0.00 printed "stable" on the
+/// wallet chip and in every series row. The sensor existed; the reflex arc did not.
+///
+/// W ∈ [0,1] does not measure disagreement. It measures whether a disagreement
+/// COULD have been seen. It is the MINIMUM of its senses, never the product:
+/// a chain is only as witnessed as its weakest sense, and a minimum names the
+/// sense that failed instead of quietly decaying as senses are added.
+///
+///   clock         did height advance in the window at all
+///   certificate   is the finality certificate FRESH, measured against τ_finality
+///   independence  how many distinct signers actually certified, vs the committee
+///   channels      how much of ΔH_c's weight was measurable rather than unknown
+///
+/// The 2026-09-22 reading this was written against: tip 23,787,330 advancing,
+/// certificate 23,068,190 frozen for 24 h, gate "solo", bft false, committee 2 —
+/// and K_C = K_fix = 0.00 "stable".
+pub const CERT_FRESH_TAUS: f64 = 2.0;
+pub const CERT_BLIND_TAUS: f64 = 20.0;
+/// A fast chain must not false-alarm: τ_finality at 110 blk/s is 4.7 s, and a
+/// certificate a minute old there is perfectly healthy.
+pub const CERT_FRESH_MIN_SECS: f64 = 120.0;
+/// Below this, the reading carries no information about agreement.
+pub const WITNESS_BLIND_BELOW: f64 = 0.34;
+
+#[derive(Debug, Clone)]
+pub(crate) struct Witness {
+    pub w: f64,
+    pub clock: f64,
+    pub certificate: Option<f64>,
+    pub independence: f64,
+    pub channels: f64,
+    pub weakest: &'static str,
+    pub cert_age_secs: Option<f64>,
+    pub cert_height: Option<u64>,
+    pub cert_lag_blocks: Option<u64>,
+    pub voters: usize,
+    pub committee: usize,
+    pub bft: bool,
+    pub gate: String,
+    pub independence_basis: String,
+    pub verdict: String,
+}
+
+impl Witness {
+    pub fn blind(&self) -> bool { self.w < WITNESS_BLIND_BELOW }
+}
+
+/// Certificate freshness as a [0,1] ramp against the chain's OWN finality time.
+/// Fresh within `CERT_FRESH_TAUS`·τ (never less than CERT_FRESH_MIN_SECS), zero
+/// at `CERT_BLIND_TAUS`·τ, linear between. `None` when the node serves no
+/// certificate at all — unknown is not health, and the caller must treat it so.
+pub(crate) fn cert_freshness(cert_age_secs: Option<f64>, tau_finality_secs: f64) -> Option<f64> {
+    let age = cert_age_secs?;
+    let tau = if tau_finality_secs.is_finite() && tau_finality_secs > 0.0 { tau_finality_secs } else { TAU0_SECS };
+    let fresh = (CERT_FRESH_TAUS * tau).max(CERT_FRESH_MIN_SECS);
+    let blind = (CERT_BLIND_TAUS * tau).max(fresh * 2.0);
+    Some(if age <= fresh { 1.0 } else if age >= blind { 0.0 } else { 1.0 - (age - fresh) / (blind - fresh) })
+}
+
+/// `voters` is the number of DISTINCT signatures on the live certificate.
+/// 🪤 It is NOT a count of failure domains and must never be described as one:
+/// on 2026-09-22 two of the three nodes were processes on the SAME physical host,
+/// so one cut removed both. The gauge cannot see co-location; it can only refuse
+/// to overstate what it sees, which is what `independence_basis` says out loud.
+pub(crate) fn witness_of(
+    clock_alive: bool,
+    cert_age_secs: Option<f64>,
+    tau_finality_secs: f64,
+    cert_height: Option<u64>,
+    local_height: u64,
+    voters: usize,
+    committee: usize,
+    bft: bool,
+    gate: &str,
+    missing_weight: f64,
+) -> Witness {
+    let clock = if clock_alive { 1.0 } else { 0.0 };
+    let certificate = cert_freshness(cert_age_secs, tau_finality_secs);
+    let channels = (1.0 - missing_weight.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+
+    // A "solo" gate is an attestation by the writer, not a quorum of witnesses.
+    // n = 1 signer certifying its own chain is exactly the shape the gauge was
+    // blind to, so it is capped hard rather than scaled.
+    let solo = !bft || gate.eq_ignore_ascii_case("solo") || voters <= 1;
+    let independence = if solo {
+        0.0
+    } else {
+        (voters as f64 / (committee.max(voters).max(1)) as f64).clamp(0.0, 1.0)
+    };
+    let independence_basis = format!(
+        "{voters} distinct signature(s) on the live certificate of a committee of {committee}, gate \"{gate}\", bft {bft}. \
+         COUNTS SIGNERS, NOT FAILURE DOMAINS — the gauge cannot see co-location, and on 2026-09-22 two of three nodes were \
+         processes on one host, so a single cut removed both. Treat this as an upper bound on independence."
+    );
+
+    let cert_lag_blocks = cert_height.map(|h| local_height.saturating_sub(h));
+
+    let senses: [(&'static str, f64); 4] = [
+        ("clock", clock),
+        ("certificate", certificate.unwrap_or(0.0)),
+        ("independence", independence),
+        ("channels", channels),
+    ];
+    let (weakest, w) = senses.iter().fold(("clock", f64::INFINITY), |acc, &(n, v)| if v < acc.1 { (n, v) } else { acc });
+
+    let verdict = if !clock_alive {
+        "unwitnessed: the clock is stopped — no block was added in the window, so no disagreement could have been observed. K = 0 here means 'nothing was seen', not 'all agree'.".to_string()
+    } else if certificate == Some(0.0) {
+        format!("unwitnessed: the finality certificate is frozen{}{} while the tip advances. Blocks are settling on the {}-depth fallback, which is a timeout, not a quorum. K = 0 here is the sound of nobody voting.",
+            cert_age_secs.map(|a| format!(" ({:.1} h old)", a / 3600.0)).unwrap_or_default(),
+            cert_lag_blocks.map(|l| format!(", {l} blocks behind the tip")).unwrap_or_default(),
+            FINAL_DEPTH)
+    } else if solo {
+        format!("unwitnessed: gate \"{gate}\", bft {bft}, {voters} signer(s) — this is a replicated single writer attesting to its own chain. Absence of conflict here is guaranteed by construction and carries no evidence of consensus.")
+    } else if channels < WITNESS_BLIND_BELOW {
+        format!("unwitnessed: {:.0}% of ΔH_c's channel weight is unmeasurable — the gauge has almost nothing to compare.", missing_weight * 100.0)
+    } else if w < WITNESS_BLIND_BELOW {
+        format!("unwitnessed: weakest sense is {weakest} at {w:.2}.")
+    } else {
+        format!("witnessed: W = {w:.2} (weakest sense {weakest}); {voters} signer(s) of {committee}, certificate {}, {:.0}% of channel weight measurable. A K near zero here is evidence of agreement, not of silence.",
+            cert_age_secs.map(|a| format!("{a:.0}s old")).unwrap_or_else(|| "absent".into()), channels * 100.0)
+    };
+
+    Witness { w, clock, certificate, independence, channels, weakest, cert_age_secs, cert_height, cert_lag_blocks,
+              voters, committee, bft, gate: gate.to_string(), independence_basis, verdict }
+}
+
+/// The reflex arc. An OBSERVED disagreement is real evidence and is always
+/// reported at its own severity — a low W never suppresses a high K. But a K that
+/// would read "stable" on a blind gauge reads "blind" instead, because that
+/// reading is a statement about the instrument, not about the chain.
+pub(crate) fn regime_witnessed(k: f64, wit: &Witness) -> &'static str {
+    let r = regime_of(k);
+    if r == "stable" && wit.blind() { "blind" } else { r }
+}
+
 /// Ω = 1 − e^(−peers/n_total) with n_total = max(peers+2, 8) SATURATES at 1 − e⁻¹ ≈ 0.632
 /// (it assumes we see all but two nodes), so the thresholds live inside that range:
 /// 5 peers → 0.465 medium, 4 → 0.393 low, 40 → 0.614 high.
@@ -397,13 +546,20 @@ pub(crate) fn consensus_gauge(i: &ConsensusInputs) -> ConsensusReading {
 // Sampling the live node
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The live finality certificate, the sensor this gauge did not have until
+/// 2026-09-22. `/v1/finality/certificate` was never fetched, which is precisely
+/// why a certificate frozen for 24 h could not move any reading: the gauge was
+/// not blind by a bug in its arithmetic, it was blind because nobody asked.
 #[derive(Clone, Debug, Default)]
+struct Cert { height: u64, certified_at_ms: u64, quorum: u64, committee_size: usize, voters: usize, bft: bool, gate: String }
+
 /// `height` is the MINING tip from /v1/mining/miners (the DAG frontier); `settled_height` is
 /// the node's own `chain.height()` from /v1/network/topology.local_view — the settled spine,
 /// which is what peers publish in their heartbeats. Measured 2026-09-07: the frontier runs
 /// ~520 blocks (≈ final_depth) ahead of the spine, so comparing a peer's spine height with
 /// OUR frontier height manufactures a full finality-depth of "divergence". Compare like with like.
-struct Sample { ts_ms: u64, height: u64, settled_height: Option<u64>, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64>, state_root_verdicts: Vec<bool> }
+#[derive(Clone, Debug, Default)]
+struct Sample { ts_ms: u64, height: u64, settled_height: Option<u64>, shares_accepted: u64, rejects_by_kind: HashMap<String, u64>, peers: u64, peer_heights: Vec<u64>, state_root_verdicts: Vec<bool>, cert: Option<Cert> }
 
 impl Sample { fn rejects(&self) -> u64 { self.rejects_by_kind.values().sum() } }
 
@@ -423,6 +579,25 @@ fn sample() -> Result<Sample, String> {
     let peer_heights = t.get("peer_heights").and_then(|v| v.as_object()).map(|o| o.iter().filter(|(k, _)| k.as_str() != "last").filter_map(|(_, v)| v.as_u64()).filter(|&h| h > 0).collect()).unwrap_or_default();
     let settled_height = t.get("local_view").and_then(|v| v.get("height")).and_then(|v| v.as_u64());
     let state_root_verdicts = t.get("peer_views").and_then(|v| v.as_object()).map(|o| o.values().filter_map(|pv| pv.get("state_root_matches_local").and_then(|b| b.as_bool())).collect()).unwrap_or_default();
+    // Certificate is best-effort: an older node serves no such route, and "absent"
+    // must read as UNKNOWN (witness 0), never as healthy.
+    let cert = get_json("/v1/finality/certificate").ok().and_then(|c| {
+        let c = c.get("certificate").cloned().unwrap_or(c);
+        let voters = c.get("votes").and_then(|v| v.as_array()).map(|a| {
+            let mut ids: Vec<String> = a.iter().filter_map(|v| v.get("validator_id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect();
+            ids.sort(); ids.dedup();
+            if ids.is_empty() { a.len() } else { ids.len() }
+        }).unwrap_or(0);
+        Some(Cert {
+            height: c.get("height").and_then(|v| v.as_u64())?,
+            certified_at_ms: c.get("certified_at_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            quorum: c.get("quorum").and_then(|v| v.as_u64()).unwrap_or(0),
+            committee_size: c.get("committee_size").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            voters,
+            bft: c.get("bft").and_then(|v| v.as_bool()).unwrap_or(false),
+            gate: c.get("gate").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+        })
+    });
     Ok(Sample {
         ts_ms: now_ms(),
         height: m.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -432,6 +607,7 @@ fn sample() -> Result<Sample, String> {
         peers: t.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0),
         peer_heights,
         state_root_verdicts,
+        cert,
     })
 }
 
@@ -504,6 +680,24 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     let d_tip_val = c.channels.iter().find(|ch| ch.name == "tip_divergence").and_then(|ch| ch.value).unwrap_or(0.0);
     let ray = raychaudhuri_of(d_commit, settled_advance, d_tip_val, d_fin_val, c.n_eff, c.h_norm);
 
+    // ── the witness term: can this gauge see a disagreement at all? ──
+    let cert_age_secs = b.cert.as_ref().filter(|c| c.certified_at_ms > 0)
+        .map(|c| (b.ts_ms.saturating_sub(c.certified_at_ms)) as f64 / 1000.0);
+    let wit = witness_of(
+        ray.clock_alive,
+        cert_age_secs,
+        c.tau_finality_secs,
+        b.cert.as_ref().map(|c| c.height),
+        b.settled_height.unwrap_or(b.height),
+        b.cert.as_ref().map(|c| c.voters).unwrap_or(0),
+        b.cert.as_ref().map(|c| c.committee_size).unwrap_or(0),
+        b.cert.as_ref().map(|c| c.bft).unwrap_or(false),
+        b.cert.as_ref().map(|c| c.gate.as_str()).unwrap_or("absent"),
+        c.missing_weight,
+    );
+    let regime_witnessed_c = regime_witnessed(c.k_c, &wit);
+    let regime_witnessed_fix = regime_witnessed(c.k_fix, &wit);
+
     // ── legacy v1 (retained for series continuity; NOT the headline) ──
     let dh_v1 = rej_ratio + churn;
     let k_v1 = if tau > 0.0 { 2.0 * std::f64::consts::PI * (dh_v1 * ds).sqrt() / tau } else { 0.0 };
@@ -547,8 +741,20 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
         "ok": true, "event": EVENT, "version": GAUGE_VERSION, "ts_ms": b.ts_ms, "node": crate::handlers::sigil_wallet::rpc_base(),
         "network": "sigil-g2",
         "K_C": c.k_c, "K_C_low": c.k_c_low, "K_C_high": c.k_c_high,
-        "regime": c.regime, "confidence": c.confidence,
-        "K_fix": c.k_fix, "K_fix_high": c.k_fix_high, "regime_fix": c.regime_fix,
+        "regime": regime_witnessed_c, "confidence": c.confidence,
+        "regime_unwitnessed": c.regime,
+        "K_fix": c.k_fix, "K_fix_high": c.k_fix_high, "regime_fix": regime_witnessed_fix,
+        "regime_fix_unwitnessed": c.regime_fix,
+        "witness": {
+            "definition": "W = min(clock, certificate, independence, channels) ∈ [0,1] — NOT a measure of disagreement but of whether a disagreement could have been SEEN. A minimum, not a product: a chain is only as witnessed as its weakest sense, and the minimum names which sense failed. Added 2026-09-22 after three measured freezes (09-08 producer restart forked the follower; 09-15 one-way gossip for 6 h, healed by a third node in one minute; 09-22 the host carrying two of three nodes went away). In every one of them K read 0.00 \"stable\".",
+            "W": wit.w, "blind": wit.blind(), "weakest_sense": wit.weakest,
+            "clock": wit.clock, "certificate": wit.certificate, "independence": wit.independence, "channels": wit.channels,
+            "certificate_age_secs": wit.cert_age_secs, "certificate_height": wit.cert_height, "certificate_lag_blocks": wit.cert_lag_blocks,
+            "voters": wit.voters, "committee_size": wit.committee, "bft": wit.bft, "gate": wit.gate,
+            "independence_basis": wit.independence_basis,
+            "verdict": wit.verdict,
+            "regime_rule": "An OBSERVED disagreement is always reported at its own severity — a low W never suppresses a high K. But a K that would read \"stable\" on a blind gauge reads \"blind\" instead, because that reading is a statement about the instrument, not about the chain.",
+        },
         "k_fix": {
             "definition": "K_fix = 2π·√(ΔH_c · τ_d · w_S); τ_d = (1 + min(d,512)/512)/2 with d = persistence in BLOCKS; w_S = 1 − H_norm/4 ∈ [¾,1] (proposer entropy as a bounded concentration weight). Same ΔH_c and ladder as K_C; no seconds, no ħ, no ε. Shipped 2026-09-14 after the battle test — sigilgraph.org/downloads/sigil-kparam-battle-2026-09-14.pdf §5.",
             "value": c.k_fix, "high": c.k_fix_high, "regime": c.regime_fix, "lower_bound": true,
@@ -557,8 +763,9 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
             "vs_K_C": "K_C carries τ/τ₀ in seconds, so one and the same disagreement reads ~4× lower at 110 blk/s than at 8 blk/s; K_fix does not move with block rate. Both keep a lone-producer fork visible (K_C by its ε floor); K_fix reads it as the WORST case.",
         },
         "definition": "K_C = 2π·√(ΔH_c · (τ/τ₀) · [ε + (1−ε)·H_norm]); ΔH_c = Σ wᵢ·Dᵢ over the AVAILABLE state-disagreement channels (tip 0.20, state-root 0.35, finality 0.20, semantic 0.25) — a LOWER bound; ε = 0.1; H_norm = Δs / log₂(N_producers); τ = final_depth/block-rate (measured finality time), τ₀ = 100 s. Dimensionless ENGINEERING score, no ħ — NOT a Margolus–Levitin comparison. Ω sets the confidence band, it does not multiply K_C. Regime: <1 stable · 1–3 elevated · ≥3 critical (provisional thresholds).",
-        "reading": format!("K_C = {:.3} [{:.3}, {:.3}] · K_fix = {:.3} ({}, d = {:.0} blk) · Ω = {:.3} ({} confidence) · ΔH_c = {:.4} (lower bound, {:.0}% of channel weight unmeasured) · N_eff = {:.2} of {} producer(s), dominant {:.1}%",
-            c.k_c, c.k_c_low, c.k_c_high, c.k_fix, c.regime_fix, c.persist_blocks, c.omega, c.confidence, c.delta_h_consensus, c.missing_weight * 100.0, c.n_eff, distinct, c.dominant_share * 100.0),
+        "reading": format!("{}K_C = {:.3} [{:.3}, {:.3}] · K_fix = {:.3} ({}, d = {:.0} blk) · Ω = {:.3} ({} confidence) · ΔH_c = {:.4} (lower bound, {:.0}% of channel weight unmeasured) · N_eff = {:.2} of {} producer(s), dominant {:.1}%",
+            if wit.blind() { format!("⚠ BLIND (W = {:.2}, weakest {}) — this reading is about the instrument, not the chain · ", wit.w, wit.weakest) } else { format!("W = {:.2} · ", wit.w) },
+            c.k_c, c.k_c_low, c.k_c_high, c.k_fix, regime_witnessed_fix, c.persist_blocks, c.omega, c.confidence, c.delta_h_consensus, c.missing_weight * 100.0, c.n_eff, distinct, c.dominant_share * 100.0),
         "state_disagreement": {
             "delta_H_consensus": c.delta_h_consensus, "lower_bound": true, "missing_weight": c.missing_weight,
             "channels": channels_json,
@@ -843,6 +1050,111 @@ mod tests {
         assert!((f.delta_h_consensus - 0.45).abs() < 1e-9, "{}", f.delta_h_consensus);
         assert!(c.k_c < 2.0 * std::f64::consts::PI);
         assert_eq!(c.regime, "critical");
+    }
+
+    // ── the witness term: the three measured freezes must NOT read "stable" ──
+    // Viktor, 2026-09-22, on the anatomical plate: "forskellen mellem fravær af
+    // konflikt og tilstedeværelse af konsensus. De er ikke det samme. Et dødt
+    // nervesystem kan også være stille." Each case below is a real incident.
+
+    #[test]
+    fn witness_cert_freshness_ramp() {
+        // tau = 100 s -> fresh <= max(2*100, 120) = 200 s, blind at max(20*100, 400) = 2000 s
+        assert_eq!(cert_freshness(Some(10.0), 100.0), Some(1.0));
+        assert_eq!(cert_freshness(Some(200.0), 100.0), Some(1.0));
+        assert_eq!(cert_freshness(Some(2000.0), 100.0), Some(0.0));
+        assert_eq!(cert_freshness(Some(86_400.0), 100.0), Some(0.0));
+        let mid = cert_freshness(Some(1100.0), 100.0).unwrap();
+        assert!((mid - 0.5).abs() < 1e-9, "{mid}");
+        // A FAST chain must not false-alarm: tau = 4.7 s at 110 blk/s, but the
+        // 120 s floor keeps a one-minute-old certificate fully fresh.
+        assert_eq!(cert_freshness(Some(60.0), 4.7), Some(1.0));
+        // Absent is UNKNOWN, never healthy.
+        assert_eq!(cert_freshness(None, 100.0), None);
+    }
+
+    #[test]
+    fn witness_2026_09_22_frozen_certificate_reads_blind_not_stable() {
+        // MEASURED: tip 23,787,330 advancing, certificate 23,068,190 frozen 24 h,
+        // gate "solo", bft false, committee 2, two votes on a 24-hour-old cert.
+        let w = witness_of(true, Some(86_400.0), 100.0, Some(23_068_190), 23_787_330, 2, 2, false, "solo", 0.55);
+        assert!(w.blind(), "W = {} ({})", w.w, w.verdict);
+        assert_eq!(w.certificate, Some(0.0));
+        assert_eq!(w.cert_lag_blocks, Some(719_140));
+        // The old gauge printed this. The new one must not.
+        assert_eq!(regime_of(0.0), "stable");
+        assert_eq!(regime_witnessed(0.0, &w), "blind");
+    }
+
+    #[test]
+    fn witness_2026_09_15_one_way_gossip_six_hours() {
+        // MEASURED: blocks were being produced the whole time, but the producer
+        // never reached quorum and ran on the 512-depth fallback for six hours.
+        // The K-gauge read 0.00 "stable" throughout.
+        let w = witness_of(true, Some(6.0 * 3600.0), 100.0, Some(18_659_624), 18_660_135, 1, 2, false, "solo", 0.55);
+        assert!(w.blind(), "W = {} ({})", w.w, w.verdict);
+        assert_eq!(regime_witnessed(0.0, &w), "blind");
+        assert!(w.verdict.starts_with("unwitnessed"), "{}", w.verdict);
+    }
+
+    #[test]
+    fn witness_clock_stalled_is_blind_even_with_a_fresh_certificate() {
+        // No block added in the window: nothing could have been observed, so a
+        // certificate that still looks fresh must not rescue the reading.
+        let w = witness_of(false, Some(5.0), 100.0, Some(100), 100, 4, 4, true, "bft", 0.0);
+        assert_eq!(w.clock, 0.0);
+        assert!(w.blind(), "W = {}", w.w);
+        assert_eq!(w.weakest, "clock");
+        assert_eq!(regime_witnessed(0.0, &w), "blind");
+    }
+
+    #[test]
+    fn witness_solo_gate_is_never_witnessed_however_fresh() {
+        // A replicated single writer attesting to its own chain. Absence of
+        // conflict here is guaranteed by construction, so it is not evidence.
+        let w = witness_of(true, Some(1.0), 100.0, Some(500), 500, 1, 1, false, "solo", 0.0);
+        assert_eq!(w.independence, 0.0);
+        assert!(w.blind());
+        assert_eq!(regime_witnessed(0.0, &w), "blind");
+    }
+
+    #[test]
+    fn witness_absent_certificate_is_unknown_not_healthy() {
+        let w = witness_of(true, None, 100.0, None, 900, 0, 0, false, "absent", 0.0);
+        assert_eq!(w.certificate, None);
+        assert!(w.blind(), "an absent certificate must not read as witnessed");
+        assert_eq!(regime_witnessed(0.0, &w), "blind");
+    }
+
+    #[test]
+    fn witness_healthy_bft_chain_reads_stable_and_says_why() {
+        // Four distinct signers, fresh certificate, every channel measurable.
+        let w = witness_of(true, Some(30.0), 100.0, Some(1_000), 1_010, 4, 4, true, "bft", 0.0);
+        assert!(!w.blind(), "W = {} ({})", w.w, w.verdict);
+        assert_eq!(w.independence, 1.0);
+        assert_eq!(regime_witnessed(0.0, &w), "stable");
+        assert!(w.verdict.starts_with("witnessed"), "{}", w.verdict);
+    }
+
+    #[test]
+    fn witness_never_suppresses_an_observed_disagreement() {
+        // The rule that keeps this honest in the other direction: a real fork
+        // seen on a blind gauge is still a real fork, reported at its own
+        // severity. W downgrades "stable", never anything above it.
+        let blind = witness_of(true, Some(86_400.0), 100.0, Some(1), 700_000, 1, 2, false, "solo", 0.55);
+        assert!(blind.blind());
+        assert_eq!(regime_witnessed(2.0, &blind), "elevated");
+        assert_eq!(regime_witnessed(4.0, &blind), "critical");
+        assert_eq!(regime_witnessed(0.99, &blind), "blind");
+    }
+
+    #[test]
+    fn witness_is_a_minimum_so_it_names_the_failing_sense() {
+        // Adding healthy senses must not dilute one dead one.
+        let w = witness_of(true, Some(1.0), 100.0, Some(10), 10, 9, 9, true, "bft", 0.95);
+        assert_eq!(w.weakest, "channels");
+        assert!((w.w - 0.05).abs() < 1e-9, "{}", w.w);
+        assert!(w.blind());
     }
 
     #[test]

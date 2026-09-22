@@ -28,3 +28,42 @@ path = "src/main.rs"
 [[bin]]
 name = "skyskraber-whitepaper"
 path = "src/bin/whitepaper.rs"
+
+[features]
+datacenter = ["dep:tokio", "dep:axum", "dep:reqwest", "dep:fs2", "dep:flux-aether", "dep:flux-refactor", "dep:flux-cortex", "dep:flux-graph", "dep:flux-optimize"]
+
+[dependencies.tokio]
+version = "1"
+features = ["full"]
+optional = true
+[dependencies.axum]
+version = "0.7"
+optional = true
+[dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json", "rustls-tls", "stream"]
+optional = true
+[dependencies.fs2]
+version = "0.4"
+optional = true
+[dependencies.flux-aether]
+path = "../flux-aether"
+optional = true
+[dependencies.flux-refactor]
+path = "../flux-refactor"
+optional = true
+[dependencies.flux-cortex]
+path = "../flux-cortex"
+optional = true
+[dependencies.flux-graph]
+path = "../flux-graph"
+optional = true
+[dependencies.flux-optimize]
+path = "../flux-optimize"
+optional = true
+
+[[bin]]
+name = "quillon-datacenter"
+path = "src/bin/quillon-datacenter.rs"
+required-features = ["datacenter"]

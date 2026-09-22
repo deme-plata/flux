@@ -18,6 +18,9 @@ use crate::workforce::Workforce;
 use serde::{Deserialize, Serialize};
 
 pub const SUBSYSTEMS: [&str; 4] = ["transport", "vault", "bank", "auditorium"];
+/// Vault fullness at which the cortex starts shipping bars off-site. Below the cap
+/// so relief happens with headroom to spare, not at the moment intake already fails.
+pub const VAULT_HIGH_WATER: f64 = 0.9;
 
 /// SLO thresholds the cortex holds the building to (seconds).
 pub const SLO_P95_WAIT_S: u64 = 90;
@@ -32,6 +35,10 @@ pub struct SubsystemSenses {
     pub payroll_failures: u32,
     pub treasury_uqug: u128,
     pub utilization_index: f64,
+    /// Vault fullness 0.0–1.0. A fresh building reads ~0; when this crosses
+    /// `VAULT_HIGH_WATER` the cortex asks for `RelieveVault` instead of letting the
+    /// vault silently refuse every intake.
+    pub vault_fill_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +51,8 @@ pub enum CortexDecision {
     RefillTreasury,
     /// The auditorium has gone quiet — invite a big thinker.
     ScheduleWisdomSession,
+    /// The vault is near capacity — ship bars off-site before intake starts failing.
+    RelieveVault,
     /// Everything within SLO — the best decision is no decision.
     SteadyState,
 }
@@ -88,6 +97,9 @@ impl BuildingCortex {
         }
         if !aud_ok {
             decisions.push(CortexDecision::ScheduleWisdomSession);
+        }
+        if senses.vault_fill_ratio >= VAULT_HIGH_WATER {
+            decisions.push(CortexDecision::RelieveVault);
         }
         if decisions.is_empty() {
             decisions.push(CortexDecision::SteadyState);
@@ -135,6 +147,7 @@ mod tests {
             payroll_failures: 0,
             treasury_uqug: 5_000_000,
             utilization_index: 0.8,
+            vault_fill_ratio: 0.2,
         }
     }
 
@@ -156,12 +169,25 @@ mod tests {
         senses.vault_witnessed = false;
         senses.payroll_failures = 3;
         senses.utilization_index = 0.0;
+        senses.vault_fill_ratio = 0.95;
         let decisions = cortex.tick(&senses);
         assert!(decisions.contains(&CortexDecision::AddRobotCar));
         assert!(decisions.contains(&CortexDecision::FreezeVaultAndAudit));
         assert!(decisions.contains(&CortexDecision::RefillTreasury));
         assert!(decisions.contains(&CortexDecision::ScheduleWisdomSession));
+        assert!(decisions.contains(&CortexDecision::RelieveVault));
         assert!(!decisions.contains(&CortexDecision::SteadyState));
+    }
+
+    #[test]
+    fn a_full_vault_asks_for_relief_a_roomy_one_does_not() {
+        let wf = Workforce::quillon_default(2, 1);
+        let mut cortex = BuildingCortex::new(&wf);
+        let mut senses = healthy();
+        senses.vault_fill_ratio = VAULT_HIGH_WATER - 0.01;
+        assert!(!cortex.tick(&senses).contains(&CortexDecision::RelieveVault));
+        senses.vault_fill_ratio = VAULT_HIGH_WATER;
+        assert!(cortex.tick(&senses).contains(&CortexDecision::RelieveVault));
     }
 
     #[test]

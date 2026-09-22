@@ -116,6 +116,18 @@ impl Car {
     fn load(&self) -> usize {
         self.queue.len() + self.in_flight
     }
+    /// Jobs waiting in this car's queue (not yet on a route).
+    pub fn queued(&self) -> usize {
+        self.queue.len()
+    }
+    /// Jobs on the current route.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight
+    }
+    /// Tick at which the current route completes (0 = idle since genesis).
+    pub fn busy_until(&self) -> u64 {
+        self.busy_until
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -161,6 +173,26 @@ impl ElevatorBank {
 
     pub fn car_count(&self) -> usize {
         self.cars.len()
+    }
+
+    /// Every car, in shaft order — a read-only view for telemetry.
+    pub fn cars(&self) -> &[Car] {
+        &self.cars
+    }
+
+    /// Lifetime rides served — the counter alone, without the sort `metrics()` does.
+    pub fn metrics_served(&self) -> u64 {
+        self.served_robot + self.served_human
+    }
+
+    /// Forget the wait samples gathered so far; served counters and route
+    /// means are untouched. A lifetime run (`crate::life`) calls this at
+    /// midnight so `avg_wait_s` / `p95_wait_s` describe THAT day — exactly
+    /// what they describe for a fresh `run_day` building — and so
+    /// `metrics()`, which clones and sorts the samples, stays O(day) per call
+    /// instead of growing O(n log n) across 256 years.
+    pub fn reset_wait_window(&mut self) {
+        self.waits.clear();
     }
 
     /// Destination dispatch: least-loaded matching car, ties by proximity.

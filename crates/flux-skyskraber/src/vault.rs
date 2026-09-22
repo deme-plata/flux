@@ -50,6 +50,11 @@ pub enum VaultOp {
     Deposit { bar: GoldBar, actor: String },
     Withdraw { serial: String, actor: String },
     Audit { actor: String, bars_counted: usize },
+    /// Bars shipped to an off-site vault to reclaim capacity — the actuator the
+    /// cortex's `RelieveVault` decision drives once the vault is near full. A new
+    /// variant only: `Deposit`/`Withdraw`/`Audit` still serialize byte-identically,
+    /// so every custody chain written before this stays verifiable.
+    Offload { count: usize, actor: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +180,13 @@ impl Vault {
                     VaultOp::Deposit { bar, .. } => inventory.push(bar.serial.clone()),
                     VaultOp::Withdraw { serial, .. } => inventory.retain(|s| s != serial),
                     VaultOp::Audit { .. } => {}
+                    // Offload ships the oldest `count` bars off-site. `inventory` is in
+                    // deposit order (push on deposit, retain on withdraw) exactly as
+                    // `self.bars` is, so dropping its front `count` mirrors the actuator.
+                    VaultOp::Offload { count, .. } => {
+                        let k = (*count).min(inventory.len());
+                        inventory.drain(0..k);
+                    }
                 }
                 entry_idx += 1;
             }
@@ -242,12 +254,64 @@ impl Vault {
         self.bars.len()
     }
 
+    /// How full the vault is, 0.0–1.0 — the sense the cortex was missing. A fresh
+    /// building reads ~0; the day this crosses the high-water mark is the day the
+    /// `RelieveVault` actuator starts shipping bars out instead of the vault
+    /// silently refusing every intake for the rest of its life.
+    pub fn fill_ratio(&self) -> f64 {
+        self.bars.len() as f64 / self.capacity.max(1) as f64
+    }
+
+    /// Ship up to `count` of the OLDEST bars to an off-site vault, reclaiming that
+    /// much capacity. One chained `Offload` audit entry records it (custody is never
+    /// silently lighter). Returns how many were actually moved. This is what makes
+    /// `VaultError::Full` recoverable instead of terminal.
+    pub fn offload(&mut self, count: usize, actor: &str, tick: u64) -> usize {
+        let n = count.min(self.bars.len());
+        if n == 0 {
+            return 0;
+        }
+        self.bars.drain(0..n);
+        self.record(VaultOp::Offload { count: n, actor: actor.into() }, tick);
+        n
+    }
+
     pub fn head_hex(&self) -> String {
         hex::encode(self.head)
     }
 
     pub fn audit_log(&self) -> &[AuditEntry] {
         &self.audit
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Verify only the entries appended since `from` — an index into the audit
+    /// log up to which the chain was already verified. Chained onto entry
+    /// `from - 1`'s head, so verifying [0, a) and then [a, b) proves exactly
+    /// what verifying [0, b) proves, at O(b − a) instead of O(b). A lifetime
+    /// run (`crate::life`) audits every hour this way and runs the full
+    /// [`Self::verify_chain`] once a year: hourly full verification of a
+    /// 256-year log would be O(n²) — days of hashing for no extra assurance.
+    pub fn verify_chain_from(&self, from: usize) -> Result<usize, usize> {
+        let mut prev = if from == 0 {
+            [0u8; 32]
+        } else {
+            match self.audit.get(from - 1) {
+                Some(e) => e.head,
+                None => return Err(from),
+            }
+        };
+        for (i, e) in self.audit.iter().enumerate().skip(from) {
+            let expect = chain(&prev, &e.op, e.tick);
+            if expect != e.head {
+                return Err(i);
+            }
+            prev = e.head;
+        }
+        Ok(self.audit.len())
     }
 
     /// Recompute the whole chain from genesis. Returns the index of the first
@@ -268,6 +332,32 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn officer() -> Clearance { Clearance::Officer }
+
+    #[test]
+    fn offload_reclaims_capacity_and_keeps_the_chain_valid() {
+        let mut v = Vault::new(8);
+        for i in 0..8 {
+            let bar = GoldBar { serial: format!("B{i:03}"), weight_g: 12_400, fineness_ppm: 999_900 };
+            v.deposit(bar, "bank", officer(), i as u64).unwrap();
+        }
+        assert_eq!(v.bar_count(), 8);
+        // Full: a further deposit is refused.
+        let extra = GoldBar { serial: "B999".into(), weight_g: 12_400, fineness_ppm: 999_900 };
+        assert!(matches!(v.deposit(extra.clone(), "bank", officer(), 8), Err(VaultError::Full(_))));
+        assert_eq!(v.fill_ratio(), 1.0);
+        // Relief ships the 5 oldest off-site; capacity is reclaimed.
+        assert_eq!(v.offload(5, "offsite", 9), 5);
+        assert_eq!(v.bar_count(), 3);
+        assert!(v.fill_ratio() < 0.9);
+        // The intake that was refused now fits, and the custody chain still verifies.
+        assert!(v.deposit(extra, "bank", officer(), 10).is_ok());
+        assert!(v.verify_chain().is_ok(), "offload is a chained op, not a silent removal");
+        // Offloading more than held moves only what is there.
+        assert_eq!(v.offload(100, "offsite", 11), 4);
+        assert_eq!(v.bar_count(), 0);
+    }
 
     fn bar(serial: &str) -> GoldBar {
         GoldBar { serial: serial.into(), weight_g: 12_400, fineness_ppm: 999_900 }

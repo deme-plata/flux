@@ -89,6 +89,29 @@ impl QuillonBank {
         report
     }
 
+    /// Endow the treasury. The ONE knob a lifetime scenario turns, and it is
+    /// labelled, not hidden: the canonical building has exactly the
+    /// 10 M uQUG `bootstrap_accounts` gives it and nothing else.
+    pub fn fund_treasury(&mut self, uqug: u128) {
+        self.ledger.credit(TREASURY, TOKEN, uqug).expect("treasury credit cannot fail");
+    }
+
+    /// Custody revenue EARNED from external clients for the bars currently held —
+    /// `VAULT_FEE_PER_BAR_UQUG` per bar, credited into the treasury. This is the
+    /// standing income the canonical building was missing: `charge_vault_fee` (below)
+    /// exists and is tested, but nothing on the day script ever called it, so income
+    /// was zero and the treasury drained to insolvency by day 96. Modeled as a credit
+    /// rather than an internal transfer because custody customers pay from OUTSIDE the
+    /// building's local book (the honest boundary in this module's header). Returns the
+    /// amount accrued.
+    pub fn accrue_custody_revenue(&mut self, bars: usize) -> u128 {
+        let revenue = VAULT_FEE_PER_BAR_UQUG * bars as u128;
+        if revenue > 0 {
+            self.ledger.credit(TREASURY, TOKEN, revenue).expect("treasury credit cannot fail");
+        }
+        revenue
+    }
+
     /// Vault custody is a service the bank charges for.
     pub fn charge_vault_fee(&mut self, client: &str, bars: usize) -> Result<u128, BankError> {
         let fee = VAULT_FEE_PER_BAR_UQUG * bars as u128;
@@ -131,6 +154,19 @@ mod tests {
         // Empty account tries to pay: flux-bank-core must refuse.
         let err = bank.pay("ghost", TREASURY, 100, "nope");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn custody_revenue_credits_the_treasury_without_a_payer() {
+        let wf = Workforce::quillon_default(2, 1);
+        let mut bank = QuillonBank::new();
+        bank.bootstrap_accounts(&wf);
+        let before = bank.balance(TREASURY);
+        let got = bank.accrue_custody_revenue(400);
+        assert_eq!(got, 400 * VAULT_FEE_PER_BAR_UQUG);
+        assert_eq!(bank.balance(TREASURY), before + got);
+        // Zero bars accrues nothing and cannot fail.
+        assert_eq!(bank.accrue_custody_revenue(0), 0);
     }
 
     #[test]

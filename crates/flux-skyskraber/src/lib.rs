@@ -43,6 +43,11 @@ pub mod cortex;
 pub mod kdc;
 pub mod culture;
 pub mod elevator;
+/// A lifetime of days on ONE carried building — the chronos run. `sim` proves one
+/// day is deterministic; `life` finds what only accumulation can find: the day
+/// the vault fills, the day the treasury cannot make payroll, and whether the
+/// cortex notices either.
+pub mod life;
 /// Load sweep — drive the real elevator bank at a ladder of arrival rates and find
 /// where the artery actually saturates, checking the crate's own stability condition
 /// rho = lambda*E[T_route]/(N*E[b]) < 1 against the measured drain rather than asserting it.

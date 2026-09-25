@@ -1,4 +1,10 @@
 <div align="center">
+  <img src="assets/readme/flux-banner.gif" alt="Flux: code, build, verify. Animated signals flow from agent nodes through build and verification nodes." width="1120" />
+  <br />
+  <sub><a href="assets/readme/flux-banner.png">View the still version</a></sub>
+</div>
+
+<div align="center">
 
 # ⚡ Flux
 

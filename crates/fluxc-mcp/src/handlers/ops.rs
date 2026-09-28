@@ -1696,9 +1696,19 @@ fn flux_swarm_message(args: &Value) -> String {
         Some(s) if !s.is_empty() => s,
         _ => return "Error: 'to' required (recipient agent_id, or \"*\" for broadcast)".into(),
     };
-    let payload = args.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+    // The schema advertises "text/markdown/JSON". A JSON object/array used to hit
+    // `.as_str()` → None → "" and was persisted as an EMPTY message (ids 107-109,
+    // 2026-09-27). Serialize non-string values; refuse a blank body outright.
+    let payload = match args.get("payload") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => String::new(),
+    };
+    if payload.trim().is_empty() {
+        return "Error: 'payload' is empty — nothing sent (a blank message is a note nobody can read)".into();
+    }
     let reply_to = args.get("reply_to").and_then(|v| v.as_u64());
-    match flux_swarm_tools::send(from, to, payload, reply_to) {
+    match flux_swarm_tools::send(from, to, &payload, reply_to) {
         Ok(m) => {
             let kind = if m.to == "*" { "broadcast" } else { "direct" };
             format!(
@@ -1949,5 +1959,23 @@ mod release_check_tests {
         assert!(verify_manifest_sig(&pk_hex, body, "abcd").unwrap_err().contains("signature malformed"));
         // Whitespace around a .sig file (trailing newline) is tolerated.
         assert!(verify_manifest_sig(&pk_hex, body, &format!("{sig_hex}\n")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod swarm_message_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    // Refusal paths return BEFORE flux_swarm_tools::send, so these never touch the
+    // shared /tmp/flux-swarm-messages.jsonl bus.
+    #[test]
+    fn blank_payloads_are_refused_not_persisted() {
+        for p in [json!(""), json!("   \n"), Value::Null] {
+            let out = flux_swarm_message(&json!({"from": "t", "to": "*", "payload": p}));
+            assert!(out.starts_with("Error: 'payload' is empty"), "payload {p:?} gave: {out}");
+        }
+        let out = flux_swarm_message(&json!({"from": "t", "to": "*"}));
+        assert!(out.starts_with("Error: 'payload' is empty"), "missing payload gave: {out}");
     }
 }

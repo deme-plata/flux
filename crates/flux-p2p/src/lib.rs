@@ -85,7 +85,16 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 // this is the list to edit — not the one in `sigil-net`.
 pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("epsilon-sigil", "/ip4/89.149.241.126/tcp/9501/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
-    ("happysrv-sigil", "/ip4/159.195.108.96/tcp/9501/p2p/12D3KooWF5hYvjWRcGAmmwsFDLP69p39zgh3Yuxp2oQ989R57Din"),
+    // 2026-10-01: happysrv (159.195.108.96) REMOVED — dark for days; every client wasted two dials a cycle
+    // on it (:9501 and :853) forever. Added five docker `sigil-node` followers on Epsilon (host network,
+    // fixed public ports 9503 + 9521..9524, firewall opened, same-height with the producer when added)
+    // so a stock client sees >1 peer out of the box. They are real full nodes (they serve backfill).
+    // Re-verify each id/port before editing: `docker ps` + `journalctl`/logs `local_peer_id`.
+    ("epsilon-docker4", "/ip4/89.149.241.126/tcp/9503/p2p/12D3KooWARdbyhGXQL3GQmgE7jJrDu8Gf3gUxu6oxmboUhzNfskh"),
+    ("epsilon-docker5", "/ip4/89.149.241.126/tcp/9521/p2p/12D3KooWLLUue4UCrbou9ZMHVgd3Y858EVFZbKv1EAKkuHSDaF8D"),
+    ("epsilon-docker6", "/ip4/89.149.241.126/tcp/9522/p2p/12D3KooWKe5KSqkSrMrGctKXGkyot84AbsPPYijo347dzVPA1FhW"),
+    ("epsilon-docker7", "/ip4/89.149.241.126/tcp/9523/p2p/12D3KooWN2tkr3oKWhVzaoS2Xde3t9vvwZbe2dZTAUsFFJZUYQAy"),
+    ("epsilon-docker8", "/ip4/89.149.241.126/tcp/9524/p2p/12D3KooWQutYint9GyqdZhgNEa4cQEs4urwoQGeA6xzivDyotaue"),
 ];
 
 /// Firewall-friendly relay bootstrap for networks where tcp/9501 is reachable
@@ -105,7 +114,7 @@ pub const SIGIL_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
 /// shipped).
 pub const SIGIL_RELAY853_BOOTSTRAP_PEERS: &[(&str, &str)] = &[
     ("epsilon-relay853", "/ip4/89.149.241.126/tcp/853/p2p/12D3KooWQ1E42MDH2BVcC1qp5bo6oydPptA6VBbgXcAt3gaTMSof"),
-    ("happysrv-relay853", "/ip4/159.195.108.96/tcp/853/p2p/12D3KooWF5hYvjWRcGAmmwsFDLP69p39zgh3Yuxp2oQ989R57Din"),
+    // happysrv-relay853 removed 2026-10-01 together with happysrv (dark).
 ];
 
 /// v0.57 (sync): well-known path where a sigil-node PRODUCER publishes its libp2p peer-id, so a

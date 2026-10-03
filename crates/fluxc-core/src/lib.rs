@@ -478,6 +478,7 @@ pub fn pulse_end(pi: &PulseInvocation, cmd: &str, package: Option<&str>, release
         lock_wait_build_dir_ms: pi.waits.build_dir_ms,
         lock_wait_pkg_cache_ms: pi.waits.package_cache_ms,
         lock_added: None,
+        tests_failed: pi.waits.tests_failed,
     };
     let p = pulse::finish_invocation_facts(&pi.inv, cmd, package, release, green, wall_ms, &facts)?;
     let worth_saying = p.units_compiled + p.units_failed > 0 || wall_ms >= 5000;

@@ -357,6 +357,8 @@ pub fn cargo_lock_busy(target_dir: &Path) -> bool {
 pub struct LockWaits {
     pub build_dir_ms: u64,
     pub package_cache_ms: u64,
+    /// cargo printed "error: test failed" — the BUILD was fine, a test was not.
+    pub tests_failed: bool,
 }
 
 /// Run `cmd` with its stderr relayed line-by-line to ours, timing every
@@ -405,6 +407,9 @@ pub fn status_with_lock_watch(cmd: &mut std::process::Command) -> std::io::Resul
                 if pkg { w.package_cache_ms += ms } else { w.build_dir_ms += ms }
             }
             tail.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if tail.contains("error: test failed") {
+                w.tests_failed = true;
+            }
             if let Some(pos) = tail.rfind("waiting for file lock") {
                 let line_end = tail[pos..].find(['\n', '\r']).map(|k| pos + k);
                 let rest_after = line_end.map(|k| tail[k..].trim().is_empty()).unwrap_or(true);
@@ -841,6 +846,8 @@ pub struct InvocationFacts {
     /// `Some` = git could answer: a first-seen crate is a NEW dependency only
     /// if it is in here. `None` = unknown → fall back to the store heuristic.
     pub lock_added: Option<BTreeSet<String>>,
+    /// Red invocation because a TEST failed, not the build.
+    pub tests_failed: bool,
 }
 
 pub fn judge_full(
@@ -861,6 +868,8 @@ pub fn judge_facts(
 ) -> Pulse {
     let start_ms = facts.start_ms;
     let (inv, cmd, package, release, green, wall_ms) = meta;
+    // A failing test makes the invocation red but says nothing about the build.
+    let green = green || facts.tests_failed;
     let mut p = Pulse {
         lock_busy_at_start: facts.lock_busy_at_start,
         lock_wait_build_dir_ms: facts.lock_wait_build_dir_ms,
@@ -1007,7 +1016,9 @@ pub fn judge_facts(
     let new_cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
     let delta = p.judged_cpu_ms as i64 - p.expected_cpu_ms as i64;
     let heavy_ratio = 1.15 * p.load_allowance;
-    p.verdict = if p.units_failed > 0 {
+    p.verdict = if p.units_failed > 0 || (!green && p.units_compiled == 0) {
+        // a red invocation where no unit compiled = cargo itself failed
+        // (bad args, manifest, resolution) — never a "slow no-op"
         "failed".into()
     } else if p.units_compiled == 0 && p.units_failed == 0 {
         "idle".into()
@@ -1029,6 +1040,9 @@ pub fn judge_facts(
         "steady".into()
     };
     p.headline = headline(&p);
+    if facts.tests_failed {
+        p.headline.push_str(" · ✗ tests FAILED (the build itself was fine)");
+    }
     p.levers = levers(&p);
     p
 }
@@ -1109,6 +1123,10 @@ pub fn levers(p: &Pulse) -> Vec<String> {
 
 fn headline(p: &Pulse) -> String {
     let mut h = match p.verdict.as_str() {
+        "failed" if p.units_failed == 0 => format!(
+            "✗ cargo failed before any rustc ran ({} wall) — arguments, manifest or resolution, not code",
+            fmt_ms(p.wall_ms)
+        ),
         "failed" => format!(
             "✗ failed — {} unit(s) red after {} CPU ({} compiled fine)",
             p.units_failed,
@@ -2433,6 +2451,23 @@ mod tests {
             &Baselines::default(), ("i", "build", "a", false, true, 3000));
         assert_ne!(p.verdict, "failed", "{}", p.headline);
         assert_eq!((p.units_failed, p.probe_failures), (0, 1));
+    }
+
+    #[test]
+    fn cargo_error_before_any_rustc_is_failed_not_a_slow_noop() {
+        // measured 10-03: `test -p sigil-top --lib` on a bin crate → "no library targets"
+        let p = judge(&[], &Baselines::default(), ("i", "test", "sigil-top", false, false, 29_000));
+        assert_eq!(p.verdict, "failed");
+        assert!(p.headline.contains("before any rustc"), "{}", p.headline);
+        assert!(!p.levers.iter().any(|l| l.contains("no-op")), "{:?}", p.levers);
+    }
+
+    #[test]
+    fn failing_tests_are_not_a_cargo_error() {
+        let facts = InvocationFacts { tests_failed: true, ..Default::default() };
+        let p = judge_facts(&[], &Baselines::default(), ("i", "test", "sigil-top", false, false, 73_000), &facts);
+        assert_ne!(p.verdict, "failed", "{}", p.headline);
+        assert!(p.headline.contains("tests FAILED"), "{}", p.headline);
     }
 
     #[test]

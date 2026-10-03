@@ -204,8 +204,11 @@ fn flux_combo(args: &Value) -> String {
     // NOTE: no per-call tune spawn (per swarm feedback to avoid latency). Assume SPEED_BOOTS or set at boot.
     // Dogfood: use fluxc test (which already does the type-check, no redundant check thread to avoid lock contention).
 
+    // Compile pulse: tag the child's cargo run so its verdict can be read back.
+    let inv = fluxc_core::pulse::new_invocation_id();
     let test_handle = std::thread::spawn({
         let pkg2 = pkg2.clone();
+        let inv = inv.clone();
         // Returns (passed, failed, suites_seen, run_ok). `suites_seen == 0`
         // means no test harness printed a summary — the "0/0 green" lie this
         // handler used to tell; `run_ok == false` means the subcommand itself
@@ -213,6 +216,7 @@ fn flux_combo(args: &Value) -> String {
         move || {
             let mut cmd = anchored_fluxc_cmd();
             cmd.args(["test", "-p", &pkg2]);
+            cmd.env("FLUX_INVOCATION_ID", &inv);
             let raw = cmd.output();
             match raw {
                 Ok(o) => {
@@ -233,6 +237,11 @@ fn flux_combo(args: &Value) -> String {
 
     let (test_passed, test_failed, suites_seen, run_ok) = test_handle.join().unwrap();
     let pred = predict_handle.join().unwrap();
+    let pulse = fluxc_core::pulse::read_invocation(&inv);
+    let pulse_rows: Vec<String> = pulse.as_ref()
+        .filter(|p| p.units_compiled + p.units_failed + p.units_restored > 0)
+        .map(crate::handlers::pulse::combo_rows)
+        .unwrap_or_default();
 
     let total_ms = start.elapsed().as_millis();
     // Three-way verdict: tests executed and all green / something red /
@@ -268,13 +277,20 @@ fn flux_combo(args: &Value) -> String {
         "suites_seen": suites_seen, "verdict": verdict,
         "predicted_ms": pred.predicted_ms,
         "load_1m": load_1m, "cores": cores,
-        "rev": rev_stamp
+        "rev": rev_stamp,
+        "pulse": pulse.as_ref().map(|p| serde_json::json!({
+            "verdict": p.verdict, "headline": p.headline,
+            "cpu_ms": p.cpu_ms_total, "expected_cpu_ms": p.expected_cpu_ms,
+            "judged_cpu_ms": p.judged_cpu_ms, "units_compiled": p.units_compiled,
+            "units_restored": p.units_restored, "regressions": p.regressions.len(),
+            "new_crates": p.new_crates.iter().map(|c| c.unit.clone()).collect::<Vec<_>>(),
+        }))
     }));
 
     let total = test_passed + test_failed;
     let test_frac = if total > 0 { test_passed as f64 / total as f64 } else { 1.0 };
     let fired = webhook_fired("combo_complete");
-    let pulse = "◉ ".repeat(fired.min(8));
+    let dots = "◉ ".repeat(fired.min(8));
 
     if unverified {
         // The old behavior rendered this exact case as "0/0 ✓ green" — the
@@ -296,7 +312,7 @@ fn flux_combo(args: &Value) -> String {
                     " VERDICT   ⚠ NOT green — no test harness produced output".to_string(),
                     format!(" NEXT      fluxc check -p {} · then run target/debug/deps/<crate>-<hash> directly", pkg),
                     "--".to_string(),
-                    format!(" WEBHOOKS  combo_complete ▶ {} fired   {}", fired, pulse.trim_end()),
+                    format!(" WEBHOOKS  combo_complete ▶ {} fired   {}", fired, dots.trim_end()),
                 ]
             )
         );
@@ -310,20 +326,22 @@ fn flux_combo(args: &Value) -> String {
     } else {
         format!(" TESTS     {}  {}/{} {}", bar(test_frac, 24), test_passed, total, status)
     };
+    let mut rows = vec![
+        " BUILD     ✓ (via fluxc test, no redundant check)".to_string(),
+        tests_line,
+        load_line(load_1m, cores),
+        format!(" PREDICT   {}ms   cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 12), (pred.predicted_cache_rate * 100.0) as u64),
+        format!("           confidence {} {}%", bar(pred.confidence, 12), (pred.confidence * 100.0) as u64),
+    ];
+    if !pulse_rows.is_empty() {
+        rows.push("--".to_string());
+        rows.extend(pulse_rows);
+    }
+    rows.push("--".to_string());
+    rows.push(format!(" WEBHOOKS  combo_complete ▶ {} fired   {}", fired, dots.trim_end()));
     format!(
         "⚡⚡⚡  F L U X   C O M B O  ⚡⚡⚡\n{}",
-        dashboard(
-            &format!("{} · {}ms · {}", pkg, total_ms, verdict),
-            &[
-                " BUILD     ✓ (via fluxc test, no redundant check)".to_string(),
-                tests_line,
-                load_line(load_1m, cores),
-                format!(" PREDICT   {}ms   cache {} {}%", pred.predicted_ms, bar(pred.predicted_cache_rate, 12), (pred.predicted_cache_rate * 100.0) as u64),
-                format!("           confidence {} {}%", bar(pred.confidence, 12), (pred.confidence * 100.0) as u64),
-                "--".to_string(),
-                format!(" WEBHOOKS  combo_complete ▶ {} fired   {}", fired, pulse.trim_end()),
-            ]
-        )
+        dashboard(&format!("{} · {}ms · {}", pkg, total_ms, verdict), &rows)
     )
 }
 

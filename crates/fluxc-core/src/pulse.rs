@@ -1,0 +1,1594 @@
+// fluxc pulse — compile-cost consequences, measured on every build.
+//
+// The problem this exists for (Viktor, 2026-10-03): "during development of
+// sigilgraph i noticed compile time keeps rising … in the run up to that point
+// more data is needed so you can improve and enhance on the run". Compile time
+// rarely jumps; it CREEPS — a dependency here, a 2 KB generic there, a crate
+// that quietly became everyone's dependency. By the time a human notices, the
+// cause is twenty commits back. So every build now reports what it cost
+// compared with what that same work usually costs, while the change that
+// caused it is still the one on screen.
+//
+// Data flow:
+//   1. wrapper (one short-lived process per rustc unit) measures the rustc
+//      child — CPU time + peak RSS via getrusage(RUSAGE_CHILDREN), not wall
+//      clock, because wall clock on a box at load 37 measures the queue — and
+//      appends ONE JSON line. With FLUX_INVOCATION_ID set (run_cargo sets it)
+//      the line goes to `inv/<id>.units.jsonl`, else straight to the day log.
+//   2. the parent fluxc invocation, after cargo exits, reads its own inv file,
+//      judges every compiled unit against that unit's rolling baseline, writes
+//      the Pulse (`last.json`, `inv/<id>.json`), folds its samples into the
+//      baselines, and moves the lines into the day log for drift analysis.
+//   3. the Pulse goes out as the `compile_pulse` webhook and is rendered into
+//      the combo dashboards, so an agent SEES the consequence of the change it
+//      just made, in the same tool response.
+//
+// Contract: advisory, never load-bearing. Every failure is swallowed; a
+// missing or corrupt pulse store never breaks or slows a build. FLUX_PULSE=0
+// disables recording entirely. FLUX_PULSE_DIR overrides the store (tests).
+
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// Samples kept per unit key. Enough for a stable median, small enough that
+/// the baseline follows the code instead of last month's code.
+const BASELINE_CAP: usize = 24;
+/// A unit needs this many prior samples before we judge it.
+const MIN_SAMPLES: usize = 3;
+/// Per-unit regression: ≥ this ratio AND ≥ REGRESS_MIN_MS absolute.
+const REGRESS_RATIO: f64 = 1.25;
+const IMPROVE_RATIO: f64 = 0.80;
+const REGRESS_MIN_MS: u64 = 300;
+
+// ── store layout ────────────────────────────────────────────────────────────
+
+pub fn pulse_dir() -> PathBuf {
+    std::env::var("FLUX_PULSE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| flux_cache::cache_dir().join("pulse"))
+}
+
+pub fn enabled() -> bool {
+    std::env::var("FLUX_PULSE").map(|v| v != "0").unwrap_or(true)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Civil date (UTC) for a unix timestamp — Howard Hinnant's days_to_civil.
+pub fn civil_date(unix: u64) -> (i64, u32, u32) {
+    let z = (unix / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d)
+}
+
+fn day_log_path(dir: &Path, unix: u64) -> PathBuf {
+    let (y, m, d) = civil_date(unix);
+    dir.join(format!("units-{:04}-{:02}-{:02}.jsonl", y, m, d))
+}
+
+fn append_lines(path: &Path, lines: &str) {
+    if lines.is_empty() {
+        return;
+    }
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    // O_APPEND: each write lands at the current end even with many concurrent
+    // wrapper processes; one line per write keeps records whole.
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(lines.as_bytes());
+    }
+}
+
+// ── the per-unit sample (wrapper side) ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnitSample {
+    pub ts: u64,
+    #[serde(default)]
+    pub inv: String,
+    pub pkg: String,
+    pub crate_name: String,
+    /// rustc --crate-type (lib, bin, proc-macro, …).
+    #[serde(default)]
+    pub kind: String,
+    /// "check" (metadata only) or "build" (codegen). Costs differ ~3-10×.
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub is_test: bool,
+    /// opt-level, plus "+lto" when LTO is on.
+    #[serde(default)]
+    pub opt: String,
+    #[serde(default)]
+    pub target: String,
+    /// Workspace/path crate (true) vs registry/git dependency (false).
+    #[serde(default)]
+    pub local: bool,
+    /// "compiled" | "restored" (flux cache hit) | "failed".
+    pub outcome: String,
+    pub wall_ms: u64,
+    #[serde(default)]
+    pub cpu_ms: u64,
+    #[serde(default)]
+    pub rss_kb: u64,
+    /// Bytes of the unit's root source + its module tree.
+    #[serde(default)]
+    pub src_bytes: u64,
+    #[serde(default)]
+    pub load1: f64,
+    /// Unix ms when rustc finished (start = end_ms - wall_ms). Lets the parent
+    /// split its wall clock into before-first-rustc / compiling / after.
+    #[serde(default)]
+    pub end_ms: u64,
+}
+
+impl UnitSample {
+    /// Stable identity of "the same work" across content changes.
+    pub fn key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|o{}|{}",
+            self.pkg,
+            self.crate_name,
+            self.kind,
+            self.mode,
+            if self.is_test { "test" } else { "-" },
+            self.opt,
+            self.target
+        )
+    }
+    pub fn label(&self) -> String {
+        let mut s = if self.crate_name.replace('_', "-") == self.pkg || self.crate_name == self.pkg {
+            self.pkg.clone()
+        } else {
+            format!("{}::{}", self.pkg, self.crate_name)
+        };
+        if self.is_test {
+            s.push_str(" (test)");
+        }
+        if self.kind == "bin" && self.crate_name == "build_script_build" {
+            s = format!("{} (build.rs)", self.pkg);
+        }
+        s
+    }
+}
+
+/// Facts the wrapper can read off the rustc command line.
+pub struct RustcShape {
+    pub kind: String,
+    pub mode: String,
+    pub opt: String,
+    pub target: String,
+}
+
+pub fn shape_from_args(args: &[String]) -> RustcShape {
+    let mut kind = String::new();
+    let mut emit = String::new();
+    let mut opt = "0".to_string();
+    let mut lto = false;
+    let mut target = "host".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        if a == "--crate-type" {
+            if kind.is_empty() {
+                kind = next.to_string();
+            }
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--crate-type=") {
+            if kind.is_empty() {
+                kind = v.to_string();
+            }
+        } else if a == "--emit" {
+            emit = next.to_string();
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--emit=") {
+            emit = v.to_string();
+        } else if a == "--target" {
+            target = next.to_string();
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--target=") {
+            target = v.to_string();
+        } else if a == "-C" || a.starts_with("-C") {
+            let c = if a == "-C" {
+                i += 1;
+                next
+            } else {
+                &a[2..]
+            };
+            if let Some(v) = c.strip_prefix("opt-level=") {
+                opt = v.to_string();
+            } else if c == "lto" || (c.starts_with("lto=") && c != "lto=off" && c != "lto=no" && c != "lto=false") {
+                lto = true;
+            }
+        }
+        i += 1;
+    }
+    if args.iter().any(|a| a == "--test") && kind.is_empty() {
+        kind = "bin".into();
+    }
+    if kind.is_empty() {
+        kind = "lib".into();
+    }
+    // cargo check emits `dep-info,metadata` only; a codegen build adds `link`.
+    let mode = if emit.contains("link") || emit.is_empty() { "build" } else { "check" };
+    if lto {
+        opt.push_str("+lto");
+    }
+    RustcShape { kind, mode: mode.into(), opt, target }
+}
+
+/// Registry and git dependencies live under CARGO_HOME; anything else is a
+/// path crate — the code being developed.
+pub fn is_local_manifest(manifest_dir: &str) -> bool {
+    !(manifest_dir.is_empty()
+        || manifest_dir.contains("/.cargo/registry/")
+        || manifest_dir.contains("/.cargo/git/")
+        || manifest_dir.contains("/registry/src/")
+        || manifest_dir.contains("/vendor/"))
+}
+
+pub fn load1() -> f64 {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()))
+        .unwrap_or(0.0)
+}
+
+/// CPU (user+sys, ms) and peak RSS (KiB) of all reaped children so far.
+#[cfg(unix)]
+pub fn children_rusage() -> (u64, u64) {
+    unsafe {
+        let mut ru: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) != 0 {
+            return (0, 0);
+        }
+        let ms = |tv: libc::timeval| (tv.tv_sec as u64) * 1000 + (tv.tv_usec as u64) / 1000;
+        (ms(ru.ru_utime) + ms(ru.ru_stime), ru.ru_maxrss as u64)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn children_rusage() -> (u64, u64) {
+    (0, 0)
+}
+
+/// Wrapper-side writer: one line, one write. Never fails the build.
+pub fn record_unit(sample: &UnitSample) {
+    if !enabled() {
+        return;
+    }
+    let Ok(line) = serde_json::to_string(sample) else { return };
+    let dir = pulse_dir();
+    let path = if sample.inv.is_empty() || sample.inv.contains('/') {
+        day_log_path(&dir, sample.ts)
+    } else {
+        dir.join("inv").join(format!("{}.units.jsonl", sample.inv))
+    };
+    append_lines(&path, &(line + "\n"));
+}
+
+/// Is any `<target>/<profile>/.cargo-lock` held right now? cargo takes an
+/// exclusive flock there for the whole build, so a non-blocking SHARED probe
+/// fails exactly when another build owns it. Released immediately.
+pub fn cargo_lock_busy(target_dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(target_dir) else { return false };
+    let mut locks: Vec<PathBuf> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let l = p.join(".cargo-lock");
+        if l.exists() {
+            locks.push(l);
+        }
+        // cross targets nest one level deeper: <target>/<triple>/<profile>/.cargo-lock
+        if let Ok(rd2) = std::fs::read_dir(&p) {
+            for e2 in rd2.flatten() {
+                let l2 = e2.path().join(".cargo-lock");
+                if e2.path().is_dir() && l2.exists() {
+                    locks.push(l2);
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    for l in locks {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(f) = std::fs::File::open(&l) {
+            let r = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if r != 0 {
+                return true;
+            }
+            unsafe {
+                libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+    false
+}
+
+pub fn new_invocation_id() -> String {
+    let seed = format!(
+        "{}-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::thread::current().id()
+    );
+    blake3::hash(seed.as_bytes()).to_hex()[..16].to_string()
+}
+
+// ── baselines ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Sample {
+    pub ts: u64,
+    pub cpu_ms: u64,
+    pub wall_ms: u64,
+    pub src_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Baselines {
+    pub units: BTreeMap<String, Vec<Sample>>,
+}
+
+impl Baselines {
+    pub fn median_cpu(&self, key: &str) -> Option<(u64, usize)> {
+        let v = self.units.get(key)?;
+        if v.is_empty() {
+            return None;
+        }
+        let mut c: Vec<u64> = v.iter().map(|s| s.cpu_ms).collect();
+        c.sort_unstable();
+        Some((c[c.len() / 2], c.len()))
+    }
+    pub fn last_src(&self, key: &str) -> Option<u64> {
+        self.units.get(key)?.last().map(|s| s.src_bytes).filter(|b| *b > 0)
+    }
+    pub fn fold(&mut self, s: &UnitSample) {
+        if s.outcome != "compiled" || s.cpu_ms == 0 {
+            return;
+        }
+        let v = self.units.entry(s.key()).or_default();
+        v.push(Sample { ts: s.ts, cpu_ms: s.cpu_ms, wall_ms: s.wall_ms, src_bytes: s.src_bytes });
+        if v.len() > BASELINE_CAP {
+            let drop = v.len() - BASELINE_CAP;
+            v.drain(..drop);
+        }
+    }
+    /// Any key for this package+crate seen under ANY shape (opt/mode/target)?
+    pub fn knows_crate(&self, pkg: &str, crate_name: &str) -> bool {
+        let prefix = format!("{}|{}|", pkg, crate_name);
+        self.units.range(prefix.clone()..).next().map(|(k, _)| k.starts_with(&prefix)).unwrap_or(false)
+    }
+}
+
+fn baselines_path(dir: &Path) -> PathBuf {
+    dir.join("baselines.json")
+}
+
+pub fn load_baselines(dir: &Path) -> Baselines {
+    std::fs::read_to_string(baselines_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_baselines(dir: &Path, b: &Baselines) {
+    let Ok(json) = serde_json::to_string(b) else { return };
+    let tmp = dir.join(format!("baselines.json.tmp-{}", std::process::id()));
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, baselines_path(dir));
+    }
+}
+
+/// Exclusive advisory lock over the read-modify-write of baselines.json, so
+/// two agents' builds finishing together cannot lose each other's samples.
+struct DirLock(Option<std::fs::File>);
+
+impl DirLock {
+    fn acquire(dir: &Path) -> DirLock {
+        let _ = std::fs::create_dir_all(dir);
+        let Ok(f) = std::fs::OpenOptions::new().create(true).write(true).open(dir.join(".lock")) else {
+            return DirLock(None);
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::flock(f.as_raw_fd(), libc::LOCK_EX);
+            }
+        }
+        DirLock(Some(f))
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(f) = &self.0 {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
+// ── the Pulse: one invocation, judged ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnitCost {
+    pub unit: String,
+    pub local: bool,
+    pub cpu_ms: u64,
+    pub wall_ms: u64,
+    #[serde(default)]
+    pub rss_kb: u64,
+    /// Median of prior samples (0 = no baseline).
+    #[serde(default)]
+    pub typical_ms: u64,
+    #[serde(default)]
+    pub samples: usize,
+    /// Source growth vs the last baseline sample, bytes (signed).
+    #[serde(default)]
+    pub src_delta: i64,
+    #[serde(default)]
+    pub src_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Pulse {
+    pub inv: String,
+    pub ts: u64,
+    pub cmd: String,
+    pub package: String,
+    pub release: bool,
+    pub green: bool,
+    pub wall_ms: u64,
+    pub load1: f64,
+    pub units_compiled: usize,
+    pub units_restored: usize,
+    pub units_failed: usize,
+    pub cpu_ms_total: u64,
+    pub cpu_ms_local: u64,
+    /// CPU the judged (baselined) units USUALLY take, and what they took now.
+    pub expected_cpu_ms: u64,
+    pub judged_cpu_ms: u64,
+    /// Fraction of compiled units that had a baseline to judge against.
+    pub coverage: f64,
+    pub cache_rate: f64,
+    pub peak_rss_kb: u64,
+    pub peak_rss_unit: String,
+    pub local_rebuilt: Vec<UnitCost>,
+    pub top: Vec<UnitCost>,
+    pub regressions: Vec<UnitCost>,
+    pub improvements: Vec<UnitCost>,
+    /// Units never compiled here before under any shape — new dependencies.
+    pub new_crates: Vec<UnitCost>,
+    /// Known crate, first time under this shape (new opt-level/target/mode).
+    pub new_shapes: Vec<UnitCost>,
+    /// Wall-clock phases of the invocation: cargo's own time before the first
+    /// rustc started (resolution, fingerprinting, build-dir LOCK WAIT), the
+    /// span in which rustc units ran, and the tail after the last one ended
+    /// (link of the final unit is inside the span; test execution, build-
+    /// script runs and cargo bookkeeping are after).
+    #[serde(default)]
+    pub before_ms: u64,
+    #[serde(default)]
+    pub compile_span_ms: u64,
+    #[serde(default)]
+    pub after_ms: u64,
+    /// Unit shapes in the baseline store when judged — below MATURE_KEYS a
+    /// first-seen crate is "not measured yet", not "a new dependency".
+    #[serde(default)]
+    pub store_keys: usize,
+    /// Another cargo held a `target/*/.cargo-lock` when this invocation began
+    /// — its `before_ms` is (at least partly) queueing behind that build.
+    #[serde(default)]
+    pub lock_busy_at_start: bool,
+    /// steady | heavier | lighter | learning | idle
+    pub verdict: String,
+    pub headline: String,
+}
+
+/// Baseline-store size at which a never-seen external crate is credible
+/// evidence of a NEW dependency rather than of a young store.
+const MATURE_KEYS: usize = 150;
+
+fn pct(a: u64, b: u64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    ((a as f64 / b as f64 - 1.0) * 100.0).round() as i64
+}
+
+pub fn fmt_ms(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else if ms >= 10_000 {
+        format!("{:.0}s", ms as f64 / 1000.0)
+    } else if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}ms", ms)
+    }
+}
+
+fn fmt_signed_ms(d: i64) -> String {
+    let s = fmt_ms(d.unsigned_abs());
+    if d >= 0 { format!("+{}", s) } else { format!("-{}", s) }
+}
+
+fn fmt_bytes_signed(d: i64) -> String {
+    let a = d.unsigned_abs();
+    let s = if a >= 1024 * 1024 {
+        format!("{:.1} MB", a as f64 / 1048576.0)
+    } else if a >= 1024 {
+        format!("{:.1} KB", a as f64 / 1024.0)
+    } else {
+        format!("{} B", a)
+    };
+    if d >= 0 { format!("+{}", s) } else { format!("-{}", s) }
+}
+
+/// Judge one invocation's units against the baselines. Pure — the I/O lives
+/// in `finish_invocation`, so this is unit-testable with synthetic samples.
+pub fn judge(
+    units: &[UnitSample],
+    base: &Baselines,
+    meta: (&str, &str, &str, bool, bool, u64),
+) -> Pulse {
+    judge_at(units, base, meta, 0)
+}
+
+/// `judge` with the invocation's start time (unix ms), enabling the
+/// before/compiling/after wall split. `start_ms == 0` skips the split.
+pub fn judge_at(
+    units: &[UnitSample],
+    base: &Baselines,
+    meta: (&str, &str, &str, bool, bool, u64),
+    start_ms: u64,
+) -> Pulse {
+    judge_full(units, base, meta, start_ms, false)
+}
+
+pub fn judge_full(
+    units: &[UnitSample],
+    base: &Baselines,
+    meta: (&str, &str, &str, bool, bool, u64),
+    start_ms: u64,
+    lock_busy_at_start: bool,
+) -> Pulse {
+    let (inv, cmd, package, release, green, wall_ms) = meta;
+    let mut p = Pulse {
+        lock_busy_at_start,
+        inv: inv.into(),
+        ts: now_unix(),
+        cmd: cmd.into(),
+        package: package.into(),
+        release,
+        green,
+        wall_ms,
+        load1: load1(),
+        ..Default::default()
+    };
+    let mut judged = 0usize;
+    let mut all: Vec<UnitCost> = Vec::new();
+    for u in units {
+        match u.outcome.as_str() {
+            "restored" => {
+                p.units_restored += 1;
+                continue;
+            }
+            "failed" => p.units_failed += 1,
+            _ => p.units_compiled += 1,
+        }
+        p.cpu_ms_total += u.cpu_ms;
+        if u.local {
+            p.cpu_ms_local += u.cpu_ms;
+        }
+        if u.rss_kb > p.peak_rss_kb {
+            p.peak_rss_kb = u.rss_kb;
+            p.peak_rss_unit = u.label();
+        }
+        let key = u.key();
+        let (typical, n) = base.median_cpu(&key).unwrap_or((0, 0));
+        let src_delta = match base.last_src(&key) {
+            Some(prev) if u.src_bytes > 0 => u.src_bytes as i64 - prev as i64,
+            _ => 0,
+        };
+        let c = UnitCost {
+            unit: u.label(),
+            local: u.local,
+            cpu_ms: u.cpu_ms,
+            wall_ms: u.wall_ms,
+            rss_kb: u.rss_kb,
+            typical_ms: typical,
+            samples: n,
+            src_delta,
+            src_bytes: u.src_bytes,
+        };
+        if u.outcome == "compiled" {
+            if n == 0 {
+                // A never-seen EXTERNAL crate in a mature store = a new dependency.
+                // A never-seen local crate, or anything in a young store, is just
+                // a first measurement under this shape.
+                if !u.local && base.units.len() >= MATURE_KEYS && !base.knows_crate(&u.pkg, &u.crate_name) {
+                    p.new_crates.push(c.clone());
+                } else {
+                    p.new_shapes.push(c.clone());
+                }
+            } else if n >= MIN_SAMPLES {
+                judged += 1;
+                p.expected_cpu_ms += typical;
+                p.judged_cpu_ms += u.cpu_ms;
+                let up = u.cpu_ms as f64 >= typical as f64 * REGRESS_RATIO
+                    && u.cpu_ms.saturating_sub(typical) >= REGRESS_MIN_MS;
+                let down = (u.cpu_ms as f64) <= typical as f64 * IMPROVE_RATIO
+                    && typical.saturating_sub(u.cpu_ms) >= REGRESS_MIN_MS;
+                if up {
+                    p.regressions.push(c.clone());
+                } else if down {
+                    p.improvements.push(c.clone());
+                }
+            }
+        }
+        if u.local {
+            p.local_rebuilt.push(c.clone());
+        }
+        all.push(c);
+    }
+    p.store_keys = base.units.len();
+    // Wall split. Only units that actually ran rustc carry a meaningful span.
+    let ran: Vec<&UnitSample> = units.iter().filter(|u| u.end_ms > 0 && u.outcome != "restored").collect();
+    if start_ms > 0 && !ran.is_empty() {
+        let first_start = ran.iter().map(|u| u.end_ms.saturating_sub(u.wall_ms)).min().unwrap_or(start_ms);
+        let last_end = ran.iter().map(|u| u.end_ms).max().unwrap_or(start_ms);
+        let end_ms = start_ms + wall_ms;
+        p.before_ms = first_start.saturating_sub(start_ms);
+        p.compile_span_ms = last_end.saturating_sub(first_start.max(start_ms));
+        p.after_ms = end_ms.saturating_sub(last_end);
+    }
+    let denom = (p.units_restored + p.units_compiled) as f64;
+    p.cache_rate = if denom > 0.0 { p.units_restored as f64 / denom } else { 0.0 };
+    p.coverage = if p.units_compiled > 0 { judged as f64 / p.units_compiled as f64 } else { 1.0 };
+    let by_cost = |v: &mut Vec<UnitCost>| v.sort_by(|a, b| b.cpu_ms.cmp(&a.cpu_ms));
+    all.sort_by(|a, b| b.cpu_ms.cmp(&a.cpu_ms));
+    p.top = all.into_iter().take(5).collect();
+    p.regressions.sort_by(|a, b| (b.cpu_ms.saturating_sub(b.typical_ms)).cmp(&a.cpu_ms.saturating_sub(a.typical_ms)));
+    p.improvements.sort_by(|a, b| (b.typical_ms.saturating_sub(b.cpu_ms)).cmp(&a.typical_ms.saturating_sub(a.cpu_ms)));
+    by_cost(&mut p.new_crates);
+    by_cost(&mut p.new_shapes);
+    by_cost(&mut p.local_rebuilt);
+
+    let new_cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
+    let delta = p.judged_cpu_ms as i64 - p.expected_cpu_ms as i64;
+    p.verdict = if p.units_compiled == 0 && p.units_failed == 0 {
+        "idle".into()
+    } else if p.coverage < 0.3 && p.new_crates.is_empty() && p.regressions.is_empty() {
+        "learning".into()
+    } else if (p.expected_cpu_ms > 0
+        && p.judged_cpu_ms as f64 >= p.expected_cpu_ms as f64 * 1.15
+        && delta >= 2000)
+        || new_cost >= 5000
+        || !p.regressions.is_empty() && p.regressions.iter().map(|r| r.cpu_ms - r.typical_ms).sum::<u64>() >= 3000
+    {
+        "heavier".into()
+    } else if p.expected_cpu_ms > 0
+        && (p.judged_cpu_ms as f64) <= p.expected_cpu_ms as f64 * 0.87
+        && -delta >= 2000
+    {
+        "lighter".into()
+    } else {
+        "steady".into()
+    };
+    p.headline = headline(&p);
+    p
+}
+
+fn headline(p: &Pulse) -> String {
+    let mut h = match p.verdict.as_str() {
+        "idle" => format!("◌ idle — {} unit(s) restored from cache, nothing compiled", p.units_restored),
+        "learning" => format!(
+            "◔ learning — {} unit(s), {} CPU; {:.0}% had a baseline (needs {} prior builds per unit)",
+            p.units_compiled,
+            fmt_ms(p.cpu_ms_total),
+            p.coverage * 100.0,
+            MIN_SAMPLES
+        ),
+        v => {
+            let delta = p.judged_cpu_ms as i64 - p.expected_cpu_ms as i64;
+            let mark = match v {
+                "heavier" => "▲ heavier",
+                "lighter" => "▼ lighter",
+                _ => "● steady",
+            };
+            if p.expected_cpu_ms == 0 {
+                format!("{} — {} CPU over {} unit(s); none had a baseline yet", mark, fmt_ms(p.cpu_ms_total), p.units_compiled)
+            } else {
+                format!(
+                    "{} — {} CPU over {} unit(s); judged work {} vs typical ({:+}%)",
+                    mark,
+                    fmt_ms(p.cpu_ms_total),
+                    p.units_compiled,
+                    fmt_signed_ms(delta),
+                    pct(p.judged_cpu_ms, p.expected_cpu_ms)
+                )
+            }
+        }
+    };
+    if let Some(r) = p.regressions.first() {
+        let mut s = format!(
+            "; {} {} (typ {}, {:+}%)",
+            r.unit,
+            fmt_ms(r.cpu_ms),
+            fmt_ms(r.typical_ms),
+            pct(r.cpu_ms, r.typical_ms)
+        );
+        if r.src_delta != 0 {
+            s.push_str(&format!(" src {}", fmt_bytes_signed(r.src_delta)));
+        }
+        h.push_str(&s);
+    }
+    if !p.new_crates.is_empty() {
+        let names: Vec<String> = p.new_crates.iter().take(3).map(|c| c.unit.clone()).collect();
+        let cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
+        h.push_str(&format!(
+            "; {} new dependency crate(s) +{} [{}]",
+            p.new_crates.len(),
+            fmt_ms(cost),
+            names.join(", ")
+        ));
+    }
+    if let Some(w) = wall_note(p) {
+        h.push_str("; ");
+        h.push_str(&w);
+    }
+    h
+}
+
+/// When most of the wall clock was NOT rustc, say where it went — a slow
+/// build that isn't compiling is a lock, a fingerprint storm or a test run,
+/// and no amount of code trimming will fix it.
+pub fn wall_note(p: &Pulse) -> Option<String> {
+    if p.wall_ms < 5000 || p.compile_span_ms + p.before_ms + p.after_ms == 0 {
+        return None;
+    }
+    let share = |x: u64| (x as f64 / p.wall_ms as f64 * 100.0).round() as u64;
+    if share(p.before_ms) >= 40 {
+        let why = if p.lock_busy_at_start {
+            "another build held the cargo lock — queueing, not compiling"
+        } else {
+            "lock was free: cargo resolution / fingerprint scan / build scripts"
+        };
+        Some(format!(
+            "wall {}: {} ({}%) passed before the first rustc — {}",
+            fmt_ms(p.wall_ms),
+            fmt_ms(p.before_ms),
+            share(p.before_ms),
+            why
+        ))
+    } else if share(p.after_ms) >= 50 && p.cmd == "test" {
+        Some(format!("wall {}: {} ({}%) after compiling — running the tests", fmt_ms(p.wall_ms), fmt_ms(p.after_ms), share(p.after_ms)))
+    } else if share(p.after_ms) >= 50 {
+        Some(format!("wall {}: {} ({}%) after the last rustc — build scripts / cargo bookkeeping", fmt_ms(p.wall_ms), fmt_ms(p.after_ms), share(p.after_ms)))
+    } else {
+        None
+    }
+}
+
+/// Compact dashboard rows (≤ 50 visible chars each) for combo panels / CLI.
+pub fn render_rows(p: &Pulse) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mark = match p.verdict.as_str() {
+        "heavier" => "▲ HEAVIER",
+        "lighter" => "▼ LIGHTER",
+        "steady" => "● STEADY",
+        "learning" => "◔ LEARNING",
+        _ => "◌ IDLE",
+    };
+    rows.push(format!(
+        " PULSE     {}  {} CPU · {} units",
+        mark,
+        fmt_ms(p.cpu_ms_total),
+        p.units_compiled
+    ));
+    if p.expected_cpu_ms > 0 {
+        let delta = p.judged_cpu_ms as i64 - p.expected_cpu_ms as i64;
+        rows.push(format!(
+            "           vs typical {} ({:+}%) · cover {:.0}%",
+            fmt_signed_ms(delta),
+            pct(p.judged_cpu_ms, p.expected_cpu_ms),
+            p.coverage * 100.0
+        ));
+    }
+    rows.push(format!(
+        "           flux-cache {:.0}% ({} restored) · load {:.0}",
+        p.cache_rate * 100.0,
+        p.units_restored,
+        p.load1
+    ));
+    if p.compile_span_ms + p.before_ms + p.after_ms > 0 {
+        rows.push(format!(
+            " WALL      {} = {} wait · {} rustc · {} after",
+            fmt_ms(p.wall_ms),
+            fmt_ms(p.before_ms),
+            fmt_ms(p.compile_span_ms),
+            fmt_ms(p.after_ms)
+        ));
+    }
+    if !p.local_rebuilt.is_empty() {
+        let names: Vec<String> = p.local_rebuilt.iter().take(3).map(|c| short(&c.unit, 14)).collect();
+        rows.push(format!(
+            " BLAST     {} local crate(s): {}{}",
+            p.local_rebuilt.len(),
+            names.join(", "),
+            if p.local_rebuilt.len() > 3 { " …" } else { "" }
+        ));
+    }
+    for r in p.regressions.iter().take(2) {
+        rows.push(format!(
+            " ▲ SLOWER  {} {}→{}{}",
+            short(&r.unit, 18),
+            fmt_ms(r.typical_ms),
+            fmt_ms(r.cpu_ms),
+            if r.src_delta != 0 { format!(" src{}", fmt_bytes_signed(r.src_delta)) } else { String::new() }
+        ));
+    }
+    for r in p.improvements.iter().take(1) {
+        rows.push(format!(" ▼ FASTER  {} {}→{}", short(&r.unit, 18), fmt_ms(r.typical_ms), fmt_ms(r.cpu_ms)));
+    }
+    if !p.new_crates.is_empty() {
+        let cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
+        let names: Vec<String> = p.new_crates.iter().take(2).map(|c| short(&c.unit, 14)).collect();
+        rows.push(format!(" ✚ NEW DEP {} crate(s) +{}: {}", p.new_crates.len(), fmt_ms(cost), names.join(", ")));
+    }
+    if let Some(t) = p.top.first() {
+        rows.push(format!(" HEAVIEST  {} {}", short(&t.unit, 22), fmt_ms(t.cpu_ms)));
+    }
+    if p.peak_rss_kb > 0 {
+        rows.push(format!(
+            " PEAK RSS  {:.1} GB  {}",
+            p.peak_rss_kb as f64 / 1048576.0,
+            short(&p.peak_rss_unit, 22)
+        ));
+    }
+    rows
+}
+
+fn short(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{}…", t)
+    }
+}
+
+fn read_units(path: &Path) -> Vec<UnitSample> {
+    let Ok(txt) = std::fs::read_to_string(path) else { return Vec::new() };
+    txt.lines().filter_map(|l| serde_json::from_str::<UnitSample>(l).ok()).collect()
+}
+
+/// Inv files left by a parent that died before finishing (killed build):
+/// move them into the day log so their samples still count for drift.
+fn sweep_orphans(dir: &Path) {
+    let inv = dir.join("inv");
+    let Ok(rd) = std::fs::read_dir(&inv) else { return };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let p = e.path();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs() > 6 * 3600)
+            .unwrap_or(false);
+        if !old {
+            continue;
+        }
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if name.ends_with(".units.jsonl") {
+            let units = read_units(&p);
+            let mut by_day: BTreeMap<PathBuf, String> = BTreeMap::new();
+            for u in units {
+                if let Ok(l) = serde_json::to_string(&u) {
+                    by_day.entry(day_log_path(dir, u.ts)).or_default().push_str(&(l + "\n"));
+                }
+            }
+            for (path, lines) in by_day {
+                append_lines(&path, &lines);
+            }
+            let _ = std::fs::remove_file(&p);
+        } else if name.ends_with(".json") {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Parent side: judge this invocation, persist, fold into baselines.
+/// Returns None when nothing was recorded (pulse disabled, no rustc ran).
+pub fn finish_invocation(inv: &str, cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64) -> Option<Pulse> {
+    let start_ms = now_ms().saturating_sub(wall_ms);
+    finish_invocation_at(inv, cmd, package, release, green, wall_ms, start_ms)
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn finish_invocation_at(inv: &str, cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64, start_ms: u64) -> Option<Pulse> {
+    finish_invocation_full(inv, cmd, package, release, green, wall_ms, start_ms, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn finish_invocation_full(inv: &str, cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64, start_ms: u64, lock_busy: bool) -> Option<Pulse> {
+    if !enabled() || inv.is_empty() {
+        return None;
+    }
+    let dir = pulse_dir();
+    let inv_units = dir.join("inv").join(format!("{}.units.jsonl", inv));
+    let units = read_units(&inv_units);
+    let pulse = {
+        let _lock = DirLock::acquire(&dir);
+        let mut base = load_baselines(&dir);
+        let pulse = judge_full(&units, &base, (inv, cmd, package.unwrap_or("<workspace>"), release, green, wall_ms), start_ms, lock_busy);
+        for u in &units {
+            base.fold(u);
+        }
+        if !units.is_empty() {
+            save_baselines(&dir, &base);
+        }
+        pulse
+    };
+    // Move the unit lines into the day log (drift history), then drop the inv file.
+    if !units.is_empty() {
+        let mut lines = String::new();
+        for u in &units {
+            if let Ok(l) = serde_json::to_string(u) {
+                lines.push_str(&l);
+                lines.push('\n');
+            }
+        }
+        append_lines(&day_log_path(&dir, now_unix()), &lines);
+    }
+    let _ = std::fs::remove_file(&inv_units);
+    if let Ok(j) = serde_json::to_string_pretty(&pulse) {
+        let _ = std::fs::write(dir.join("inv").join(format!("{}.json", inv)), &j);
+        if pulse.units_compiled + pulse.units_failed > 0 {
+            let _ = std::fs::write(dir.join("last.json"), &j);
+        }
+    }
+    sweep_orphans(&dir);
+    Some(pulse)
+}
+
+/// The pulse a specific invocation produced (written by `finish_invocation`).
+pub fn read_invocation(inv: &str) -> Option<Pulse> {
+    let p = pulse_dir().join("inv").join(format!("{}.json", inv));
+    let txt = std::fs::read_to_string(&p).ok()?;
+    let _ = std::fs::remove_file(&p); // consumed: one reader per invocation
+    serde_json::from_str(&txt).ok()
+}
+
+pub fn read_last() -> Option<Pulse> {
+    let txt = std::fs::read_to_string(pulse_dir().join("last.json")).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+// ── webhook ─────────────────────────────────────────────────────────────────
+
+/// Fire `compile_pulse`. A CLI build exits the moment cargo is done, which
+/// would kill the fire-and-forget sink's threads before curl even starts, so
+/// prefer the blocking sink — bounded to 3 s so a dead endpoint can never
+/// hold a build hostage. The MCP server (long-lived) is fine either way.
+pub fn dispatch(p: &Pulse) {
+    let Ok(v) = serde_json::to_value(p) else { return };
+    if fluxc_util::hooks::has_blocking_webhook_sink() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            fluxc_util::hooks::dispatch_webhook_blocking("compile_pulse", v);
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
+    } else {
+        fluxc_util::hooks::dispatch_webhook("compile_pulse", v);
+    }
+}
+
+// ── drift: the slow creep across days ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Drift {
+    pub unit: String,
+    pub key: String,
+    pub local: bool,
+    pub prior_ms: u64,
+    pub recent_ms: u64,
+    pub prior_n: usize,
+    pub recent_n: usize,
+    pub prior_src: u64,
+    pub recent_src: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DriftReport {
+    pub days: u64,
+    pub recent_days: u64,
+    pub samples: usize,
+    pub keys: usize,
+    /// Σ median CPU over units seen in BOTH windows — the same work, then vs now.
+    pub prior_total_ms: u64,
+    pub recent_total_ms: u64,
+    pub growing: Vec<Drift>,
+    pub shrinking: Vec<Drift>,
+}
+
+fn median(v: &mut [u64]) -> u64 {
+    if v.is_empty() {
+        return 0;
+    }
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
+pub fn drift(days: u64, recent_days: u64, top: usize) -> DriftReport {
+    let dir = pulse_dir();
+    let now = now_unix();
+    let cutoff_recent = now.saturating_sub(recent_days * 86_400);
+    let mut rep = DriftReport { days, recent_days, ..Default::default() };
+    // key → (label, local, prior cpu, recent cpu, prior src, recent src)
+    struct Acc {
+        label: String,
+        local: bool,
+        prior: Vec<u64>,
+        recent: Vec<u64>,
+        prior_src: Vec<u64>,
+        recent_src: Vec<u64>,
+    }
+    let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
+    for d in 0..=days {
+        let path = day_log_path(&dir, now.saturating_sub(d * 86_400));
+        for u in read_units(&path) {
+            if u.outcome != "compiled" || u.cpu_ms == 0 {
+                continue;
+            }
+            rep.samples += 1;
+            let a = acc.entry(u.key()).or_insert_with(|| Acc {
+                label: u.label(),
+                local: u.local,
+                prior: vec![],
+                recent: vec![],
+                prior_src: vec![],
+                recent_src: vec![],
+            });
+            if u.ts >= cutoff_recent {
+                a.recent.push(u.cpu_ms);
+                if u.src_bytes > 0 {
+                    a.recent_src.push(u.src_bytes);
+                }
+            } else {
+                a.prior.push(u.cpu_ms);
+                if u.src_bytes > 0 {
+                    a.prior_src.push(u.src_bytes);
+                }
+            }
+        }
+    }
+    rep.keys = acc.len();
+    let mut all: Vec<Drift> = Vec::new();
+    for (k, mut a) in acc {
+        if a.prior.len() < 2 || a.recent.len() < 2 {
+            continue;
+        }
+        let d = Drift {
+            unit: a.label.clone(),
+            key: k,
+            local: a.local,
+            prior_ms: median(&mut a.prior),
+            recent_ms: median(&mut a.recent),
+            prior_n: a.prior.len(),
+            recent_n: a.recent.len(),
+            prior_src: median(&mut a.prior_src),
+            recent_src: median(&mut a.recent_src),
+        };
+        rep.prior_total_ms += d.prior_ms;
+        rep.recent_total_ms += d.recent_ms;
+        all.push(d);
+    }
+    let delta = |d: &Drift| d.recent_ms as i64 - d.prior_ms as i64;
+    let mut growing: Vec<Drift> = all.iter().filter(|d| delta(d) >= 200).cloned().collect();
+    growing.sort_by_key(|d| std::cmp::Reverse(delta(d)));
+    let mut shrinking: Vec<Drift> = all.iter().filter(|d| delta(d) <= -200).cloned().collect();
+    shrinking.sort_by_key(|d| delta(d));
+    rep.growing = growing.into_iter().take(top).collect();
+    rep.shrinking = shrinking.into_iter().take(top).collect();
+    rep
+}
+
+pub fn render_drift(r: &DriftReport) -> String {
+    let mut out = vec![format!(
+        "⏱ compile drift — last {} day(s) vs the {} before · {} samples · {} unit shapes",
+        r.recent_days,
+        r.days.saturating_sub(r.recent_days),
+        r.samples,
+        r.keys
+    )];
+    if r.prior_total_ms > 0 {
+        out.push(format!(
+            "  same work, then → now: {} → {} CPU ({:+}%)",
+            fmt_ms(r.prior_total_ms),
+            fmt_ms(r.recent_total_ms),
+            pct(r.recent_total_ms, r.prior_total_ms)
+        ));
+    } else {
+        out.push("  (not enough history in both windows yet — drift needs ≥2 samples per unit on each side)".into());
+    }
+    let row = |d: &Drift| {
+        let src = if d.prior_src > 0 && d.recent_src > 0 && d.recent_src != d.prior_src {
+            format!("  src {}", fmt_bytes_signed(d.recent_src as i64 - d.prior_src as i64))
+        } else {
+            String::new()
+        };
+        format!(
+            "    {}{:<34} {:>7} → {:>7} ({:+}%){}",
+            if d.local { "◆ " } else { "  " },
+            short(&d.unit, 34),
+            fmt_ms(d.prior_ms),
+            fmt_ms(d.recent_ms),
+            pct(d.recent_ms, d.prior_ms),
+            src
+        )
+    };
+    if !r.growing.is_empty() {
+        out.push("  ▲ growing (◆ = your code):".into());
+        out.extend(r.growing.iter().map(row));
+    }
+    if !r.shrinking.is_empty() {
+        out.push("  ▼ shrinking:".into());
+        out.extend(r.shrinking.iter().map(row));
+    }
+    out.join("\n")
+}
+
+// ── blast radius: what an edit WILL cost, before you make it ───────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Blast {
+    pub workspace: String,
+    pub target: String,
+    pub crates: Vec<(String, u64)>,
+    pub known: usize,
+    pub cpu_ms: u64,
+    pub critical_path_ms: u64,
+    pub critical_path: Vec<String>,
+    pub mode: String,
+}
+
+/// Typical CPU for rebuilding one package's units under `mode` ("build" or
+/// "check"): the lib/bin units (not tests), summed over their newest shape.
+fn package_cost(base: &Baselines, pkg: &str, mode: &str, opt: Option<&str>) -> Option<u64> {
+    let prefix = format!("{}|", pkg);
+    // crate_name|kind → (newest ts, median)
+    let mut best: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for (k, v) in base.units.range(prefix.clone()..) {
+        if !k.starts_with(&prefix) {
+            break;
+        }
+        let parts: Vec<&str> = k.split('|').collect();
+        if parts.len() < 7 || parts[3] != mode || parts[4] == "test" {
+            continue;
+        }
+        if let Some(o) = opt {
+            if parts[5] != format!("o{}", o) {
+                continue;
+            }
+        }
+        let newest = v.iter().map(|s| s.ts).max().unwrap_or(0);
+        let mut c: Vec<u64> = v.iter().map(|s| s.cpu_ms).collect();
+        let m = median(&mut c);
+        let slot = format!("{}|{}", parts[1], parts[2]);
+        let e = best.entry(slot).or_insert((0, 0));
+        if newest >= e.0 {
+            *e = (newest, m);
+        }
+    }
+    if best.is_empty() {
+        None
+    } else {
+        Some(best.values().map(|(_, m)| *m).sum())
+    }
+}
+
+pub fn blast_radius(workspace: &Path, target: &str, mode: &str, opt: Option<&str>) -> Result<Blast, String> {
+    let ws = flux_graph::resolve_workspace(&workspace.to_path_buf())?;
+    let Some(t_idx) = ws.crates.iter().position(|c| c.name == target) else {
+        return Err(format!("crate '{}' is not a member of {}", target, workspace.display()));
+    };
+    let dag = flux_graph::graph::build_dag(&ws.crates)?;
+    let mut affected: BTreeSet<usize> = flux_graph::agility::transitive_dependents(&ws, target).into_iter().collect();
+    affected.insert(t_idx);
+    let base = load_baselines(&pulse_dir());
+    let mut b = Blast {
+        workspace: workspace.display().to_string(),
+        target: target.into(),
+        mode: mode.into(),
+        ..Default::default()
+    };
+    let mut cost: BTreeMap<usize, u64> = BTreeMap::new();
+    for &i in &affected {
+        let name = &ws.crates[i].name;
+        let c = package_cost(&base, name, mode, opt);
+        if c.is_some() {
+            b.known += 1;
+        }
+        let c = c.unwrap_or(0);
+        cost.insert(i, c);
+        b.cpu_ms += c;
+        b.crates.push((name.clone(), c));
+    }
+    b.crates.sort_by(|a, b| b.1.cmp(&a.1));
+    // Critical path through the affected sub-DAG: the wall-clock floor even
+    // with infinite cores, since a crate can't start before its deps finish.
+    let order: Vec<usize> = ws.batches.iter().flatten().copied().filter(|i| affected.contains(i)).collect();
+    let mut finish: BTreeMap<usize, (u64, Option<usize>)> = BTreeMap::new();
+    for &i in &order {
+        let (start, via) = dag.depends_on[i]
+            .iter()
+            .filter_map(|d| finish.get(d).map(|(f, _)| (*f, *d)))
+            .max_by_key(|(f, _)| *f)
+            .map(|(f, d)| (f, Some(d)))
+            .unwrap_or((0, None));
+        finish.insert(i, (start + cost.get(&i).copied().unwrap_or(0), via));
+    }
+    if let Some((&end, &(ms, _))) = finish.iter().max_by_key(|(_, (f, _))| *f) {
+        b.critical_path_ms = ms;
+        let mut cur = Some(end);
+        while let Some(c) = cur {
+            b.critical_path.push(ws.crates[c].name.clone());
+            cur = finish.get(&c).and_then(|(_, v)| *v);
+        }
+        b.critical_path.reverse();
+    }
+    Ok(b)
+}
+
+pub fn render_blast(b: &Blast) -> String {
+    let mut out = vec![format!(
+        "💥 blast radius — editing `{}` rebuilds {} crate(s) [{} mode] in {}",
+        b.target,
+        b.crates.len(),
+        b.mode,
+        b.workspace
+    )];
+    out.push(format!(
+        "  ≈ {} CPU total · critical path ≈ {} wall (infinite cores) · {}/{} crates have a baseline",
+        fmt_ms(b.cpu_ms),
+        fmt_ms(b.critical_path_ms),
+        b.known,
+        b.crates.len()
+    ));
+    if !b.critical_path.is_empty() {
+        out.push(format!("  critical path: {}", b.critical_path.join(" → ")));
+    }
+    out.push("  heaviest rebuilds:".into());
+    for (n, c) in b.crates.iter().take(8) {
+        out.push(format!("    {:<32} {}", n, if *c > 0 { fmt_ms(*c) } else { "?".into() }));
+    }
+    if b.known < b.crates.len() {
+        out.push("  (? = never built through fluxc since pulse began — cost unknown, not zero)".into());
+    }
+    out.join("\n")
+}
+
+// ── dependency diff: what a Cargo.lock change brings in ────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepDiff {
+    pub added: Vec<(String, String, u64)>,
+    pub removed: Vec<(String, String)>,
+    pub known_cost_ms: u64,
+    pub unknown: usize,
+}
+
+fn lock_packages(txt: &str) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
+    let Ok(v) = txt.parse::<toml::Value>() else { return out };
+    if let Some(arr) = v.get("package").and_then(|p| p.as_array()) {
+        for p in arr {
+            let n = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let ver = p.get("version").and_then(|x| x.as_str()).unwrap_or("");
+            if !n.is_empty() {
+                out.insert((n.to_string(), ver.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Cargo.lock in the working tree vs `git show <rev>:Cargo.lock`.
+pub fn dep_diff(workspace: &Path, rev: &str) -> Result<DepDiff, String> {
+    let now = std::fs::read_to_string(workspace.join("Cargo.lock")).map_err(|e| format!("Cargo.lock: {}", e))?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["show", &format!("{}:Cargo.lock", rev)])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        return Err(format!("git show {}:Cargo.lock failed", rev));
+    }
+    let then = String::from_utf8_lossy(&out.stdout).to_string();
+    let (a, b) = (lock_packages(&then), lock_packages(&now));
+    let names_then: BTreeSet<&String> = a.iter().map(|(n, _)| n).collect();
+    let base = load_baselines(&pulse_dir());
+    let mut d = DepDiff::default();
+    for (n, v) in b.difference(&a) {
+        // a version bump of a known name is still a recompile, but it's not a NEW crate
+        let c = package_cost(&base, n, "build", None).or_else(|| package_cost(&base, n, "check", None)).unwrap_or(0);
+        if c > 0 {
+            d.known_cost_ms += c;
+        } else {
+            d.unknown += 1;
+        }
+        let tag = if names_then.contains(n) { format!("{} (bump)", v) } else { v.clone() };
+        d.added.push((n.clone(), tag, c));
+    }
+    for (n, v) in a.difference(&b) {
+        d.removed.push((n.clone(), v.clone()));
+    }
+    d.added.sort_by(|x, y| y.2.cmp(&x.2));
+    Ok(d)
+}
+
+pub fn render_dep_diff(d: &DepDiff, rev: &str) -> String {
+    if d.added.is_empty() && d.removed.is_empty() {
+        return format!("📦 Cargo.lock unchanged vs {} — no dependency consequences", rev);
+    }
+    let mut out = vec![format!(
+        "📦 dependency diff vs {} — +{} / -{} package versions · known extra CPU per cold build ≈ {}{}",
+        rev,
+        d.added.len(),
+        d.removed.len(),
+        fmt_ms(d.known_cost_ms),
+        if d.unknown > 0 { format!(" + {} never-built (unknown)", d.unknown) } else { String::new() }
+    )];
+    for (n, v, c) in d.added.iter().take(15) {
+        out.push(format!("    + {:<28} {:<16} {}", n, v, if *c > 0 { fmt_ms(*c) } else { "?".into() }));
+    }
+    for (n, v) in d.removed.iter().take(10) {
+        out.push(format!("    - {:<28} {}", n, v));
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(pkg: &str, cpu: u64, outcome: &str, local: bool) -> UnitSample {
+        UnitSample {
+            ts: now_unix(),
+            inv: "t".into(),
+            pkg: pkg.into(),
+            crate_name: pkg.replace('-', "_"),
+            kind: "lib".into(),
+            mode: "build".into(),
+            opt: "0".into(),
+            target: "host".into(),
+            local,
+            outcome: outcome.into(),
+            wall_ms: cpu,
+            cpu_ms: cpu,
+            src_bytes: 1000,
+            ..Default::default()
+        }
+    }
+
+    fn base_with(pkg: &str, cpus: &[u64]) -> Baselines {
+        let mut b = Baselines::default();
+        for &c in cpus {
+            b.fold(&s(pkg, c, "compiled", true));
+        }
+        b
+    }
+
+    #[test]
+    fn civil_date_matches_known_days() {
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(951_782_400), (2000, 2, 29)); // leap day
+        assert_eq!(civil_date(1_790_985_600), (2026, 10, 3));
+    }
+
+    #[test]
+    fn shape_reads_check_vs_build_opt_and_lto() {
+        let a: Vec<String> = ["--crate-name", "x", "--edition=2021", "src/lib.rs", "--crate-type", "lib",
+            "--emit=dep-info,metadata", "-C", "opt-level=3", "-C", "lto=thin"]
+            .iter().map(|s| s.to_string()).collect();
+        let sh = shape_from_args(&a);
+        assert_eq!((sh.kind.as_str(), sh.mode.as_str(), sh.opt.as_str(), sh.target.as_str()),
+            ("lib", "check", "3+lto", "host"));
+        let b: Vec<String> = ["src/main.rs", "--crate-type", "bin", "--emit=dep-info,link",
+            "-Copt-level=1", "--target", "x86_64-pc-windows-gnu"].iter().map(|s| s.to_string()).collect();
+        let sh = shape_from_args(&b);
+        assert_eq!((sh.kind.as_str(), sh.mode.as_str(), sh.opt.as_str(), sh.target.as_str()),
+            ("bin", "build", "1", "x86_64-pc-windows-gnu"));
+    }
+
+    #[test]
+    fn local_vs_registry_manifest() {
+        assert!(is_local_manifest("/home/storage/deepseek-codewhale/sigil/crates/sigil-node"));
+        assert!(!is_local_manifest("/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.200"));
+        assert!(!is_local_manifest("/root/.cargo/git/checkouts/foo-abc/123"));
+    }
+
+    #[test]
+    fn steady_build_is_steady() {
+        let base = base_with("sigil-node", &[30_000, 31_000, 29_500, 30_500]);
+        let p = judge(&[s("sigil-node", 30_800, "compiled", true)], &base, ("i", "build", "sigil-node", false, true, 31_000));
+        assert_eq!(p.verdict, "steady", "{}", p.headline);
+        assert!(p.regressions.is_empty());
+        assert_eq!(p.local_rebuilt.len(), 1);
+    }
+
+    #[test]
+    fn regression_is_named_with_its_size() {
+        let base = base_with("sigil-node", &[30_000, 31_000, 29_500, 30_500]);
+        let mut u = s("sigil-node", 42_000, "compiled", true);
+        u.src_bytes = 1000 + 6 * 1024;
+        let p = judge(&[u], &base, ("i", "build", "sigil-node", false, true, 42_000));
+        assert_eq!(p.verdict, "heavier", "{}", p.headline);
+        assert_eq!(p.regressions.len(), 1);
+        assert_eq!(p.regressions[0].src_delta, 6 * 1024);
+        assert!(p.headline.contains("sigil-node"), "{}", p.headline);
+        assert!(p.headline.contains("+6.0 KB"), "{}", p.headline);
+    }
+
+    #[test]
+    fn noise_below_absolute_floor_is_not_a_regression() {
+        // 2× slower but only +150 ms — not worth anyone's attention.
+        let base = base_with("tiny", &[150, 160, 140]);
+        let p = judge(&[s("tiny", 300, "compiled", false)], &base, ("i", "build", "tiny", false, true, 300));
+        assert!(p.regressions.is_empty());
+    }
+
+    #[test]
+    fn young_store_never_cries_new_dependency() {
+        let base = base_with("serde", &[4000, 4100, 3900]);
+        let p = judge(&[s("brand-new-dep", 6000, "compiled", false)], &base, ("i", "build", "x", true, true, 6000));
+        assert!(p.new_crates.is_empty(), "3-key store is too young to call anything a new dependency");
+        assert_eq!(p.new_shapes.len(), 1);
+        assert_eq!(p.verdict, "learning", "{}", p.headline);
+    }
+
+    #[test]
+    fn wall_split_names_lock_wait() {
+        let base = Baselines::default();
+        let start = 1_000_000u64;
+        let mut u = s("a", 2000, "compiled", true);
+        u.wall_ms = 2400;
+        u.end_ms = start + 38_000 + 2400; // first rustc began 38 s in
+        let p = judge_at(&[u], &base, ("i", "check", "a", false, true, 41_000), start);
+        assert_eq!((p.before_ms, p.compile_span_ms, p.after_ms), (38_000, 2400, 600));
+        assert!(p.headline.contains("before the first rustc"), "{}", p.headline);
+    }
+
+    #[test]
+    fn lock_probe_sees_a_held_cargo_lock() {
+        let dir = std::env::temp_dir().join(format!("flux-pulse-lock-{}", std::process::id()));
+        let prof = dir.join("debug");
+        std::fs::create_dir_all(&prof).unwrap();
+        let lock = prof.join(".cargo-lock");
+        std::fs::write(&lock, b"").unwrap();
+        assert!(!cargo_lock_busy(&dir));
+        let f = std::fs::File::open(&lock).unwrap();
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        // flock is per open-file-description: a probe through a NEW open conflicts
+        assert!(cargo_lock_busy(&dir));
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+        assert!(!cargo_lock_busy(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_dependency_vs_new_shape() {
+        let mut base = base_with("serde", &[4000, 4100, 3900]);
+        for i in 0..MATURE_KEYS {
+            base.fold(&s(&format!("filler-{}", i), 1000, "compiled", false));
+        }
+        let mut reshaped = s("serde", 9000, "compiled", false);
+        reshaped.opt = "3".into();
+        let fresh = s("brand-new-dep", 6000, "compiled", false);
+        let p = judge(&[reshaped, fresh], &base, ("i", "build", "x", true, true, 9000));
+        assert_eq!(p.new_shapes.len(), 1);
+        assert_eq!(p.new_crates.len(), 1);
+        assert_eq!(p.new_crates[0].unit, "brand-new-dep");
+        assert_eq!(p.verdict, "heavier", "a 6 s new dependency must register: {}", p.headline);
+    }
+
+    #[test]
+    fn restored_units_count_as_cache_not_cost() {
+        let base = base_with("a", &[1000, 1000, 1000]);
+        let p = judge(&[s("a", 0, "restored", true), s("b", 0, "restored", false)], &base, ("i", "build", "a", false, true, 50));
+        assert_eq!(p.verdict, "idle");
+        assert_eq!(p.units_restored, 2);
+        assert!((p.cache_rate - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_ring_is_capped_and_ignores_restores() {
+        let mut b = Baselines::default();
+        for i in 0..40 {
+            b.fold(&s("a", 1000 + i, "compiled", true));
+        }
+        b.fold(&s("a", 0, "restored", true));
+        let k = s("a", 0, "compiled", true).key();
+        assert_eq!(b.units[&k].len(), BASELINE_CAP);
+        assert_eq!(b.units[&k].last().unwrap().cpu_ms, 1039);
+    }
+
+    #[test]
+    fn finish_invocation_roundtrip_and_drift() {
+        let _g = crate::tdg::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("flux-pulse-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FLUX_PULSE_DIR", &dir);
+        let now = now_unix();
+        // three earlier invocations establish the baseline, two of them 10 days ago
+        for (i, (cpu, age)) in [(10_000u64, 10u64), (10_200, 10), (10_100, 10)].iter().enumerate() {
+            let inv = format!("old{}", i);
+            let mut u = s("sigil-node", *cpu, "compiled", true);
+            u.inv = inv.clone();
+            u.ts = now - age * 86_400;
+            record_unit(&u);
+            finish_invocation(&inv, "build", Some("sigil-node"), false, true, *cpu).unwrap();
+        }
+        // invocation under test: 50% slower
+        let mut u = s("sigil-node", 15_500, "compiled", true);
+        u.inv = "cur".into();
+        record_unit(&u);
+        let p = finish_invocation("cur", "build", Some("sigil-node"), false, true, 15_500).unwrap();
+        assert_eq!(p.verdict, "heavier", "{}", p.headline);
+        assert_eq!(read_invocation("cur").map(|x| x.verdict), Some("heavier".into()));
+        assert!(read_last().is_some());
+        assert!(!dir.join("inv").join("cur.units.jsonl").exists(), "inv file must be folded away");
+        // a second slow build today, so the recent window has 2 samples
+        let mut u = s("sigil-node", 15_000, "compiled", true);
+        u.inv = "cur2".into();
+        record_unit(&u);
+        finish_invocation("cur2", "build", Some("sigil-node"), false, true, 15_000).unwrap();
+        let d = drift(14, 7, 5);
+        assert_eq!(d.growing.len(), 1, "{}", render_drift(&d));
+        assert_eq!((d.growing[0].prior_ms, d.growing[0].recent_ms), (10_100, 15_500));
+        std::env::remove_var("FLUX_PULSE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

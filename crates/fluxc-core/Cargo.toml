@@ -29,6 +29,8 @@ flux-rev = { path = "../flux-rev" }
 # K-of-N sharded, mesh-distributable — reconciliation provenance, not raw rsync.
 flux-aether = { path = "../flux-aether" }
 rayon = "1"
+# compile pulse: getrusage(RUSAGE_CHILDREN) for rustc CPU/RSS + flock (already in the lock)
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -184,8 +184,11 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     cmd.env("RUSTC_WRAPPER", &flux_exe);
     cmd.env("FLUXC_WRAPPING", "1");
     cmd.env("REAL_RUSTC", &real_rustc);
+    let pi = crate::pulse_begin(&mut cmd);
     let out = cmd.output();
     let cmd_ms = cmd_start.elapsed().as_millis() as u64;
+    let _ = crate::pulse_end(&pi, if likely_red { "check" } else { "test" }, Some(&pkg), release,
+        out.as_ref().map(|o| o.status.success()).unwrap_or(false));
 
     let (compile_ok, passed, failed, suites, ferr) = match out {
         Ok(o) => {

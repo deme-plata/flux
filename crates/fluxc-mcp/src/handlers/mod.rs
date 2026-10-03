@@ -332,3 +332,4 @@ pub mod cortex;
 pub mod webcam;
 pub mod swarm_compile;
 pub mod supersonic;
+pub mod pulse;

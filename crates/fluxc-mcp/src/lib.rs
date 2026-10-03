@@ -23,6 +23,7 @@ fn build_registry() -> ToolRegistry {
     handlers::btc::register(&mut registry);
     handlers::test_combo::register(&mut registry);
     handlers::supersonic::register(&mut registry);
+    handlers::pulse::register(&mut registry);
     handlers::stats::register(&mut registry);
     handlers::predict::register(&mut registry);
     handlers::webhook::register(&mut registry);
@@ -164,10 +165,30 @@ fn handle_mcp_request(request: &Value, registry: &ToolRegistry) -> Value {
                 .unwrap_or(Value::Null);
 
             let start = std::time::Instant::now();
-            let result = registry
+            let start_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut result = registry
                 .execute(tool_name, &args)
                 .unwrap_or_else(|| format!("Tool not found: {}", tool_name));
             let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            // Compile pulse footer: any tool that triggered a fluxc build
+            // (cortex, refactor, iterate, dev, …) carries that build's cost
+            // verdict in its own response — the consequence arrives with the
+            // action. Labeled with cmd+package because last.json is box-wide:
+            // a concurrent agent's build can land here, and the label says so.
+            if !matches!(tool_name, "flux_combo" | "flux_compile_pulse") {
+                if let Some(p) = fluxc_core::pulse::read_last() {
+                    if p.ts >= start_unix && p.units_compiled + p.units_failed > 0 {
+                        result.push_str(&format!(
+                            "\n⏱ pulse ({} {}): {}",
+                            p.cmd, p.package, p.headline
+                        ));
+                    }
+                }
+            }
 
             // Push real-time AI feed event for dashboard SSE
             let agent = "DeepSeek";

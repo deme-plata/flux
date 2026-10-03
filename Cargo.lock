@@ -5253,6 +5253,7 @@ dependencies = [
  "hex",
  "hmac",
  "lazy_static",
+ "libc",
  "notify 7.0.0",
  "parking_lot 0.12.5",
  "rand 0.8.6",

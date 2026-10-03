@@ -23,6 +23,27 @@ pub fn dispatch_webhook(event: &str, data: serde_json::Value) {
     }
 }
 
+static BLOCKING_SINK: OnceLock<WebhookSink> = OnceLock::new();
+
+/// Wire a sink that returns only after delivery was attempted. Short-lived
+/// CLI processes need it: the regular sink fires on detached threads that die
+/// with the process (first caller wins; later calls no-op).
+pub fn set_blocking_webhook_sink(sink: WebhookSink) {
+    let _ = BLOCKING_SINK.set(sink);
+}
+
+pub fn has_blocking_webhook_sink() -> bool {
+    BLOCKING_SINK.get().is_some()
+}
+
+/// Fire through the blocking sink when wired, else the regular one.
+pub fn dispatch_webhook_blocking(event: &str, data: serde_json::Value) {
+    match BLOCKING_SINK.get() {
+        Some(sink) => sink(event, data),
+        None => dispatch_webhook(event, data),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

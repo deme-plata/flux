@@ -142,6 +142,13 @@ pub struct UnitSample {
     /// split its wall clock into before-first-rustc / compiling / after.
     #[serde(default)]
     pub end_ms: u64,
+    /// 12-hex digest of the unit's dependency CONTENT (the cache key's
+    /// substituted `--extern` hashes) and of its own source tree. Comparing
+    /// them with the previous build of the same unit says WHY it rebuilt.
+    #[serde(default)]
+    pub dep_digest: String,
+    #[serde(default)]
+    pub src_digest: String,
 }
 
 impl UnitSample {
@@ -357,11 +364,23 @@ pub struct LockWaits {
 /// and ends at the next line cargo prints. Output is unchanged for a reader;
 /// colour is preserved by forcing CARGO_TERM_COLOR when our stderr is a TTY.
 pub fn status_with_lock_watch(cmd: &mut std::process::Command) -> std::io::Result<(std::process::ExitStatus, LockWaits)> {
-    use std::io::{BufRead, BufReader};
+    use std::io::Read;
+    // On a terminal, keep what an interactive user sees: colour AND cargo's
+    // progress bar, which cargo only draws on a TTY — so tell it explicitly,
+    // with the real width. Relaying raw chunks (not lines) keeps the bar's
+    // carriage-return redraws flowing.
     #[cfg(unix)]
     {
-        if std::env::var_os("CARGO_TERM_COLOR").is_none() && unsafe { libc::isatty(2) } == 1 {
-            cmd.env("CARGO_TERM_COLOR", "always");
+        if unsafe { libc::isatty(2) } == 1 {
+            if std::env::var_os("CARGO_TERM_COLOR").is_none() {
+                cmd.env("CARGO_TERM_COLOR", "always");
+            }
+            if std::env::var_os("CARGO_TERM_PROGRESS_WHEN").is_none() {
+                let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+                let cols = if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 { ws.ws_col } else { 100 };
+                cmd.env("CARGO_TERM_PROGRESS_WHEN", "always");
+                cmd.env("CARGO_TERM_PROGRESS_WIDTH", cols.to_string());
+            }
         }
     }
     cmd.stderr(std::process::Stdio::piped());
@@ -369,26 +388,38 @@ pub fn status_with_lock_watch(cmd: &mut std::process::Command) -> std::io::Resul
     let err = child.stderr.take();
     let watcher = std::thread::spawn(move || {
         let mut w = LockWaits::default();
-        let Some(err) = err else { return w };
-        let mut rd = BufReader::new(err);
-        let mut buf = Vec::new();
-        let mut open: Option<(std::time::Instant, bool)> = None; // (since, is_pkg_cache)
+        let Some(mut err) = err else { return w };
         let mut out = std::io::stderr();
+        let mut buf = [0u8; 8192];
+        let mut tail = String::new(); // last partial line, so a notice split across reads still matches
+        let mut open: Option<(std::time::Instant, bool)> = None; // (since, is_pkg_cache)
         loop {
-            buf.clear();
-            match rd.read_until(b'\n', &mut buf) {
+            let n = match err.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let _ = out.write_all(&buf);
-                    if let Some((since, pkg)) = open.take() {
-                        let ms = since.elapsed().as_millis() as u64;
-                        if pkg { w.package_cache_ms += ms } else { w.build_dir_ms += ms }
-                    }
-                    let line = String::from_utf8_lossy(&buf);
-                    if line.contains("Blocking") && line.contains("waiting for file lock") {
-                        open = Some((std::time::Instant::now(), line.contains("package cache")));
-                    }
+                Ok(n) => n,
+            };
+            let _ = out.write_all(&buf[..n]);
+            // Any output after a Blocking notice means the wait is over.
+            if let Some((since, pkg)) = open.take() {
+                let ms = since.elapsed().as_millis() as u64;
+                if pkg { w.package_cache_ms += ms } else { w.build_dir_ms += ms }
+            }
+            tail.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if let Some(pos) = tail.rfind("waiting for file lock") {
+                let line_end = tail[pos..].find(['\n', '\r']).map(|k| pos + k);
+                let rest_after = line_end.map(|k| tail[k..].trim().is_empty()).unwrap_or(true);
+                if rest_after && tail[..pos].contains("Blocking") {
+                    let is_pkg = tail[pos..].contains("package cache");
+                    open = Some((std::time::Instant::now(), is_pkg));
                 }
+            }
+            if let Some(k) = tail.rfind(['\n', '\r']) {
+                tail.drain(..=k);
+            }
+            if tail.len() > 4096 {
+                let cut = tail.len() - 1024;
+                let cut = (cut..tail.len()).find(|&c| tail.is_char_boundary(c)).unwrap_or(tail.len());
+                tail.drain(..cut);
             }
         }
         if let Some((since, pkg)) = open {
@@ -427,6 +458,41 @@ pub struct Sample {
     /// SMT siblings are busy, so baselines remember how contended they were.
     #[serde(default)]
     pub load1: f64,
+    #[serde(default)]
+    pub dep_digest: String,
+    #[serde(default)]
+    pub src_digest: String,
+    /// Why this sample rebuilt vs the previous one of the same unit:
+    /// "dep" | "self" | "same" | "first" | "" (legacy, unknown).
+    #[serde(default)]
+    pub trigger: String,
+}
+
+/// Why a unit rebuilt, relative to its previous build. Incremental rustc
+/// makes these two different kinds of work: a dependency change can force a
+/// near-full recompile (measured: fluxc-mcp ~100 s), an own-source edit is
+/// often a few seconds (fluxc-mcp ~5 s). They must never share one median.
+pub fn trigger_of(prev: Option<&Sample>, dep_digest: &str, src_digest: &str) -> &'static str {
+    let Some(prev) = prev else { return "first" };
+    if dep_digest.is_empty() || prev.dep_digest.is_empty() {
+        return "";
+    }
+    if prev.dep_digest != dep_digest {
+        "dep"
+    } else if prev.src_digest != src_digest {
+        "self"
+    } else {
+        "same"
+    }
+}
+
+/// The comparison class a trigger belongs to.
+fn trigger_class(t: &str) -> &'static str {
+    match t {
+        "dep" => "dep",
+        "self" | "same" => "self",
+        _ => "",
+    }
 }
 
 /// Physical cores (unique core_id × package), cached. Falls back to half the
@@ -486,6 +552,18 @@ impl Baselines {
         c.sort_unstable();
         Some((c[c.len() / 2], c.len()))
     }
+    /// Median CPU over prior samples of the same trigger class ("dep"/"self").
+    /// Legacy samples (no digests) never count — mixing classes is the bug.
+    pub fn median_cpu_class(&self, key: &str, class: &str) -> Option<(u64, usize)> {
+        let v = self.units.get(key)?;
+        let mut c: Vec<u64> = v.iter().filter(|s| trigger_class(&s.trigger) == class && !class.is_empty()).map(|s| s.cpu_ms).collect();
+        if c.is_empty() {
+            return None;
+        }
+        c.sort_unstable();
+        Some((c[c.len() / 2], c.len()))
+    }
+
     /// Median load of the samples that recorded one (0 = none did).
     pub fn median_load(&self, key: &str) -> f64 {
         let Some(v) = self.units.get(key) else { return 0.0 };
@@ -504,7 +582,17 @@ impl Baselines {
             return;
         }
         let v = self.units.entry(s.key()).or_default();
-        v.push(Sample { ts: s.ts, cpu_ms: s.cpu_ms, wall_ms: s.wall_ms, src_bytes: s.src_bytes, load1: s.load1 });
+        let trigger = trigger_of(v.last(), &s.dep_digest, &s.src_digest).to_string();
+        v.push(Sample {
+            ts: s.ts,
+            cpu_ms: s.cpu_ms,
+            wall_ms: s.wall_ms,
+            src_bytes: s.src_bytes,
+            load1: s.load1,
+            dep_digest: s.dep_digest.clone(),
+            src_digest: s.src_digest.clone(),
+            trigger,
+        });
         if v.len() > BASELINE_CAP {
             let drop = v.len() - BASELINE_CAP;
             v.drain(..drop);
@@ -589,6 +677,14 @@ pub struct UnitCost {
     pub src_delta: i64,
     #[serde(default)]
     pub src_bytes: u64,
+    /// Why it rebuilt: "dep" (a dependency's content changed), "self" (own
+    /// source changed), "same" (neither — fingerprint churn), "first", "".
+    #[serde(default)]
+    pub cause: String,
+    /// Typical cost of the OTHER class, when known — e.g. what an own-source
+    /// edit costs for a unit that just rebuilt because a dependency changed.
+    #[serde(default)]
+    pub other_class_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -604,6 +700,18 @@ pub struct Pulse {
     pub units_compiled: usize,
     pub units_restored: usize,
     pub units_failed: usize,
+    /// rustc runs that failed inside a green build: build-script probes.
+    #[serde(default)]
+    pub probe_failures: usize,
+    /// Units recompiled with byte-identical dependencies AND source — cargo
+    /// thought them dirty for no content reason (env/wrapper/fingerprint churn).
+    #[serde(default)]
+    pub churn_units: usize,
+    #[serde(default)]
+    pub churn_cpu_ms: u64,
+    /// Local units rebuilt only because a dependency changed, and their cost.
+    #[serde(default)]
+    pub upstream_rebuilds: Vec<UnitCost>,
     pub cpu_ms_total: u64,
     pub cpu_ms_local: u64,
     /// CPU the judged (baselined) units USUALLY take, and what they took now.
@@ -775,6 +883,12 @@ pub fn judge_facts(
                 p.units_restored += 1;
                 continue;
             }
+            // In a GREEN build a failing rustc is a build script's feature probe
+            // (compiling a test program that is expected to fail) — not a failure.
+            "failed" if green => {
+                p.probe_failures += 1;
+                continue;
+            }
             "failed" => p.units_failed += 1,
             _ => p.units_compiled += 1,
         }
@@ -787,7 +901,24 @@ pub fn judge_facts(
             p.peak_rss_unit = u.label();
         }
         let key = u.key();
-        let (typical, n) = base.median_cpu(&key).unwrap_or((0, 0));
+        let cause = trigger_of(base.units.get(&key).and_then(|v| v.last()), &u.dep_digest, &u.src_digest);
+        let class = trigger_class(cause);
+        let (typical, n) = if class.is_empty() {
+            // no digests on one side (samples from an older wrapper): the old
+            // all-samples median is the only comparison available
+            base.median_cpu(&key).unwrap_or((0, 0))
+        } else {
+            base.median_cpu_class(&key, class).unwrap_or((0, 0))
+        };
+        let other_class_ms = match class {
+            "dep" => base.median_cpu_class(&key, "self").map(|x| x.0).unwrap_or(0),
+            "self" => base.median_cpu_class(&key, "dep").map(|x| x.0).unwrap_or(0),
+            _ => 0,
+        };
+        if cause == "same" && u.outcome == "compiled" {
+            p.churn_units += 1;
+            p.churn_cpu_ms += u.cpu_ms;
+        }
         let src_delta = match base.last_src(&key) {
             Some(prev) if u.src_bytes > 0 => u.src_bytes as i64 - prev as i64,
             _ => 0,
@@ -802,7 +933,12 @@ pub fn judge_facts(
             samples: n,
             src_delta,
             src_bytes: u.src_bytes,
+            cause: cause.to_string(),
+            other_class_ms,
         };
+        if cause == "dep" && u.local && u.outcome == "compiled" {
+            p.upstream_rebuilds.push(c.clone());
+        }
         if u.outcome == "compiled" {
             if n == 0 {
                 // A never-seen EXTERNAL crate in a mature store = a new dependency.
@@ -863,6 +999,7 @@ pub fn judge_facts(
     by_cost(&mut p.new_crates);
     by_cost(&mut p.new_shapes);
     by_cost(&mut p.local_rebuilt);
+    by_cost(&mut p.upstream_rebuilds);
 
     if p.load_allowance < 1.0 {
         p.load_allowance = 1.0;
@@ -904,7 +1041,7 @@ pub fn levers(p: &Pulse) -> Vec<String> {
         v.push("another build owns this target dir — give this lane its own CARGO_TARGET_DIR under /home/storage (cold once, then warm, never queued)".into());
     }
     if share(p.lock_wait_pkg_cache_ms) >= 0.2 {
-        v.push("~/.cargo package-cache lock was held by another cargo — stagger lane starts, or pre-fetch once (`cargo fetch`) so resolution doesn't download under the lock".into());
+        v.push("~/.cargo package-cache lock: cargo resolves the whole graph under ONE box-wide exclusive lock on every invocation (measured 5–25 s each at load 40–80, offline too) — batch crates into one call (`-p a -p b`) instead of many short ones; resolution is paid per invocation, not per crate".into());
     }
     if !p.new_crates.is_empty() {
         let cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
@@ -923,13 +1060,37 @@ pub fn levers(p: &Pulse) -> Vec<String> {
                 fmt_bytes_signed(r.src_delta),
                 pct(r.cpu_ms, r.typical_ms)
             ));
-        } else if r.local {
+        } else if r.local && (r.cause == "self" || r.cause.is_empty()) {
             v.push(format!(
-                "{} {:+}% slower with ~no source growth — likely a new generic instantiation or proc-macro expansion; `cargo +nightly rustc -- -Zself-profile` on it to see which",
+                "{} {:+}% slower after an edit to its own code with ~no source growth — likely a new generic instantiation or proc-macro expansion; `cargo +nightly rustc -- -Zself-profile` on it to see which",
+                r.unit,
+                pct(r.cpu_ms, r.typical_ms)
+            ));
+        } else if r.local && r.cause == "dep" {
+            v.push(format!(
+                "{} {:+}% slower than its usual dependency-triggered rebuild — an upstream crate's interface grew (more generics/inline items crossing the crate boundary)",
                 r.unit,
                 pct(r.cpu_ms, r.typical_ms)
             ));
         }
+    }
+    if let Some(u) = p.upstream_rebuilds.first() {
+        if u.cpu_ms >= 30_000 {
+            let own = if u.other_class_ms > 0 { format!(" (an edit inside it costs ~{})", fmt_ms(u.other_class_ms)) } else { String::new() };
+            v.push(format!(
+                "{} spent {} rebuilding only because a dependency changed{} — edits to the crates it depends on are the expensive kind; `fluxc pulse blast <dep>` shows which",
+                u.unit,
+                fmt_ms(u.cpu_ms),
+                own
+            ));
+        }
+    }
+    if p.churn_units >= 3 {
+        v.push(format!(
+            "{} unit(s) ({} CPU) recompiled with byte-identical dependencies and source — cargo fingerprint churn: raw cargo, a different RUSTC_WRAPPER/env, or features flipping in this target dir",
+            p.churn_units,
+            fmt_ms(p.churn_cpu_ms)
+        ));
     }
     if p.verdict == "idle" && p.wall_ms >= 5000 && !p.lock_busy_at_start && p.lock_wait_build_dir_ms + p.lock_wait_pkg_cache_ms == 0 {
         v.push("a no-op build should take ~1 s — slow no-ops mean fingerprint churn (env/wrapper/features flipping between invocations) or a huge target dir; compare `fluxc pulse` across two identical runs".into());
@@ -1131,6 +1292,17 @@ pub fn render_rows(p: &Pulse) -> Vec<String> {
             if p.local_rebuilt.len() > 3 { " …" } else { "" }
         ));
     }
+    if let Some(u) = p.upstream_rebuilds.first() {
+        rows.push(format!(
+            " UPSTREAM  {} {} (dep changed{})",
+            short(&u.unit, 16),
+            fmt_ms(u.cpu_ms),
+            if u.other_class_ms > 0 { format!("; own edit ~{}", fmt_ms(u.other_class_ms)) } else { String::new() }
+        ));
+    }
+    if p.churn_units > 0 {
+        rows.push(format!(" CHURN     {} unit(s) {} recompiled w/ identical inputs", p.churn_units, fmt_ms(p.churn_cpu_ms)));
+    }
     for r in p.regressions.iter().take(2) {
         rows.push(format!(
             " ▲ SLOWER  {} {}→{}{}",
@@ -1247,8 +1419,10 @@ pub fn finish_invocation_facts(inv: &str, cmd: &str, package: Option<&str>, rele
     let inv_units = dir.join("inv").join(format!("{}.units.jsonl", inv));
     let units = read_units(&inv_units);
     let pulse = {
-        let _lock = DirLock::acquire(&dir);
-        let mut base = load_baselines(&dir);
+        // A no-op build has nothing to judge or fold: skip the lock and the
+        // baselines read entirely (keeps the no-op overhead near zero).
+        let _lock = if units.is_empty() { DirLock(None) } else { DirLock::acquire(&dir) };
+        let mut base = if units.is_empty() { Baselines::default() } else { load_baselines(&dir) };
         // Only pay for a lockfile diff when an unknown external crate showed up.
         let mut facts = facts.clone();
         if facts.lock_added.is_none()
@@ -1261,6 +1435,10 @@ pub fn finish_invocation_facts(inv: &str, cmd: &str, package: Option<&str>, rele
             base.fold(u);
         }
         if !units.is_empty() {
+            // Shapes nobody has built for 45 days (removed crates, old opt-levels)
+            // only slow every build's read-modify-write of this file.
+            let cutoff = now_unix().saturating_sub(45 * 86_400);
+            base.units.retain(|_, v| v.iter().any(|s| s.ts >= cutoff));
             save_baselines(&dir, &base);
         }
         pulse
@@ -1597,7 +1775,7 @@ pub fn status_line() -> String {
 /// creeping, so planning begins from cost, not from a guess.
 pub fn weather() -> String {
     let tax = rebuild_tax(1, 3, true);
-    let dr = drift(28, 7, 3);
+    let dr = drift(10, 3, 3); // bounded: quickstart must stay fast even after a heavy month
     let mut out = vec!["## Compile weather (fluxc pulse — measured)".to_string()];
     out.push(format!(
         "  last 24h: {} units compiled, {} CPU ({} your code)",
@@ -1839,6 +2017,129 @@ pub fn dep_diff(workspace: &Path, rev: &str) -> Result<DepDiff, String> {
     }
     d.added.sort_by(|x, y| y.2.cmp(&x.2));
     Ok(d)
+}
+
+/// What adding one dependency would bring into a workspace — BEFORE adding it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepCost {
+    pub spec: String,
+    pub workspace: String,
+    /// Packages the candidate pulls in that the workspace does not have yet.
+    pub new_packages: Vec<(String, u64, u64)>, // (name, check_ms, build_ms) — 0 = never measured
+    pub already_present: usize,
+    pub check_ms: u64,
+    pub build_ms: u64,
+    pub unknown: usize,
+}
+
+/// Resolve `spec` ("name" or "name@ver") in a scratch manifest (host platform
+/// only), subtract the workspace's Cargo.lock, price the rest from baselines.
+pub fn dep_cost(workspace: &Path, spec: &str, features: &[String]) -> Result<DepCost, String> {
+    let (name, ver) = match spec.split_once('@') {
+        Some((n, v)) => (n.trim().to_string(), v.trim().to_string()),
+        None => (spec.trim().to_string(), "*".to_string()),
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("bad crate name '{}'", name));
+    }
+    let probe = pulse_dir().join("probe").join(blake3::hash(format!("{}|{}|{:?}", name, ver, features).as_bytes()).to_hex()[..12].to_string());
+    std::fs::create_dir_all(probe.join("src")).map_err(|e| format!("probe dir: {}", e))?;
+    let feats = if features.is_empty() {
+        String::new()
+    } else {
+        format!(", features = [{}]", features.iter().map(|f| format!("{:?}", f)).collect::<Vec<_>>().join(", "))
+    };
+    let manifest = format!(
+        "[package]\nname = \"flux-pulse-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\n{} = {{ version = {:?}{} }}\n",
+        name, ver, feats
+    );
+    std::fs::write(probe.join("Cargo.toml"), manifest).map_err(|e| format!("probe manifest: {}", e))?;
+    let _ = std::fs::write(probe.join("src/lib.rs"), "");
+    let host = std::process::Command::new("rustc").arg("-vV").output().ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("host: ").map(String::from)))
+        .unwrap_or_else(|| "x86_64-unknown-linux-gnu".into());
+    let run = |offline: bool| {
+        let mut c = std::process::Command::new("cargo");
+        c.args(["metadata", "--format-version", "1", "--filter-platform", &host, "--manifest-path"])
+            .arg(probe.join("Cargo.toml"));
+        if offline {
+            c.arg("--offline");
+        }
+        c.stderr(std::process::Stdio::null()).output()
+    };
+    let out = match run(true) {
+        Ok(o) if o.status.success() => o,
+        _ => run(false).map_err(|e| format!("cargo metadata: {}", e))?,
+    };
+    if !out.status.success() {
+        return Err(format!("could not resolve '{}' (does that crate/version exist?)", spec));
+    }
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("metadata json: {}", e))?;
+    // Resolved (platform-filtered) node ids → package names.
+    let mut id_to_name: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(pk) = j["packages"].as_array() {
+        for p in pk {
+            if let (Some(id), Some(n)) = (p["id"].as_str(), p["name"].as_str()) {
+                id_to_name.insert(id.to_string(), n.to_string());
+            }
+        }
+    }
+    let mut pulled: BTreeSet<String> = BTreeSet::new();
+    if let Some(nodes) = j["resolve"]["nodes"].as_array() {
+        for nd in nodes {
+            if let Some(n) = nd["id"].as_str().and_then(|id| id_to_name.get(id)) {
+                if n != "flux-pulse-probe" {
+                    pulled.insert(n.clone());
+                }
+            }
+        }
+    }
+    let have: BTreeSet<String> = std::fs::read_to_string(workspace.join("Cargo.lock"))
+        .map(|t| lock_packages(&t).into_iter().map(|(n, _)| n).collect())
+        .unwrap_or_default();
+    let base = load_baselines(&pulse_dir());
+    let mut c = DepCost { spec: spec.into(), workspace: workspace.display().to_string(), ..Default::default() };
+    for n in &pulled {
+        if have.contains(n) {
+            c.already_present += 1;
+            continue;
+        }
+        let ck = package_cost(&base, n, "check", None).unwrap_or(0);
+        let bd = package_cost(&base, n, "build", None).unwrap_or(0);
+        if ck == 0 && bd == 0 {
+            c.unknown += 1;
+        }
+        c.check_ms += ck;
+        c.build_ms += bd;
+        c.new_packages.push((n.clone(), ck, bd));
+    }
+    c.new_packages.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+    Ok(c)
+}
+
+pub fn render_dep_cost(c: &DepCost) -> String {
+    let mut out = vec![format!(
+        "🧾 adding `{}` to {} → {} new package(s) ({} already there)",
+        c.spec,
+        c.workspace,
+        c.new_packages.len(),
+        c.already_present
+    )];
+    out.push(format!(
+        "  measured cost per cold build: check ≈ {} · build ≈ {}{}",
+        fmt_ms(c.check_ms),
+        fmt_ms(c.build_ms),
+        if c.unknown > 0 { format!("  (+{} never measured here — cost unknown, not zero)", c.unknown) } else { String::new() }
+    ));
+    for (n, ck, bd) in c.new_packages.iter().take(12) {
+        let f = |x: &u64| if *x > 0 { fmt_ms(*x) } else { "?".into() };
+        out.push(format!("    + {:<28} check {:>7}  build {:>7}", n, f(ck), f(bd)));
+    }
+    if c.new_packages.len() > 12 {
+        out.push(format!("    … {} more", c.new_packages.len() - 12));
+    }
+    out.join("\n")
 }
 
 pub fn render_dep_diff(d: &DepDiff, rev: &str) -> String {
@@ -2089,6 +2390,49 @@ mod tests {
         assert_eq!(p.new_crates.len(), 1);
         assert_eq!(p.new_crates[0].unit, "brand-new-dep");
         assert_eq!(p.verdict, "heavier", "a 6 s new dependency must register: {}", p.headline);
+    }
+
+    fn sd(pkg: &str, cpu: u64, dep: &str, src: &str) -> UnitSample {
+        let mut u = s(pkg, cpu, "compiled", true);
+        u.dep_digest = dep.into();
+        u.src_digest = src.into();
+        u
+    }
+
+    #[test]
+    fn dependency_triggered_rebuild_is_judged_against_its_own_kind() {
+        // fluxc-mcp: own edits ~5 s, dependency-triggered ~100 s (measured 10-03)
+        let mut b = Baselines::default();
+        let seq = [(5_000, "d1", "s1"), (100_000, "d2", "s1"), (4_800, "d2", "s2"), (98_000, "d3", "s2"),
+                   (5_200, "d3", "s3"), (102_000, "d4", "s3"), (5_100, "d4", "s4")];
+        for (c, d, sr) in seq { b.fold(&sd("fluxc-mcp", c, d, sr)); }
+        // a new dependency change: 121 s is +21% vs the dep median (100 s) — NOT +2374% vs 4.9 s
+        let p = judge(&[sd("fluxc-mcp", 121_000, "d5", "s4")], &b, ("i", "build", "fluxc", false, true, 121_000));
+        assert!(p.regressions.is_empty(), "{}", p.headline);
+        assert_eq!(p.upstream_rebuilds.len(), 1);
+        assert_eq!(p.upstream_rebuilds[0].other_class_ms, 5_100);
+        assert!(p.levers.iter().any(|l| l.contains("only because a dependency changed")), "{:?}", p.levers);
+        // an own-source edit costing 20 s IS a regression vs ~5 s
+        let p = judge(&[sd("fluxc-mcp", 20_000, "d4", "s5")], &b, ("i", "build", "fluxc", false, true, 20_000));
+        assert_eq!(p.regressions.len(), 1, "{}", p.headline);
+    }
+
+    #[test]
+    fn identical_inputs_recompiled_is_churn() {
+        let mut b = Baselines::default();
+        for name in ["a", "b", "c"] { b.fold(&sd(name, 1000, "dX", "sX")); }
+        let units: Vec<UnitSample> = ["a", "b", "c"].iter().map(|n| sd(n, 1000, "dX", "sX")).collect();
+        let p = judge(&units, &b, ("i", "build", "x", false, true, 3000));
+        assert_eq!(p.churn_units, 3);
+        assert!(p.levers.iter().any(|l| l.contains("fingerprint churn")), "{:?}", p.levers);
+    }
+
+    #[test]
+    fn probe_failures_in_a_green_build_are_not_failures() {
+        let p = judge(&[s("a", 2000, "compiled", true), s("probe", 50, "failed", false)],
+            &Baselines::default(), ("i", "build", "a", false, true, 3000));
+        assert_ne!(p.verdict, "failed", "{}", p.headline);
+        assert_eq!((p.units_failed, p.probe_failures), (0, 1));
     }
 
     #[test]

@@ -16,11 +16,11 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_compile_pulse",
-            description: "Compile-cost consequences, measured on every fluxc build. view=last (default): the newest build's verdict — steady/heavier/lighter, CPU vs that work's rolling baseline, regressions with source growth, NEW crates (= new dependencies), blast (local crates rebuilt), peak rustc RSS. view=drift: units getting slower over days (the creep). view=tax: where development compile CPU actually went over N days (rebuild count × cost — finds the cheap-but-hot crate). view=blast crate=X: what editing X rebuilds + CPU + critical-path wall floor, BEFORE you edit. view=deps: Cargo.lock vs git rev — added packages and their known compile cost. Works for any workspace built through fluxc (flux, sigil, quillon).",
+            description: "Compile-cost consequences, measured on every fluxc build. view=last (default): the newest build's verdict — steady/heavier/lighter, CPU vs that work's rolling baseline, regressions with source growth, NEW crates (= new dependencies), blast (local crates rebuilt), peak rustc RSS. view=drift: units getting slower over days (the creep). view=tax: where development compile CPU actually went over N days (rebuild count × cost — finds the cheap-but-hot crate). view=blast crate=X: what editing X rebuilds + CPU + critical-path wall floor, BEFORE you edit. view=deps: Cargo.lock vs git rev — added packages and their known compile cost. view=cost dep=<crate>[@ver]: what ADDING a dependency would bring in and cost, before you add it. Works for any workspace built through fluxc (flux, sigil, quillon).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "view": {"type": "string", "enum": ["last", "drift", "tax", "blast", "deps"], "description": "Which question (default last). tax = where development CPU went (builds × cost per unit)"},
+                    "view": {"type": "string", "enum": ["last", "drift", "tax", "blast", "deps", "cost"], "description": "Which question (default last). tax = where development CPU went (builds × cost per unit)"},
                     "crate": {"type": "string", "description": "view=blast: the crate you are about to edit"},
                     "workspace": {"type": "string", "description": "view=blast|deps: workspace root (default: the flux workspace)"},
                     "mode": {"type": "string", "enum": ["build", "check"], "description": "view=blast: cost of codegen builds (default) or cargo check"},
@@ -30,6 +30,8 @@ pub fn register(registry: &mut ToolRegistry) {
                     "top": {"type": "integer", "description": "view=drift: rows per direction (default 12)"},
                     "rev": {"type": "string", "description": "view=deps: git rev to diff Cargo.lock against (default HEAD)"},
                     "all": {"type": "boolean", "description": "view=tax: include registry dependencies, not just your crates"},
+                    "dep": {"type": "string", "description": "view=cost: crate to price, e.g. \"reqwest\" or \"wgpu@0.17\""},
+                    "features": {"type": "array", "items": {"type": "string"}, "description": "view=cost: features to enable on the candidate"},
                     "json": {"type": "boolean", "description": "Raw JSON instead of the rendered report"}
                 }
             }),
@@ -72,6 +74,18 @@ fn flux_compile_pulse(args: &Value) -> String {
             match pulse::blast_radius(&ws, c, mode, opt) {
                 Ok(b) if as_json => serde_json::to_string_pretty(&b).unwrap_or_default(),
                 Ok(b) => pulse::render_blast(&b),
+                Err(e) => format!("✗ {}", e),
+            }
+        }
+        "cost" => {
+            let Some(dep) = args.get("dep").and_then(|v| v.as_str()) else {
+                return "✗ view=cost needs dep=<crate>[@version]".into();
+            };
+            let feats: Vec<String> = args.get("features").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            match pulse::dep_cost(&ws, dep, &feats) {
+                Ok(c) if as_json => serde_json::to_string_pretty(&c).unwrap_or_default(),
+                Ok(c) => pulse::render_dep_cost(&c),
                 Err(e) => format!("✗ {}", e),
             }
         }

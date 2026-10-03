@@ -63,12 +63,16 @@ fn flux_cortex_loop(args: &Value) -> String {
 /// estimated × accuracy ± noise") — its "actual" gains are not measurements.
 /// Say so in-band, and put the one thing that IS measured next to it.
 fn honest_envelope(result: Value) -> String {
-    serde_json::to_string_pretty(&json!({
+    // First line, outside the JSON: serde_json sorts keys, so an in-band
+    // warning would land at the bottom where nobody reads it.
+    let banner = "⚠ cortex VALIDATE is SIMULATED (actual = estimate × accuracy ± noise) — its gains are not measurements. Real compile cost: measured_compile_pressure below / flux_compile_pulse.";
+    let body = serde_json::to_string_pretty(&json!({
         "validation": "SIMULATED — actual_impact/actual_total_gain = estimate × accuracy ± noise (flux-cortex VALIDATE phase); not measured. Do not cite as a result.",
         "measured_compile_pressure": crate::handlers::pulse::measured_compile_pressure(),
         "cortex": result,
     }))
-    .unwrap_or_else(|e| format!("❌ {e}"))
+    .unwrap_or_else(|e| format!("❌ {e}"));
+    format!("{}\n{}", banner, body)
 }
 
 fn flux_cortex_continuous(args: &Value) -> String {

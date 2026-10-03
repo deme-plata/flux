@@ -940,6 +940,7 @@ fn main() {
 ///   fluxc pulse tax [--days N] [--top N] [--all] [--json]   where dev CPU goes
 ///   fluxc pulse blast <crate> [--workspace DIR] [--check] [--opt N] [--json]
 ///   fluxc pulse deps [--workspace DIR] [--rev REV] [--json]
+///   fluxc pulse cost <crate>[@ver] [--features a,b] [--workspace DIR]   BEFORE adding a dep
 fn cmd_pulse(args: &[String]) {
     use fluxc_core::pulse;
     let json = args.iter().any(|a| a == "--json");
@@ -1002,6 +1003,18 @@ fn cmd_pulse(args: &[String]) {
                 Err(e) => { eprintln!("  ✗ {}", e); std::process::exit(1); }
             }
         }
+        Some("cost") => {
+            let Some(spec) = positional.get(1) else {
+                eprintln!("usage: fluxc pulse cost <crate>[@version] [--features a,b] [--workspace DIR]");
+                std::process::exit(2);
+            };
+            let feats: Vec<String> = flag("--features").map(|f| f.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+            match pulse::dep_cost(&workspace, spec, &feats) {
+                Ok(c) if json => println!("{}", serde_json::to_string_pretty(&c).unwrap_or_default()),
+                Ok(c) => println!("{}", pulse::render_dep_cost(&c)),
+                Err(e) => { eprintln!("  ✗ {}", e); std::process::exit(1); }
+            }
+        }
         Some("deps") => {
             let rev = flag("--rev").unwrap_or_else(|| "HEAD".into());
             match pulse::dep_diff(&workspace, &rev) {
@@ -1011,7 +1024,7 @@ fn cmd_pulse(args: &[String]) {
             }
         }
         Some(other) => {
-            eprintln!("unknown pulse view '{}' — use: last | line | weather | drift | tax | blast <crate> | deps", other);
+            eprintln!("unknown pulse view '{}' — use: last | line | weather | drift | tax | blast <crate> | deps | cost <crate>", other);
             std::process::exit(2);
         }
     }

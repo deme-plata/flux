@@ -889,6 +889,28 @@ pub fn wrapper_mode(args: &[String]) {
     // costs a rebuild, never correctness. ⚠ This changes every key: one cold
     // rebuild fleet-wide after deploying this binary.
     let (tree_digest, src_bytes) = module_tree_digest_bytes(src_file);
+    // Compile pulse: WHY did this unit rebuild? Dependency content (the
+    // substituted --extern hashes) vs its own source tree.
+    let pulse_dep_digest = {
+        let mut h = blake3::Hasher::new();
+        for w in normalized_args.windows(2) {
+            if w[0] == "--extern" {
+                h.update(w[1].as_bytes());
+                h.update(b"\0");
+            }
+        }
+        h.finalize().to_hex()[..12].to_string()
+    };
+    let pulse_src_digest = {
+        let mut h = blake3::Hasher::new();
+        if let Some(f) = src_file {
+            if let Ok(b) = std::fs::read(f) {
+                h.update(blake3::hash(&b).as_bytes());
+            }
+        }
+        h.update(tree_digest.as_bytes());
+        h.finalize().to_hex()[..12].to_string()
+    };
     let cache_key = if root_key.is_empty() {
         root_key
     } else {
@@ -921,6 +943,8 @@ pub fn wrapper_mode(args: &[String]) {
         src_bytes,
         load1: pulse::load1(),
         end_ms: pulse::now_ms(),
+        dep_digest: pulse_dep_digest.clone(),
+        src_digest: pulse_src_digest.clone(),
     };
 
     // Try a cache hit. apply_cached_outputs returns `true` only when every

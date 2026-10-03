@@ -16,11 +16,11 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_compile_pulse",
-            description: "Compile-cost consequences, measured on every fluxc build. view=last (default): the newest build's verdict — steady/heavier/lighter, CPU vs that work's rolling baseline, regressions with source growth, NEW crates (= new dependencies), blast (local crates rebuilt), peak rustc RSS. view=drift: units getting slower over days (the creep). view=blast crate=X: what editing X rebuilds + CPU + critical-path wall floor, BEFORE you edit. view=deps: Cargo.lock vs git rev — added packages and their known compile cost. Works for any workspace built through fluxc (flux, sigil, quillon).",
+            description: "Compile-cost consequences, measured on every fluxc build. view=last (default): the newest build's verdict — steady/heavier/lighter, CPU vs that work's rolling baseline, regressions with source growth, NEW crates (= new dependencies), blast (local crates rebuilt), peak rustc RSS. view=drift: units getting slower over days (the creep). view=tax: where development compile CPU actually went over N days (rebuild count × cost — finds the cheap-but-hot crate). view=blast crate=X: what editing X rebuilds + CPU + critical-path wall floor, BEFORE you edit. view=deps: Cargo.lock vs git rev — added packages and their known compile cost. Works for any workspace built through fluxc (flux, sigil, quillon).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "view": {"type": "string", "enum": ["last", "drift", "blast", "deps"], "description": "Which question (default last)"},
+                    "view": {"type": "string", "enum": ["last", "drift", "tax", "blast", "deps"], "description": "Which question (default last). tax = where development CPU went (builds × cost per unit)"},
                     "crate": {"type": "string", "description": "view=blast: the crate you are about to edit"},
                     "workspace": {"type": "string", "description": "view=blast|deps: workspace root (default: the flux workspace)"},
                     "mode": {"type": "string", "enum": ["build", "check"], "description": "view=blast: cost of codegen builds (default) or cargo check"},
@@ -29,6 +29,7 @@ pub fn register(registry: &mut ToolRegistry) {
                     "recent": {"type": "integer", "description": "view=drift: 'recent' window in days (default 7)"},
                     "top": {"type": "integer", "description": "view=drift: rows per direction (default 12)"},
                     "rev": {"type": "string", "description": "view=deps: git rev to diff Cargo.lock against (default HEAD)"},
+                    "all": {"type": "boolean", "description": "view=tax: include registry dependencies, not just your crates"},
                     "json": {"type": "boolean", "description": "Raw JSON instead of the rendered report"}
                 }
             }),
@@ -56,6 +57,11 @@ fn flux_compile_pulse(args: &Value) -> String {
         "drift" => {
             let r = pulse::drift(num("days", 28), num("recent", 7), num("top", 12) as usize);
             if as_json { serde_json::to_string_pretty(&r).unwrap_or_default() } else { pulse::render_drift(&r) }
+        }
+        "tax" => {
+            let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            let r = pulse::rebuild_tax(num("days", 7), num("top", 15) as usize, !all);
+            if as_json { serde_json::to_string_pretty(&r).unwrap_or_default() } else { pulse::render_tax(&r) }
         }
         "blast" => {
             let Some(c) = args.get("crate").and_then(|v| v.as_str()) else {
@@ -127,4 +133,66 @@ pub fn combo_rows(p: &pulse::Pulse) -> Vec<String> {
         });
     }
     rows
+}
+
+/// Workspaces the pre-edit blast footer knows how to resolve, tried in order.
+fn blast_workspaces() -> Vec<std::path::PathBuf> {
+    let mut v = vec![crate::handlers::ws()];
+    for extra in ["/home/storage/deepseek-codewhale/sigil"] {
+        let p = std::path::PathBuf::from(extra);
+        if p.join("Cargo.toml").exists() && !v.contains(&p) {
+            v.push(p);
+        }
+    }
+    v
+}
+
+/// One-line consequence for a planning/editing tool that names a crate:
+/// how much an edit to it rebuilds, judged from measured baselines.
+pub fn blast_footer(crate_name: &str) -> Option<String> {
+    for ws in blast_workspaces() {
+        if let Ok(b) = pulse::blast_radius(&ws, crate_name, "build", None) {
+            if b.known == 0 {
+                if let Ok(c) = pulse::blast_radius(&ws, crate_name, "check", None) {
+                    if c.known > 0 {
+                        return Some(footer_line(&c));
+                    }
+                }
+            }
+            return Some(footer_line(&b));
+        }
+    }
+    None
+}
+
+fn footer_line(b: &pulse::Blast) -> String {
+    format!(
+        "💥 consequence: editing {} rebuilds {} crate(s) ≈ {} CPU, critical path ≈ {} [{} mode, {}/{} measured] — flux_compile_pulse view=blast crate={}",
+        b.target,
+        b.crates.len(),
+        pulse::fmt_ms(b.cpu_ms),
+        pulse::fmt_ms(b.critical_path_ms),
+        b.mode,
+        b.known,
+        b.crates.len(),
+        b.target
+    )
+}
+
+/// Measured compile pressure for the cortex: the tax table + the newest
+/// verdict, so planning starts from what builds actually cost.
+pub fn measured_compile_pressure() -> serde_json::Value {
+    let tax = pulse::rebuild_tax(7, 8, true);
+    json!({
+        "source": "fluxc pulse — measured rustc CPU per unit (getrusage), not estimated",
+        "window_days": tax.days,
+        "units_compiled": tax.units_compiled,
+        "cpu_total_ms": tax.cpu_total_ms,
+        "cpu_local_ms": tax.cpu_local_ms,
+        "top_local_units": tax.rows.iter().map(|r| json!({
+            "unit": r.unit, "builds": r.builds, "median_ms": r.median_ms,
+            "total_ms": r.cpu_total_ms, "src_bytes": r.src_bytes
+        })).collect::<Vec<_>>(),
+        "last_verdict": pulse::read_last().map(|p| p.headline),
+    })
 }

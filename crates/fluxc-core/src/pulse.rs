@@ -118,6 +118,11 @@ pub struct UnitSample {
     pub opt: String,
     #[serde(default)]
     pub target: String,
+    /// Short hash of the enabled `--cfg feature=…` set ("" = none). The same
+    /// crate built twice in one graph (host vs target features) is two
+    /// different pieces of work and must not share a baseline.
+    #[serde(default)]
+    pub feat: String,
     /// Workspace/path crate (true) vs registry/git dependency (false).
     #[serde(default)]
     pub local: bool,
@@ -143,14 +148,15 @@ impl UnitSample {
     /// Stable identity of "the same work" across content changes.
     pub fn key(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}|o{}|{}",
+            "{}|{}|{}|{}|{}|o{}|{}|{}",
             self.pkg,
             self.crate_name,
             self.kind,
             self.mode,
             if self.is_test { "test" } else { "-" },
             self.opt,
-            self.target
+            self.target,
+            self.feat
         )
     }
     pub fn label(&self) -> String {
@@ -175,6 +181,7 @@ pub struct RustcShape {
     pub mode: String,
     pub opt: String,
     pub target: String,
+    pub feat: String,
 }
 
 pub fn shape_from_args(args: &[String]) -> RustcShape {
@@ -183,6 +190,7 @@ pub fn shape_from_args(args: &[String]) -> RustcShape {
     let mut opt = "0".to_string();
     let mut lto = false;
     let mut target = "host".to_string();
+    let mut features: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -201,6 +209,11 @@ pub fn shape_from_args(args: &[String]) -> RustcShape {
             i += 1;
         } else if let Some(v) = a.strip_prefix("--emit=") {
             emit = v.to_string();
+        } else if a == "--cfg" {
+            if let Some(f) = next.strip_prefix("feature=") {
+                features.push(f);
+            }
+            i += 1;
         } else if a == "--target" {
             target = next.to_string();
             i += 1;
@@ -232,7 +245,13 @@ pub fn shape_from_args(args: &[String]) -> RustcShape {
     if lto {
         opt.push_str("+lto");
     }
-    RustcShape { kind, mode: mode.into(), opt, target }
+    features.sort_unstable();
+    let feat = if features.is_empty() {
+        String::new()
+    } else {
+        blake3::hash(features.join(",").as_bytes()).to_hex()[..6].to_string()
+    };
+    RustcShape { kind, mode: mode.into(), opt, target, feat }
 }
 
 /// Registry and git dependencies live under CARGO_HOME; anything else is a
@@ -326,6 +345,63 @@ pub fn cargo_lock_busy(target_dir: &Path) -> bool {
     false
 }
 
+/// Seconds cargo spent saying "Blocking waiting for file lock on …".
+#[derive(Debug, Clone, Default)]
+pub struct LockWaits {
+    pub build_dir_ms: u64,
+    pub package_cache_ms: u64,
+}
+
+/// Run `cmd` with its stderr relayed line-by-line to ours, timing every
+/// stretch that begins with cargo's "Blocking waiting for file lock" notice
+/// and ends at the next line cargo prints. Output is unchanged for a reader;
+/// colour is preserved by forcing CARGO_TERM_COLOR when our stderr is a TTY.
+pub fn status_with_lock_watch(cmd: &mut std::process::Command) -> std::io::Result<(std::process::ExitStatus, LockWaits)> {
+    use std::io::{BufRead, BufReader};
+    #[cfg(unix)]
+    {
+        if std::env::var_os("CARGO_TERM_COLOR").is_none() && unsafe { libc::isatty(2) } == 1 {
+            cmd.env("CARGO_TERM_COLOR", "always");
+        }
+    }
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let err = child.stderr.take();
+    let watcher = std::thread::spawn(move || {
+        let mut w = LockWaits::default();
+        let Some(err) = err else { return w };
+        let mut rd = BufReader::new(err);
+        let mut buf = Vec::new();
+        let mut open: Option<(std::time::Instant, bool)> = None; // (since, is_pkg_cache)
+        let mut out = std::io::stderr();
+        loop {
+            buf.clear();
+            match rd.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let _ = out.write_all(&buf);
+                    if let Some((since, pkg)) = open.take() {
+                        let ms = since.elapsed().as_millis() as u64;
+                        if pkg { w.package_cache_ms += ms } else { w.build_dir_ms += ms }
+                    }
+                    let line = String::from_utf8_lossy(&buf);
+                    if line.contains("Blocking") && line.contains("waiting for file lock") {
+                        open = Some((std::time::Instant::now(), line.contains("package cache")));
+                    }
+                }
+            }
+        }
+        if let Some((since, pkg)) = open {
+            let ms = since.elapsed().as_millis() as u64;
+            if pkg { w.package_cache_ms += ms } else { w.build_dir_ms += ms }
+        }
+        w
+    });
+    let status = child.wait()?;
+    let waits = watcher.join().unwrap_or_default();
+    Ok((status, waits))
+}
+
 pub fn new_invocation_id() -> String {
     let seed = format!(
         "{}-{}-{:?}",
@@ -347,6 +423,52 @@ pub struct Sample {
     pub cpu_ms: u64,
     pub wall_ms: u64,
     pub src_bytes: u64,
+    /// 1-min load when sampled (0 = unknown) — CPU time itself inflates when
+    /// SMT siblings are busy, so baselines remember how contended they were.
+    #[serde(default)]
+    pub load1: f64,
+}
+
+/// Physical cores (unique core_id × package), cached. Falls back to half the
+/// logical CPUs when sysfs topology is unavailable.
+pub fn physical_cores() -> f64 {
+    static PHYS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PHYS.get_or_init(|| {
+        let mut set = BTreeSet::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if !n.starts_with("cpu") || !n[3..].chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                let t = e.path().join("topology");
+                let core = std::fs::read_to_string(t.join("core_id")).unwrap_or_default();
+                let pkg = std::fs::read_to_string(t.join("physical_package_id")).unwrap_or_default();
+                if !core.is_empty() {
+                    set.insert((pkg.trim().to_string(), core.trim().to_string()));
+                }
+            }
+        }
+        if set.is_empty() {
+            (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) as f64 / 2.0).max(1.0)
+        } else {
+            set.len() as f64
+        }
+    })
+}
+
+/// How much per-instruction CPU time inflates at a given load: 1.0 up to the
+/// physical core count, rising to 1.5 once every SMT sibling is busy.
+pub fn contention(load: f64) -> f64 {
+    let phys = physical_cores();
+    1.0 + 0.5 * ((load - phys) / phys).clamp(0.0, 1.0)
+}
+
+/// Tolerance multiplier for comparing a sample taken at `load_now` against a
+/// baseline taken at `load_base` (0 = unknown → assume a quiet baseline).
+pub fn load_allowance(load_now: f64, load_base: f64) -> f64 {
+    let base = if load_base > 0.0 { contention(load_base) } else { 1.0 };
+    (contention(load_now) / base).clamp(1.0, 1.6)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -364,6 +486,16 @@ impl Baselines {
         c.sort_unstable();
         Some((c[c.len() / 2], c.len()))
     }
+    /// Median load of the samples that recorded one (0 = none did).
+    pub fn median_load(&self, key: &str) -> f64 {
+        let Some(v) = self.units.get(key) else { return 0.0 };
+        let mut l: Vec<f64> = v.iter().map(|s| s.load1).filter(|x| *x > 0.0).collect();
+        if l.is_empty() {
+            return 0.0;
+        }
+        l.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        l[l.len() / 2]
+    }
     pub fn last_src(&self, key: &str) -> Option<u64> {
         self.units.get(key)?.last().map(|s| s.src_bytes).filter(|b| *b > 0)
     }
@@ -372,7 +504,7 @@ impl Baselines {
             return;
         }
         let v = self.units.entry(s.key()).or_default();
-        v.push(Sample { ts: s.ts, cpu_ms: s.cpu_ms, wall_ms: s.wall_ms, src_bytes: s.src_bytes });
+        v.push(Sample { ts: s.ts, cpu_ms: s.cpu_ms, wall_ms: s.wall_ms, src_bytes: s.src_bytes, load1: s.load1 });
         if v.len() > BASELINE_CAP {
             let drop = v.len() - BASELINE_CAP;
             v.drain(..drop);
@@ -490,6 +622,10 @@ pub struct Pulse {
     pub new_crates: Vec<UnitCost>,
     /// Known crate, first time under this shape (new opt-level/target/mode).
     pub new_shapes: Vec<UnitCost>,
+    /// Largest load tolerance applied to any judged unit (1.0 = none): CPU
+    /// time measured on a box busier than its baseline gets more slack.
+    #[serde(default)]
+    pub load_allowance: f64,
     /// Wall-clock phases of the invocation: cargo's own time before the first
     /// rustc started (resolution, fingerprinting, build-dir LOCK WAIT), the
     /// span in which rustc units ran, and the tail after the last one ended
@@ -509,9 +645,20 @@ pub struct Pulse {
     /// — its `before_ms` is (at least partly) queueing behind that build.
     #[serde(default)]
     pub lock_busy_at_start: bool,
+    /// Time cargo itself reported as "Blocking waiting for file lock on …",
+    /// measured line-to-line on its stderr. build dir = another build on the
+    /// same target/; package cache = ANY cargo on the box holding ~/.cargo.
+    #[serde(default)]
+    pub lock_wait_build_dir_ms: u64,
+    #[serde(default)]
+    pub lock_wait_pkg_cache_ms: u64,
     /// steady | heavier | lighter | learning | idle
     pub verdict: String,
     pub headline: String,
+    /// What to do about it — each lever is tied to a measured condition in
+    /// this pulse, never a generic tip.
+    #[serde(default)]
+    pub levers: Vec<String>,
 }
 
 /// Baseline-store size at which a never-seen external crate is credible
@@ -575,6 +722,19 @@ pub fn judge_at(
     judge_full(units, base, meta, start_ms, false)
 }
 
+/// What the parent observed about its cargo run, beyond the units.
+#[derive(Debug, Clone, Default)]
+pub struct InvocationFacts {
+    pub start_ms: u64,
+    pub lock_busy_at_start: bool,
+    pub lock_wait_build_dir_ms: u64,
+    pub lock_wait_pkg_cache_ms: u64,
+    /// Package names in the working Cargo.lock but not in `HEAD:Cargo.lock`.
+    /// `Some` = git could answer: a first-seen crate is a NEW dependency only
+    /// if it is in here. `None` = unknown → fall back to the store heuristic.
+    pub lock_added: Option<BTreeSet<String>>,
+}
+
 pub fn judge_full(
     units: &[UnitSample],
     base: &Baselines,
@@ -582,9 +742,21 @@ pub fn judge_full(
     start_ms: u64,
     lock_busy_at_start: bool,
 ) -> Pulse {
+    judge_facts(units, base, meta, &InvocationFacts { start_ms, lock_busy_at_start, ..Default::default() })
+}
+
+pub fn judge_facts(
+    units: &[UnitSample],
+    base: &Baselines,
+    meta: (&str, &str, &str, bool, bool, u64),
+    facts: &InvocationFacts,
+) -> Pulse {
+    let start_ms = facts.start_ms;
     let (inv, cmd, package, release, green, wall_ms) = meta;
     let mut p = Pulse {
-        lock_busy_at_start,
+        lock_busy_at_start: facts.lock_busy_at_start,
+        lock_wait_build_dir_ms: facts.lock_wait_build_dir_ms,
+        lock_wait_pkg_cache_ms: facts.lock_wait_pkg_cache_ms,
         inv: inv.into(),
         ts: now_unix(),
         cmd: cmd.into(),
@@ -636,7 +808,11 @@ pub fn judge_full(
                 // A never-seen EXTERNAL crate in a mature store = a new dependency.
                 // A never-seen local crate, or anything in a young store, is just
                 // a first measurement under this shape.
-                if !u.local && base.units.len() >= MATURE_KEYS && !base.knows_crate(&u.pkg, &u.crate_name) {
+                let added_here = match &facts.lock_added {
+                    Some(set) => set.contains(&u.pkg),
+                    None => base.units.len() >= MATURE_KEYS,
+                };
+                if !u.local && added_here && !base.knows_crate(&u.pkg, &u.crate_name) {
                     p.new_crates.push(c.clone());
                 } else {
                     p.new_shapes.push(c.clone());
@@ -645,7 +821,11 @@ pub fn judge_full(
                 judged += 1;
                 p.expected_cpu_ms += typical;
                 p.judged_cpu_ms += u.cpu_ms;
-                let up = u.cpu_ms as f64 >= typical as f64 * REGRESS_RATIO
+                let allow = load_allowance(u.load1, base.median_load(&key));
+                if allow > p.load_allowance {
+                    p.load_allowance = allow;
+                }
+                let up = u.cpu_ms as f64 >= typical as f64 * REGRESS_RATIO * allow
                     && u.cpu_ms.saturating_sub(typical) >= REGRESS_MIN_MS;
                 let down = (u.cpu_ms as f64) <= typical as f64 * IMPROVE_RATIO
                     && typical.saturating_sub(u.cpu_ms) >= REGRESS_MIN_MS;
@@ -684,14 +864,20 @@ pub fn judge_full(
     by_cost(&mut p.new_shapes);
     by_cost(&mut p.local_rebuilt);
 
+    if p.load_allowance < 1.0 {
+        p.load_allowance = 1.0;
+    }
     let new_cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
     let delta = p.judged_cpu_ms as i64 - p.expected_cpu_ms as i64;
-    p.verdict = if p.units_compiled == 0 && p.units_failed == 0 {
+    let heavy_ratio = 1.15 * p.load_allowance;
+    p.verdict = if p.units_failed > 0 {
+        "failed".into()
+    } else if p.units_compiled == 0 && p.units_failed == 0 {
         "idle".into()
     } else if p.coverage < 0.3 && p.new_crates.is_empty() && p.regressions.is_empty() {
         "learning".into()
     } else if (p.expected_cpu_ms > 0
-        && p.judged_cpu_ms as f64 >= p.expected_cpu_ms as f64 * 1.15
+        && p.judged_cpu_ms as f64 >= p.expected_cpu_ms as f64 * heavy_ratio
         && delta >= 2000)
         || new_cost >= 5000
         || !p.regressions.is_empty() && p.regressions.iter().map(|r| r.cpu_ms - r.typical_ms).sum::<u64>() >= 3000
@@ -706,11 +892,74 @@ pub fn judge_full(
         "steady".into()
     };
     p.headline = headline(&p);
+    p.levers = levers(&p);
     p
+}
+
+/// Map measured conditions to the lever that addresses them.
+pub fn levers(p: &Pulse) -> Vec<String> {
+    let mut v = Vec::new();
+    let share = |x: u64| if p.wall_ms > 0 { x as f64 / p.wall_ms as f64 } else { 0.0 };
+    if share(p.lock_wait_build_dir_ms) >= 0.2 || (p.lock_busy_at_start && share(p.before_ms) >= 0.4) {
+        v.push("another build owns this target dir — give this lane its own CARGO_TARGET_DIR under /home/storage (cold once, then warm, never queued)".into());
+    }
+    if share(p.lock_wait_pkg_cache_ms) >= 0.2 {
+        v.push("~/.cargo package-cache lock was held by another cargo — stagger lane starts, or pre-fetch once (`cargo fetch`) so resolution doesn't download under the lock".into());
+    }
+    if !p.new_crates.is_empty() {
+        let cost: u64 = p.new_crates.iter().map(|c| c.cpu_ms).sum();
+        let names: Vec<&str> = p.new_crates.iter().take(3).map(|c| c.unit.as_str()).collect();
+        v.push(format!(
+            "new dependencies cost {} per cold build ({}) — make them optional behind a feature, or check `fluxc pulse deps` for what pulled them in",
+            fmt_ms(cost),
+            names.join(", ")
+        ));
+    }
+    for r in p.regressions.iter().take(2) {
+        if r.src_delta >= 8 * 1024 && r.local {
+            v.push(format!(
+                "{} grew {} and got {:+}% slower — the edit loop pays this on every change: split the module into its own crate, or move heavy generics behind dyn/non-generic wrappers",
+                r.unit,
+                fmt_bytes_signed(r.src_delta),
+                pct(r.cpu_ms, r.typical_ms)
+            ));
+        } else if r.local {
+            v.push(format!(
+                "{} {:+}% slower with ~no source growth — likely a new generic instantiation or proc-macro expansion; `cargo +nightly rustc -- -Zself-profile` on it to see which",
+                r.unit,
+                pct(r.cpu_ms, r.typical_ms)
+            ));
+        }
+    }
+    if p.verdict == "idle" && p.wall_ms >= 5000 && !p.lock_busy_at_start && p.lock_wait_build_dir_ms + p.lock_wait_pkg_cache_ms == 0 {
+        v.push("a no-op build should take ~1 s — slow no-ops mean fingerprint churn (env/wrapper/features flipping between invocations) or a huge target dir; compare `fluxc pulse` across two identical runs".into());
+    }
+    if let Some(t) = p.local_rebuilt.first() {
+        if p.local_rebuilt.len() >= 8 && p.units_compiled > 0 {
+            v.push(format!(
+                "{} local crates rebuilt for one change — run `fluxc pulse blast <crate>` on what you edited; a crate many others depend on is the expensive place to change (heaviest here: {})",
+                p.local_rebuilt.len(),
+                t.unit
+            ));
+        }
+    }
+    v
 }
 
 fn headline(p: &Pulse) -> String {
     let mut h = match p.verdict.as_str() {
+        "failed" => format!(
+            "✗ failed — {} unit(s) red after {} CPU ({} compiled fine)",
+            p.units_failed,
+            fmt_ms(p.cpu_ms_total),
+            p.units_compiled
+        ),
+        "idle" if p.wall_ms >= 5000 => format!(
+            "◌ no-op took {} — nothing compiled ({} restored), so all of it was cargo: {}",
+            fmt_ms(p.wall_ms),
+            p.units_restored,
+            if p.lock_busy_at_start { "queued behind another build's lock" } else { "fingerprint scan / resolution (lock was free)" }
+        ),
         "idle" => format!("◌ idle — {} unit(s) restored from cache, nothing compiled", p.units_restored),
         "learning" => format!(
             "◔ learning — {} unit(s), {} CPU; {:.0}% had a baseline (needs {} prior builds per unit)",
@@ -767,6 +1016,14 @@ fn headline(p: &Pulse) -> String {
         h.push_str("; ");
         h.push_str(&w);
     }
+    if p.load_allowance > 1.05 {
+        h.push_str(&format!(
+            " [load {:.0} on {} cores: CPU-time tolerance ×{:.2}]",
+            p.load1,
+            physical_cores() as u64,
+            p.load_allowance
+        ));
+    }
     h
 }
 
@@ -778,6 +1035,23 @@ pub fn wall_note(p: &Pulse) -> Option<String> {
         return None;
     }
     let share = |x: u64| (x as f64 / p.wall_ms as f64 * 100.0).round() as u64;
+    let waited = p.lock_wait_build_dir_ms + p.lock_wait_pkg_cache_ms;
+    if share(waited) >= 20 {
+        let mut parts = Vec::new();
+        if p.lock_wait_pkg_cache_ms > 0 {
+            parts.push(format!("{} on the box-wide package cache (~/.cargo — any agent's cargo)", fmt_ms(p.lock_wait_pkg_cache_ms)));
+        }
+        if p.lock_wait_build_dir_ms > 0 {
+            parts.push(format!("{} on this target dir (another build here)", fmt_ms(p.lock_wait_build_dir_ms)));
+        }
+        return Some(format!(
+            "wall {}: cargo reported {} ({}%) blocked on file locks — {}",
+            fmt_ms(p.wall_ms),
+            fmt_ms(waited),
+            share(waited),
+            parts.join(", ")
+        ));
+    }
     if share(p.before_ms) >= 40 {
         let why = if p.lock_busy_at_start {
             "another build held the cargo lock — queueing, not compiling"
@@ -808,6 +1082,7 @@ pub fn render_rows(p: &Pulse) -> Vec<String> {
         "lighter" => "▼ LIGHTER",
         "steady" => "● STEADY",
         "learning" => "◔ LEARNING",
+        "failed" => "✗ FAILED",
         _ => "◌ IDLE",
     };
     rows.push(format!(
@@ -831,6 +1106,13 @@ pub fn render_rows(p: &Pulse) -> Vec<String> {
         p.units_restored,
         p.load1
     ));
+    if p.lock_wait_build_dir_ms + p.lock_wait_pkg_cache_ms > 0 {
+        rows.push(format!(
+            " LOCKS     {} pkg-cache · {} target-dir (cargo said Blocking)",
+            fmt_ms(p.lock_wait_pkg_cache_ms),
+            fmt_ms(p.lock_wait_build_dir_ms)
+        ));
+    }
     if p.compile_span_ms + p.before_ms + p.after_ms > 0 {
         rows.push(format!(
             " WALL      {} = {} wait · {} rustc · {} after",
@@ -875,6 +1157,9 @@ pub fn render_rows(p: &Pulse) -> Vec<String> {
             p.peak_rss_kb as f64 / 1048576.0,
             short(&p.peak_rss_unit, 22)
         ));
+    }
+    for l in p.levers.iter().take(2) {
+        rows.push(format!(" LEVER     {}", short(l, 72)));
     }
     rows
 }
@@ -950,6 +1235,11 @@ pub fn finish_invocation_at(inv: &str, cmd: &str, package: Option<&str>, release
 
 #[allow(clippy::too_many_arguments)]
 pub fn finish_invocation_full(inv: &str, cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64, start_ms: u64, lock_busy: bool) -> Option<Pulse> {
+    finish_invocation_facts(inv, cmd, package, release, green, wall_ms,
+        &InvocationFacts { start_ms, lock_busy_at_start: lock_busy, ..Default::default() })
+}
+
+pub fn finish_invocation_facts(inv: &str, cmd: &str, package: Option<&str>, release: bool, green: bool, wall_ms: u64, facts: &InvocationFacts) -> Option<Pulse> {
     if !enabled() || inv.is_empty() {
         return None;
     }
@@ -959,7 +1249,14 @@ pub fn finish_invocation_full(inv: &str, cmd: &str, package: Option<&str>, relea
     let pulse = {
         let _lock = DirLock::acquire(&dir);
         let mut base = load_baselines(&dir);
-        let pulse = judge_full(&units, &base, (inv, cmd, package.unwrap_or("<workspace>"), release, green, wall_ms), start_ms, lock_busy);
+        // Only pay for a lockfile diff when an unknown external crate showed up.
+        let mut facts = facts.clone();
+        if facts.lock_added.is_none()
+            && units.iter().any(|u| !u.local && u.outcome == "compiled" && !base.knows_crate(&u.pkg, &u.crate_name))
+        {
+            facts.lock_added = lock_added_vs_head(&std::env::current_dir().unwrap_or_default());
+        }
+        let pulse = judge_facts(&units, &base, (inv, cmd, package.unwrap_or("<workspace>"), release, green, wall_ms), &facts);
         for u in &units {
             base.fold(u);
         }
@@ -982,7 +1279,7 @@ pub fn finish_invocation_full(inv: &str, cmd: &str, package: Option<&str>, relea
     let _ = std::fs::remove_file(&inv_units);
     if let Ok(j) = serde_json::to_string_pretty(&pulse) {
         let _ = std::fs::write(dir.join("inv").join(format!("{}.json", inv)), &j);
-        if pulse.units_compiled + pulse.units_failed > 0 {
+        if pulse.units_compiled + pulse.units_failed > 0 || pulse.wall_ms >= 5000 {
             let _ = std::fs::write(dir.join("last.json"), &j);
         }
     }
@@ -1178,6 +1475,154 @@ pub fn render_drift(r: &DriftReport) -> String {
     out.join("\n")
 }
 
+// ── rebuild tax: where development CPU actually goes ────────────────────────
+
+/// One unit's share of the compile CPU spent over a window. A crate that is
+/// cheap but rebuilt 200 times a day can cost more than a heavy one built
+/// twice — and only measured frequency tells the two apart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaxRow {
+    pub unit: String,
+    pub pkg: String,
+    pub local: bool,
+    pub builds: usize,
+    pub cpu_total_ms: u64,
+    pub median_ms: u64,
+    pub src_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaxReport {
+    pub days: u64,
+    pub units_compiled: usize,
+    pub cpu_total_ms: u64,
+    pub cpu_local_ms: u64,
+    pub rows: Vec<TaxRow>,
+}
+
+pub fn rebuild_tax(days: u64, top: usize, local_only: bool) -> TaxReport {
+    let dir = pulse_dir();
+    let now = now_unix();
+    let cutoff = now.saturating_sub(days * 86_400);
+    let mut rep = TaxReport { days, ..Default::default() };
+    let mut acc: BTreeMap<String, (TaxRow, Vec<u64>)> = BTreeMap::new();
+    for d in 0..=days {
+        for u in read_units(&day_log_path(&dir, now.saturating_sub(d * 86_400))) {
+            if u.outcome != "compiled" || u.ts < cutoff {
+                continue;
+            }
+            rep.units_compiled += 1;
+            rep.cpu_total_ms += u.cpu_ms;
+            if u.local {
+                rep.cpu_local_ms += u.cpu_ms;
+            }
+            if local_only && !u.local {
+                continue;
+            }
+            let e = acc.entry(u.key()).or_insert_with(|| {
+                (TaxRow { unit: u.label(), pkg: u.pkg.clone(), local: u.local, ..Default::default() }, vec![])
+            });
+            e.0.builds += 1;
+            e.0.cpu_total_ms += u.cpu_ms;
+            if u.src_bytes > 0 {
+                e.0.src_bytes = u.src_bytes;
+            }
+            e.1.push(u.cpu_ms);
+        }
+    }
+    let mut rows: Vec<TaxRow> = acc
+        .into_values()
+        .map(|(mut r, mut v)| {
+            r.median_ms = median(&mut v);
+            r
+        })
+        .collect();
+    rows.sort_by(|a, b| b.cpu_total_ms.cmp(&a.cpu_total_ms));
+    rep.rows = rows.into_iter().take(top).collect();
+    rep
+}
+
+pub fn render_tax(r: &TaxReport) -> String {
+    let mut out = vec![format!(
+        "💸 rebuild tax — last {} day(s): {} units compiled, {} CPU ({} of it your code)",
+        r.days,
+        r.units_compiled,
+        fmt_ms(r.cpu_total_ms),
+        fmt_ms(r.cpu_local_ms)
+    )];
+    out.push(format!("    {:<36} {:>6} {:>8} {:>8} {:>9}", "unit", "builds", "median", "total", "src"));
+    for t in &r.rows {
+        out.push(format!(
+            "    {}{:<34} {:>6} {:>8} {:>8} {:>9}",
+            if t.local { "◆ " } else { "  " },
+            short(&t.unit, 34),
+            t.builds,
+            fmt_ms(t.median_ms),
+            fmt_ms(t.cpu_total_ms),
+            if t.src_bytes > 0 { format!("{:.0} KB", t.src_bytes as f64 / 1024.0) } else { "-".into() }
+        ));
+    }
+    if r.rows.is_empty() {
+        out.push("    (no compiled units recorded in this window yet)".into());
+    }
+    out.join("\n")
+}
+
+// ── ambient: one line for a status bar, a block for session start ──────────
+
+/// ≤ ~60 chars: the newest verdict, for a status line or a prompt.
+pub fn status_line() -> String {
+    let Some(p) = read_last() else { return "⏱ pulse: no builds yet".into() };
+    let age = now_unix().saturating_sub(p.ts);
+    let when = if age < 120 { format!("{}s", age) } else if age < 7200 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
+    let mark = match p.verdict.as_str() {
+        "heavier" => "▲",
+        "lighter" => "▼",
+        "steady" => "●",
+        "learning" => "◔",
+        "failed" => "✗",
+        _ => "◌",
+    };
+    let what = if let Some(r) = p.regressions.first() {
+        format!("{} {:+}%", short(&r.unit, 18), pct(r.cpu_ms, r.typical_ms))
+    } else if p.expected_cpu_ms > 0 {
+        format!("{:+}% vs typ", pct(p.judged_cpu_ms, p.expected_cpu_ms))
+    } else {
+        format!("{} units", p.units_compiled)
+    };
+    format!("⏱ {} {} {} · {} CPU · {} ago", mark, short(&p.package, 14), what, fmt_ms(p.cpu_ms_total), when)
+}
+
+/// A few lines for session start: what's been expensive lately and what's
+/// creeping, so planning begins from cost, not from a guess.
+pub fn weather() -> String {
+    let tax = rebuild_tax(1, 3, true);
+    let dr = drift(28, 7, 3);
+    let mut out = vec!["## Compile weather (fluxc pulse — measured)".to_string()];
+    out.push(format!(
+        "  last 24h: {} units compiled, {} CPU ({} your code)",
+        tax.units_compiled,
+        fmt_ms(tax.cpu_total_ms),
+        fmt_ms(tax.cpu_local_ms)
+    ));
+    if !tax.rows.is_empty() {
+        let hot: Vec<String> = tax.rows.iter().map(|t| format!("{} {}×{}", t.unit, t.builds, fmt_ms(t.median_ms))).collect();
+        out.push(format!("  hottest: {}", hot.join(" · ")));
+    }
+    if let Some(g) = dr.growing.first() {
+        out.push(format!(
+            "  creeping: {} {} → {} ({:+}%)",
+            g.unit,
+            fmt_ms(g.prior_ms),
+            fmt_ms(g.recent_ms),
+            pct(g.recent_ms, g.prior_ms)
+        ));
+    }
+    out.push(format!("  last: {}", status_line()));
+    out.push("  before editing a crate: flux_compile_pulse view=blast crate=<it>".into());
+    out.join("\n")
+}
+
 // ── blast radius: what an edit WILL cost, before you make it ───────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1333,6 +1778,34 @@ fn lock_packages(txt: &str) -> BTreeSet<(String, String)> {
     out
 }
 
+/// Names of packages present in `<ws>/Cargo.lock` but absent from
+/// `HEAD:Cargo.lock` (walks up from `start` to the lockfile). None when there
+/// is no lockfile or git cannot answer — callers must then not guess.
+pub fn lock_added_vs_head(start: &Path) -> Option<BTreeSet<String>> {
+    let mut dir = start.to_path_buf();
+    let ws = loop {
+        if dir.join("Cargo.lock").exists() {
+            break dir;
+        }
+        if !dir.pop() {
+            return None;
+        }
+    };
+    let now = std::fs::read_to_string(ws.join("Cargo.lock")).ok()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws)
+        .args(["show", "HEAD:Cargo.lock"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let then: BTreeSet<String> = lock_packages(&String::from_utf8_lossy(&out.stdout)).into_iter().map(|(n, _)| n).collect();
+    Some(lock_packages(&now).into_iter().map(|(n, _)| n).filter(|n| !then.contains(n)).collect())
+}
+
 /// Cargo.lock in the working tree vs `git show <rev>:Cargo.lock`.
 pub fn dep_diff(workspace: &Path, rev: &str) -> Result<DepDiff, String> {
     let now = std::fs::read_to_string(workspace.join("Cargo.lock")).map_err(|e| format!("Cargo.lock: {}", e))?;
@@ -1440,6 +1913,11 @@ mod tests {
         let sh = shape_from_args(&b);
         assert_eq!((sh.kind.as_str(), sh.mode.as_str(), sh.opt.as_str(), sh.target.as_str()),
             ("bin", "build", "1", "x86_64-pc-windows-gnu"));
+        assert_eq!(sh.feat, "");
+        let f = |v: &[&str]| shape_from_args(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).feat;
+        let ab = f(&["x.rs", "--cfg", "feature=\"a\"", "--cfg", "feature=\"b\""]);
+        assert_eq!(ab, f(&["x.rs", "--cfg", "feature=\"b\"", "--cfg", "feature=\"a\""]), "order-independent");
+        assert_ne!(ab, f(&["x.rs", "--cfg", "feature=\"a\""]));
     }
 
     #[test]
@@ -1469,6 +1947,27 @@ mod tests {
         assert_eq!(p.regressions[0].src_delta, 6 * 1024);
         assert!(p.headline.contains("sigil-node"), "{}", p.headline);
         assert!(p.headline.contains("+6.0 KB"), "{}", p.headline);
+        assert!(p.levers.iter().any(|l| l.contains("sigil-node")), "regression must yield a lever: {:?}", p.levers);
+    }
+
+    #[test]
+    fn saturated_box_widens_tolerance_but_never_narrows_it() {
+        let phys = physical_cores();
+        assert!((load_allowance(phys * 0.5, phys * 0.5) - 1.0).abs() < 1e-9);
+        assert!((load_allowance(phys * 3.0, 0.0) - 1.5).abs() < 1e-9, "quiet-unknown baseline vs saturated now");
+        assert!((load_allowance(phys * 3.0, phys * 3.0) - 1.0).abs() < 1e-9, "same contention both sides cancels");
+        assert!((load_allowance(phys * 0.1, phys * 3.0) - 1.0).abs() < 1e-9, "a quieter box never tightens");
+        // +52% at load 2.5×phys vs a quiet baseline is within tolerance — the fluxc false alarm
+        let base = base_with("fluxc", &[6000, 6100, 6200]);
+        let mut u = s("fluxc", 9_200, "compiled", true);
+        u.load1 = phys * 2.5;
+        let p = judge(&[u], &base, ("i", "build", "fluxc", false, true, 9_200));
+        assert!(p.regressions.is_empty(), "{}", p.headline);
+        // the same +52% on a quiet box IS a regression
+        let mut q = s("fluxc", 9_200, "compiled", true);
+        q.load1 = phys * 0.3;
+        let p = judge(&[q], &base, ("i", "build", "fluxc", false, true, 9_200));
+        assert_eq!(p.regressions.len(), 1, "{}", p.headline);
     }
 
     #[test]
@@ -1501,6 +2000,52 @@ mod tests {
     }
 
     #[test]
+    fn measured_lock_wait_beats_guessing() {
+        let start = 1_000_000u64;
+        let mut u = s("a", 2000, "compiled", true);
+        u.wall_ms = 2000;
+        u.end_ms = start + 40_000;
+        let facts = InvocationFacts { start_ms: start, lock_wait_pkg_cache_ms: 36_000, ..Default::default() };
+        let p = judge_facts(&[u], &Baselines::default(), ("i", "check", "a", false, true, 41_000), &facts);
+        assert!(p.headline.contains("package cache"), "{}", p.headline);
+        assert!(render_rows(&p).iter().any(|r| r.contains("LOCKS")));
+        assert!(p.levers.iter().any(|l| l.contains("package-cache")), "{:?}", p.levers);
+    }
+
+    #[test]
+    fn lock_watch_times_blocking_lines() {
+        // a fake "cargo": prints the Blocking notice, sleeps, prints the next line
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo '    Blocking waiting for file lock on package cache' >&2; sleep 0.3; echo '   Compiling x' >&2"]);
+        let (st, w) = status_with_lock_watch(&mut cmd).unwrap();
+        assert!(st.success());
+        assert!(w.package_cache_ms >= 250, "{:?}", w);
+        assert_eq!(w.build_dir_ms, 0);
+    }
+
+    #[test]
+    fn tax_ranks_by_total_not_by_single_build() {
+        let _g = crate::tdg::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("flux-pulse-tax-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FLUX_PULSE_DIR", &dir);
+        // heavy: 1 × 20 s ; cheap-but-hot: 30 × 1 s
+        let mut heavy = s("heavy", 20_000, "compiled", true);
+        heavy.inv = String::new();
+        record_unit(&heavy);
+        for _ in 0..30 {
+            let mut hot = s("hot", 1_000, "compiled", true);
+            hot.inv = String::new();
+            record_unit(&hot);
+        }
+        let r = rebuild_tax(1, 5, true);
+        assert_eq!(r.rows[0].pkg, "hot", "{}", render_tax(&r));
+        assert_eq!((r.rows[0].builds, r.rows[0].cpu_total_ms), (30, 30_000));
+        std::env::remove_var("FLUX_PULSE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lock_probe_sees_a_held_cargo_lock() {
         let dir = std::env::temp_dir().join(format!("flux-pulse-lock-{}", std::process::id()));
         let prof = dir.join("debug");
@@ -1519,6 +2064,18 @@ mod tests {
     }
 
     #[test]
+    fn first_seen_but_already_in_head_lock_is_not_new() {
+        let base = base_with("serde", &[4000, 4100, 3900]);
+        let mut facts = InvocationFacts::default();
+        facts.lock_added = Some(["really-added".to_string()].into_iter().collect());
+        let p = judge_facts(
+            &[s("tokio-test", 1700, "compiled", false), s("really-added", 6000, "compiled", false)],
+            &base, ("i", "test", "x", false, true, 8000), &facts);
+        assert_eq!(p.new_crates.iter().map(|c| c.unit.as_str()).collect::<Vec<_>>(), vec!["really-added"]);
+        assert_eq!(p.new_shapes.len(), 1, "tokio-test is just a first measurement");
+    }
+
+    #[test]
     fn new_dependency_vs_new_shape() {
         let mut base = base_with("serde", &[4000, 4100, 3900]);
         for i in 0..MATURE_KEYS {
@@ -1532,6 +2089,13 @@ mod tests {
         assert_eq!(p.new_crates.len(), 1);
         assert_eq!(p.new_crates[0].unit, "brand-new-dep");
         assert_eq!(p.verdict, "heavier", "a 6 s new dependency must register: {}", p.headline);
+    }
+
+    #[test]
+    fn a_red_unit_is_a_failed_verdict_not_steady() {
+        let p = judge(&[s("a", 2700, "failed", true)], &Baselines::default(), ("i", "test", "a", false, false, 49_000));
+        assert_eq!(p.verdict, "failed");
+        assert!(p.headline.starts_with("✗ failed"), "{}", p.headline);
     }
 
     #[test]

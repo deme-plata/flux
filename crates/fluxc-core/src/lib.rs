@@ -418,12 +418,12 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
     // (signing) semantics; it no longer controls the wrapper.
     apply_wrapper_env(&mut cmd);
 
-    let pulse_inv = pulse_begin(&mut cmd);
+    let mut pulse_inv = pulse_begin(&mut cmd);
 
     // FIP-0003 phase 1: every build-family invocation leaves a TDG breadcrumb
     // (node + run stamp). Advisory — tdg swallows its own failures.
     let tdg_start = std::time::Instant::now();
-    let s = cmd.status().expect("cargo");
+    let s = pulse_status(&mut cmd, &mut pulse_inv).expect("cargo");
     let wall_ms = tdg_start.elapsed().as_millis() as u64;
     tdg::record_invocation(cargo_cmd, config.package.as_deref(), config.release,
         s.success(), wall_ms);
@@ -439,6 +439,18 @@ pub struct PulseInvocation {
     pub inv: String,
     pub start_ms: u64,
     pub lock_busy: bool,
+    pub waits: pulse::LockWaits,
+}
+
+/// `cmd.status()` with cargo's lock-wait notices timed (stderr relayed
+/// unchanged). With FLUX_PULSE=0 this is a plain status().
+pub fn pulse_status(cmd: &mut Command, pi: &mut PulseInvocation) -> std::io::Result<std::process::ExitStatus> {
+    if !pulse::enabled() {
+        return cmd.status();
+    }
+    let (st, w) = pulse::status_with_lock_watch(cmd)?;
+    pi.waits = w;
+    Ok(st)
 }
 
 pub fn pulse_begin(cmd: &mut Command) -> PulseInvocation {
@@ -452,7 +464,7 @@ pub fn pulse_begin(cmd: &mut Command) -> PulseInvocation {
             tdg_sched::find_workspace_root(&cwd).unwrap_or(cwd).join("target")
         });
     let lock_busy = pulse::enabled() && pulse::cargo_lock_busy(&target);
-    PulseInvocation { inv, start_ms: pulse::now_ms(), lock_busy }
+    PulseInvocation { inv, start_ms: pulse::now_ms(), lock_busy, waits: Default::default() }
 }
 
 /// Judge, persist, print one line to stderr, fire `compile_pulse`.
@@ -460,9 +472,20 @@ pub fn pulse_end(pi: &PulseInvocation, cmd: &str, package: Option<&str>, release
     -> Option<pulse::Pulse>
 {
     let wall_ms = pulse::now_ms().saturating_sub(pi.start_ms);
-    let p = pulse::finish_invocation_full(&pi.inv, cmd, package, release, green, wall_ms, pi.start_ms, pi.lock_busy)?;
-    if p.units_compiled + p.units_failed > 0 && env::var("FLUX_PULSE_QUIET").is_err() {
+    let facts = pulse::InvocationFacts {
+        start_ms: pi.start_ms,
+        lock_busy_at_start: pi.lock_busy,
+        lock_wait_build_dir_ms: pi.waits.build_dir_ms,
+        lock_wait_pkg_cache_ms: pi.waits.package_cache_ms,
+        lock_added: None,
+    };
+    let p = pulse::finish_invocation_facts(&pi.inv, cmd, package, release, green, wall_ms, &facts)?;
+    let worth_saying = p.units_compiled + p.units_failed > 0 || wall_ms >= 5000;
+    if worth_saying && env::var("FLUX_PULSE_QUIET").is_err() {
         eprintln!("  \u{23f1} {}", p.headline);
+        if let Some(l) = p.levers.first() {
+            eprintln!("    \u{21b3} lever: {}", l);
+        }
     }
     pulse::dispatch(&p);
     Some(p)
@@ -889,6 +912,7 @@ pub fn wrapper_mode(args: &[String]) {
         is_test: tdg_is_test,
         opt: shape.opt.clone(),
         target: shape.target.clone(),
+        feat: shape.feat.clone(),
         local: pulse::is_local_manifest(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()),
         outcome: outcome.to_string(),
         wall_ms,
@@ -1316,8 +1340,8 @@ pub fn self_build(config: BuildConfig) {
     // target/.rustc_info.json and made every subsequent self-build fail).
     cmd.stdin(Stdio::null());
 
-    let pi = pulse_begin(&mut cmd);
-    let status = cmd.status().expect("cargo");
+    let mut pi = pulse_begin(&mut cmd);
+    let status = pulse_status(&mut cmd, &mut pi).expect("cargo");
     let elapsed_ms = start.elapsed().as_millis() as u64;
     pulse_end(&pi, "self", Some("<workspace>"), config.release, status.success());
     TOTAL_BUILD_TIME_MS.fetch_add(elapsed_ms, Ordering::Relaxed);
@@ -1403,8 +1427,8 @@ pub fn run_tests(package: Option<&str>, extra: &[String]) {
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
     let release = extra.iter().any(|a| a == "--release" || a == "-r");
-    let pi = pulse_begin(&mut cmd);
-    let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
+    let mut pi = pulse_begin(&mut cmd);
+    let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
     pulse_end(&pi, "test", package, release, status.success());
     if !status.success() {
         eprintln!("Some tests failed");

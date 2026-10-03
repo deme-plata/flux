@@ -4,15 +4,51 @@
 //! targeting 10x-100x performance improvements as analyzed by Server Beta.
 
 use anyhow::Result;
+#[cfg(feature = "gpu-acceleration")]
 use std::sync::Arc;
 
+// The wgpu-backed half is behind `gpu-acceleration` (default ON, so nothing
+// changes for existing users). Turning it off drops wgpu/naga/ash/wgpu-hal/
+// glow from the build — measured 2026-10-03 as the largest single block of
+// sigil-node's compile closure — while the proof DATA types and the
+// performance monitor (both wgpu-free, used by the CPU path) stay.
+#[cfg(feature = "gpu-acceleration")]
 pub mod compute_shaders;
+#[cfg(feature = "gpu-acceleration")]
 pub mod fft_gpu;
+#[cfg(feature = "gpu-acceleration")]
 pub mod fri_gpu;
+#[cfg(feature = "gpu-acceleration")]
 pub mod memory_manager;
 pub mod performance_monitor;
 
+/// Built without `gpu-acceleration`: same API, `new()` always fails — the
+/// exact behaviour `StarkSystem::new(true)` already has on a machine with no
+/// GPU adapter, so callers' CPU fallbacks are unchanged.
+#[cfg(not(feature = "gpu-acceleration"))]
+pub struct GpuStarkProver {
+    _no_gpu: (),
+}
+
+#[cfg(not(feature = "gpu-acceleration"))]
+impl GpuStarkProver {
+    pub async fn new() -> Result<Self> {
+        Err(anyhow::anyhow!(
+            "flux-zk-stark was built without the `gpu-acceleration` feature — no GPU prover"
+        ))
+    }
+
+    pub async fn prove_stark_gpu(&mut self, _execution_trace: &[Vec<u64>], _constraints: &[u8]) -> Result<StarkProofGpu> {
+        Err(anyhow::anyhow!("flux-zk-stark was built without `gpu-acceleration`"))
+    }
+
+    pub async fn batch_prove_gpu(&mut self, _traces: &[Vec<Vec<u64>>]) -> Result<Vec<StarkProofGpu>> {
+        Err(anyhow::anyhow!("flux-zk-stark was built without `gpu-acceleration`"))
+    }
+}
+
 /// GPU-accelerated STARK prover
+#[cfg(feature = "gpu-acceleration")]
 pub struct GpuStarkProver {
     /// WebGPU device for compute operations
     pub device: Arc<wgpu::Device>,
@@ -26,6 +62,7 @@ pub struct GpuStarkProver {
     pub max_batch_size: usize,
 }
 
+#[cfg(feature = "gpu-acceleration")]
 impl GpuStarkProver {
     /// Initialize GPU STARK prover with WebGPU
     pub async fn new() -> Result<Self> {

@@ -937,6 +937,7 @@ fn main() {
 /// `fluxc pulse` — compile-cost consequences.
 ///   fluxc pulse [last] [--json]           the most recent build's verdict
 ///   fluxc pulse drift [--days N] [--recent N] [--top N] [--json]
+///   fluxc pulse tax [--days N] [--top N] [--all] [--json]   where dev CPU goes
 ///   fluxc pulse blast <crate> [--workspace DIR] [--check] [--opt N] [--json]
 ///   fluxc pulse deps [--workspace DIR] [--rev REV] [--json]
 fn cmd_pulse(args: &[String]) {
@@ -956,7 +957,7 @@ fn cmd_pulse(args: &[String]) {
         while i < args.len() {
             let a = &args[i];
             if a.starts_with("--") {
-                if !matches!(a.as_str(), "--json" | "--check") { i += 1; }
+                if !matches!(a.as_str(), "--json" | "--check" | "--all") { i += 1; }
             } else {
                 out.push(a);
             }
@@ -981,6 +982,13 @@ fn cmd_pulse(args: &[String]) {
             if json { println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default()); }
             else { println!("{}", pulse::render_drift(&r)); }
         }
+        Some("line") => println!("{}", pulse::status_line()),
+        Some("weather") => println!("{}", pulse::weather()),
+        Some("tax") => {
+            let r = pulse::rebuild_tax(num("--days", 7), num("--top", 15) as usize, !args.iter().any(|a| a == "--all"));
+            if json { println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default()); }
+            else { println!("{}", pulse::render_tax(&r)); }
+        }
         Some("blast") => {
             let Some(target) = positional.get(1) else {
                 eprintln!("usage: fluxc pulse blast <crate> [--workspace DIR] [--check] [--opt N]");
@@ -1003,7 +1011,7 @@ fn cmd_pulse(args: &[String]) {
             }
         }
         Some(other) => {
-            eprintln!("unknown pulse view '{}' — use: last | drift | blast <crate> | deps", other);
+            eprintln!("unknown pulse view '{}' — use: last | line | weather | drift | tax | blast <crate> | deps", other);
             std::process::exit(2);
         }
     }

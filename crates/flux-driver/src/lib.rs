@@ -90,6 +90,54 @@ fn required_exts(args: &[String]) -> Vec<&'static str> {
     req
 }
 
+/// Cache T4: the EXTRA artifacts a `--emit=link` pass writes when the unit's crate-type list goes
+/// beyond `lib`/`rlib` — a `cdylib`/`dylib` shared object or a `staticlib` archive, named for the
+/// target (`lib<crate><extra>.so` on Linux, `.dylib` on Apple, `<crate><extra>.dll` on Windows,
+/// `<crate><extra>.wasm` on wasm32). T2 only ever required the `.rlib`, so a hit restored the rlib
+/// and never the `.so`: cargo found its output missing (`FailedToReadMetadata { …/libif_watch-
+/// <hash>.so }`) and marked the unit dirty on EVERY build. if-watch declares
+/// `crate-type = ["cdylib", "lib"]` and sits under libp2p-tcp, so each sigil "no-op" rebuilt
+/// if-watch → libp2p → flux-p2p → sigil-api → sigil-node → sigil-top (measured 2026-10-08:
+/// 46–64 s and 61–236 s CPU for a build with nothing changed). Proc-macros need no entry here:
+/// they never produce an `.rlib`, so T2 already makes them a miss.
+fn extra_link_artifacts(args: &[String]) -> Vec<String> {
+    let mut emit = String::new();
+    let mut types: Vec<String> = Vec::new();
+    let mut target = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let next = args.get(i + 1);
+        if a == "--emit" { if let Some(v) = next { emit = v.clone(); } }
+        else if let Some(v) = a.strip_prefix("--emit=") { emit = v.to_string(); }
+        else if a == "--crate-type" { if let Some(v) = next { types.push(v.clone()); } }
+        else if let Some(v) = a.strip_prefix("--crate-type=") { types.push(v.to_string()); }
+        else if a == "--target" { if let Some(v) = next { target = v.clone(); } }
+        else if let Some(v) = a.strip_prefix("--target=") { target = v.to_string(); }
+        i += 1;
+    }
+    if !emit.split(',').any(|p| p.split('=').next() == Some("link")) { return Vec::new(); }
+    let cn = find_crate_name(args);
+    if cn.is_empty() { return Vec::new(); }
+    let stem = format!("{}{}", cn, find_extra_filename(args));
+    let windows = target.contains("windows");
+    let msvc = windows && target.contains("msvc");
+    let mut out = Vec::new();
+    for t in types.iter().flat_map(|t| t.split(',')) {
+        let name = match t {
+            "cdylib" | "dylib" if target.starts_with("wasm32") => format!("{stem}.wasm"),
+            "cdylib" | "dylib" if windows => format!("{stem}.dll"),
+            "cdylib" | "dylib" if target.contains("apple") => format!("lib{stem}.dylib"),
+            "cdylib" | "dylib" => format!("lib{stem}.so"),
+            "staticlib" if msvc => format!("{stem}.lib"),
+            "staticlib" => format!("lib{stem}.a"),
+            _ => continue,
+        };
+        if !out.contains(&name) { out.push(name); }
+    }
+    out
+}
+
 /// Cache T2b: the `-C extra-filename=<suffix>` (e.g. "-361b6c44…") that determines this crate's output
 /// filename `lib<crate><suffix>.<ext>`. Cargo passes it as `-C extra-filename=…` or `-Cextra-filename=…`.
 fn find_extra_filename(args: &[String]) -> String {
@@ -352,6 +400,23 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
                     }
                 }
             }
+            // Cache T4: the shared object / static archive a cdylib|dylib|staticlib unit also
+            // wrote, plus a Windows import library beside a .dll when rustc made one. Keyed
+            // `x:<file name>` so apply can demand exactly the files this invocation expects.
+            if !outputs.is_empty() {
+                let mut extras = extra_link_artifacts(&raw_args);
+                for dll in extras.clone().iter().filter(|n| n.ends_with(".dll")) {
+                    extras.push(format!("{dll}.lib"));
+                    extras.push(format!("lib{dll}.a"));
+                }
+                for fname in extras {
+                    if out_dir_path.join(&fname).exists() {
+                        if let Some(stored) = copy_output_to_blob(&out_dir_path, &blob_dir, &fname) {
+                            outputs.insert(format!("x:{fname}"), stored);
+                        }
+                    }
+                }
+            }
             // Cache T3-fix: ALSO capture the dep-info (.d) rustc just wrote. Without it a later
             // cache HIT skips rustc, cargo never gets dep-info to encode into .fingerprint/
             // dep-lib-*, and the unit is dirty on every subsequent build forever. Restore is
@@ -426,6 +491,10 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     for ext in required_exts(rustc_args) {
         if !entry.outputs.contains_key(ext) { return false; }
     }
+    // Cache T4 gate: a cdylib/dylib/staticlib link pass also needs its .so/.dll/.a. An entry
+    // stored before T4 carries only the rlib — MISS once, and real rustc re-stores it complete.
+    let extras = extra_link_artifacts(rustc_args);
+    if extras.iter().any(|n| !entry.outputs.contains_key(&format!("x:{n}"))) { return false; }
     // Cache T3-fix gate: when this invocation emits dep-info (every real cargo unit does), a hit
     // MUST also restore a .d — a restore without one leaves the fingerprint permanently incomplete
     // (dep-lib-* never written -> unit dirty on every future build; the sigil 216s "no-op" bug).
@@ -494,6 +563,7 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
             }
         }
     }
+    if extras.iter().any(|n| !out_dir_path.join(n).exists()) { return false; }
     // Cache T3-fix: materialize the dep-info LAST, once the hit is otherwise definitive, so cargo
     // can encode a complete fingerprint (dep-lib-*) exactly as if rustc had run. Validation failure
     // (foreign paths, missing sources) is a MISS — real rustc then rewrites everything it touched.
@@ -846,6 +916,69 @@ mod tests {
         assert_eq!(find_extra_filename(&["-C".into(), "extra-filename=-361b6c44".into()]), "-361b6c44");
         assert_eq!(find_extra_filename(&["-Cextra-filename=-cf571322".into()]), "-cf571322");
         assert_eq!(find_extra_filename(&["--crate-name".into(), "demo".into()]), "");
+    }
+
+    #[test]
+    fn t4_extra_link_artifact_names() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        let base = ["--crate-name", "if_watch", "-C", "extra-filename=-0f49", "--emit=dep-info,metadata,link"];
+        let with = |extra: &[&str]| { let mut v = a(&base); v.extend(a(extra)); v };
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--crate-type", "lib"])),
+                   vec!["libif_watch-0f49.so"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "lib"])), Vec::<String>::new());
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "x86_64-pc-windows-gnu"])),
+                   vec!["if_watch-0f49.dll"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type=staticlib", "--target=x86_64-pc-windows-msvc"])),
+                   vec!["if_watch-0f49.lib"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "aarch64-apple-darwin"])),
+                   vec!["libif_watch-0f49.dylib"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "wasm32-unknown-unknown"])),
+                   vec!["if_watch-0f49.wasm"]);
+        // A metadata-only pass of the same unit writes no shared object: nothing extra required.
+        let mut meta = with(&["--crate-type", "cdylib", "--crate-type", "lib"]);
+        meta.retain(|s| !s.starts_with("--emit"));
+        meta.push("--emit=metadata".into());
+        assert!(extra_link_artifacts(&meta).is_empty());
+    }
+
+    /// T4: a cdylib+lib unit (if-watch's shape) round-trips its .so, and an entry stored before T4
+    /// (rlib only) is a MISS instead of a hit that leaves cargo's expected output missing forever.
+    #[test]
+    fn t4_cdylib_roundtrip_and_rlib_only_entry_misses() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("cdylib");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src = workspace.join("lib.rs");
+        fs::write(&src, b"// cdylib").unwrap();
+        fs::write(out_dir.join("libdemo-c4c4.rlib"), b"rl").unwrap();
+        fs::write(out_dir.join("libdemo-c4c4.so"), b"shared object").unwrap();
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--crate-type".into(), "cdylib".into(), "--crate-type".into(), "lib".into(),
+            "--emit=link".into(),
+            "-C".into(), "extra-filename=-c4c4".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src.to_string_lossy().to_string(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src.to_string_lossy()), &args);
+        let entry = collect_outputs(&args, &key);
+        assert!(entry.outputs.contains_key("x:libdemo-c4c4.so"), "collect must store the .so — got {:?}", entry.outputs);
+
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(apply_cached_outputs(&entry, &args), "complete cdylib entry must apply");
+        assert_eq!(fs::read(out_dir.join("libdemo-c4c4.so")).unwrap(), b"shared object");
+        assert!(out_dir.join("libdemo-c4c4.rlib").exists());
+
+        let mut rlib_only = entry.clone();
+        rlib_only.outputs.retain(|k, _| !k.starts_with("x:"));
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(!apply_cached_outputs(&rlib_only, &args),
+            "T4: an rlib-only entry must NOT satisfy a cdylib link pass");
+        fs::remove_dir_all(&workspace).ok();
     }
 
     #[test]

@@ -1752,6 +1752,61 @@ impl Database {
         true
     }
 
+    /// Visit every stored pair in FILE order without building a merged view.
+    ///
+    /// Each SST is streamed front to back ([`SstReader::stream`], O(one block)
+    /// RAM), oldest data first, then the live memtable. [`Self::iter`] instead
+    /// materializes the whole store in a `BTreeMap`, which a multi-GB store
+    /// cannot afford. On spinning disks this is the difference between one
+    /// sequential pass and one seek per key (2026-10-07: 220 random reads/s on
+    /// a 4-disk RAID 0 that streams 800 MB/s).
+    ///
+    /// Raw and UNMERGED: a key may be visited once per level, and a tombstone
+    /// arrives as an EMPTY value. Because older data is visited first, "the
+    /// last visit wins" reproduces the merged view for any key the caller
+    /// tracks. An SST that compaction removed between listing and opening is
+    /// skipped and counted in [`RawScan::vanished`] — its keys moved into a
+    /// newer file that may not be in this pass, so treat a key not seen as
+    /// "not found in this pass", never as "absent". `f` steers the pass with
+    /// [`RawStep`]: `NextFile` skips the rest of the current SST (keys within
+    /// one file are sorted, so a caller after one key range can leave each
+    /// file early), `Stop` ends it.
+    pub fn for_each_raw<F: FnMut(&[u8], &[u8]) -> RawStep>(&self, mut f: F) -> Result<RawScan, String> {
+        let mut scan = RawScan::default();
+        for path in self.cached_sst_paths()? {
+            // A fresh reader, not `sst_cached`: one pass must not fill the
+            // reader cache with every file of the store.
+            let reader = match SstReader::open(&path) {
+                Ok(r) => r,
+                Err(e) if e.starts_with("VANISHED") => {
+                    scan.vanished += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let mut stream = reader.stream()?;
+            scan.files += 1;
+            while let Some((k, v)) = stream.next_pair()? {
+                scan.pairs += 1;
+                match f(&k, &v) {
+                    RawStep::Continue => {}
+                    RawStep::NextFile => break,
+                    RawStep::Stop => return Ok(scan),
+                }
+            }
+        }
+        // Copy the memtable out first: `f` must never run under the DB lock.
+        let mem: Vec<(Vec<u8>, Vec<u8>)> =
+            self.inner.read().memtable.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, v) in &mem {
+            scan.pairs += 1;
+            if f(k, v) != RawStep::Continue {
+                break;
+            }
+        }
+        Ok(scan)
+    }
+
     /// Streaming iterator across everything visible: the live memtable plus
     /// all SSTs, with tombstones applied. Returns an owning iterator so the
     /// DB lock is held only during construction.
@@ -1922,6 +1977,28 @@ impl Database {
 
 /// Streaming key/value iterator. Holds an owned BTreeMap iterator so the
 /// caller doesn't have to hold the DB lock.
+/// How a [`Database::for_each_raw`] callback steers the pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawStep {
+    /// Keep going.
+    Continue,
+    /// Skip the rest of the current SST (or the memtable).
+    NextFile,
+    /// End the pass.
+    Stop,
+}
+
+/// What one [`Database::for_each_raw`] pass covered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawScan {
+    /// SST files streamed.
+    pub files: u64,
+    /// SST files removed by compaction before they could be opened (skipped).
+    pub vanished: u64,
+    /// Pairs passed to the callback (SSTs + memtable, duplicates included).
+    pub pairs: u64,
+}
+
 pub struct DbIterator {
     inner: std::collections::btree_map::IntoIter<Vec<u8>, Vec<u8>>,
     /// When `true`, `.next()` walks the underlying ordered view in
@@ -3308,6 +3385,63 @@ impl BloomFilter {
 
 #[cfg(test)]
 mod tests {
+
+    /// `for_each_raw` replayed with "last visit wins" must equal the merged
+    /// view `iter()` builds — across several flushed SSTs, overwrites, deletes
+    /// and keys still in the memtable. Pins the contract callers rely on.
+    #[test]
+    fn for_each_raw_last_visit_wins_equals_merged_view() {
+        let dir = std::env::temp_dir().join(format!("flux_db_raw_scan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = super::Database::open(&dir).expect("open");
+        for k in 0..300u32 {
+            db.put(&k.to_be_bytes(), format!("v1-{k}").as_bytes()).unwrap();
+        }
+        db.flush().unwrap();
+        for k in (0..300u32).step_by(3) {
+            db.put(&k.to_be_bytes(), format!("v2-{k}").as_bytes()).unwrap();
+        }
+        for k in (1..300u32).step_by(7) {
+            db.delete(&k.to_be_bytes()).unwrap();
+        }
+        db.flush().unwrap();
+        // left in the memtable: one overwrite, one delete, one new key
+        db.put(&0u32.to_be_bytes(), b"v3-0").unwrap();
+        db.delete(&2u32.to_be_bytes()).unwrap();
+        db.put(&999u32.to_be_bytes(), b"new").unwrap();
+
+        let mut replay = std::collections::BTreeMap::new();
+        let scan = db
+            .for_each_raw(|k, v| {
+                if v.is_empty() {
+                    replay.remove(k);
+                } else {
+                    replay.insert(k.to_vec(), v.to_vec());
+                }
+                super::RawStep::Continue
+            })
+            .expect("scan");
+        let merged: std::collections::BTreeMap<_, _> = db.iter().collect();
+        assert_eq!(replay, merged);
+        assert!(scan.files >= 2, "both flushed SSTs streamed: {scan:?}");
+        assert_eq!(scan.vanished, 0);
+        assert!(scan.pairs as usize > merged.len(), "raw pass sees duplicates the merge removes");
+
+        // early stop
+        let mut seen = 0;
+        let s = db
+            .for_each_raw(|_, _| {
+                seen += 1;
+                if seen < 5 { super::RawStep::Continue } else { super::RawStep::Stop }
+            })
+            .unwrap();
+        assert_eq!((seen, s.pairs), (5, 5));
+        // NextFile: only the first key of every SST (+ the memtable's first)
+        let mut firsts = 0;
+        let s = db.for_each_raw(|_, _| { firsts += 1; super::RawStep::NextFile }).unwrap();
+        assert_eq!(firsts as u64, s.files + 1, "one key per SST plus one from the memtable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Storage diagnostics must never be able to corrupt a host's display.
     ///

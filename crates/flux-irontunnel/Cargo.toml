@@ -31,6 +31,11 @@ libc = "0.2"
 sysinfo = "0.30"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# IronTunnel v1 secure channel (Noise IK) — audited crates, nothing hand-rolled
+snow = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
+hex = "0.4"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 warp = { version = "0.3", optional = true }
@@ -48,6 +53,21 @@ required-features = ["cli"]
 [[bin]]
 name = "irontunnel-client"
 path = "src/bin/irontunnel-client.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-keygen"
+path = "src/bin/irontunnel-keygen.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-relay"
+path = "src/bin/irontunnel-relay.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-socks"
+path = "src/bin/irontunnel-socks.rs"
 required-features = ["cli"]
 
 # The Slint desktop client. Ported from upstream src/bin/gui_fixed_auth.rs — the source

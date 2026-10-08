@@ -74,12 +74,48 @@ no live IronTunnel server anywhere today.
 `default = []` is the light core (tokio, serde, rand, libc, sysinfo, uuid, chrono) — what an
 app like ZenTorrent links. `api`, `server-api`, `gui`, `cli` add reqwest, warp, slint, clap.
 
-## What it would take to be a real VPN (not started — needs an operator decision)
+## IronTunnel v1 — the encrypted tunnel (added 2026-10-08, same day)
 
-1. A real handshake: x25519 key exchange, server identity signed with ed25519, ChaCha20-Poly1305
-   per-direction keys (salvage `src/orphan/crypto`, rewrite for dalek 2 / chacha20poly1305 0.10).
-2. A data path, either
-   - **SOCKS5 over the encrypted tunnel** (no admin rights; what ZenTorrent needs: librqbit
-     already takes `connect.proxy_url`). Caveat: UDP (DHT, uTP, UDP trackers) does not ride a
-     SOCKS5 CONNECT tunnel, so it must be disabled or it leaks; or
-   - **full TUN** (Linux `tun` crate + Windows wintun), routes and a real kill switch — much more work.
+New modules: `secure` (Noise `IK_25519_ChaChaPoly_BLAKE2s` via `snow`), `socks5`, `relay`,
+`proxy`; bins `irontunnel-keygen`, `irontunnel-relay`, `irontunnel-socks`. The v0.0.2 server,
+GUI and handshake above are untouched and still pretend.
+
+How it works:
+- The client pins the relay's x25519 public key; the relay only answers client keys on its
+  allowlist (`--authorized` file). An unknown key gets silence, so the relay is not an open proxy.
+- Each SOCKS5 CONNECT = its own TCP connection + Noise handshake to the relay, then encrypted
+  frames (≤16 KiB plaintext + 16-byte tag). Empty frame = half-close.
+- Domain names travel to the relay unresolved; the relay resolves them.
+- Egress guard: the relay resolves, filters, then dials the address it checked. Loopback,
+  RFC1918, link-local, CGNAT, ULA, NAT64/6to4-embedded private, port 25 and port 0 are refused.
+
+Measured (2026-10-08, Epsilon, relay + proxy on loopback, dev build):
+- `fluxc test -p flux-irontunnel --features cli`: **50 passed, 0 failed** (2 ignored: the
+  host-iptables server test and one doc example).
+- Real wire capture on the tunnel port during `curl http://example.com` through the proxy:
+  `GET /`, `example.com`, `Example Domain` → **0 occurrences**. Control on the relay's egress
+  leg (plain HTTP, should be visible): 1 each. Page arrived intact (HTTP 200, 577 B).
+- 50 MB from speed.cloudflare.com, 3 runs: direct 57 / 59 / 71 MB/s, tunnel 72 / 54 / 57 MB/s.
+  No measurable cost — but the relay was on the SAME host, so this measures crypto+proxy
+  overhead only, not a remote relay path.
+- Egress guard, live: `127.0.0.1:8080` (Quillon), `127.0.0.1:18181` (SIGIL), `localhost:8080`,
+  `169.254.169.254` → all refused with SOCKS code 0x02; the relay never connected.
+
+Still pretend / not done:
+- No relay is deployed anywhere. Where it runs (and that it is reachable from the internet) is
+  an operator decision.
+- UDP is not tunnelled (SOCKS5 UDP ASSOCIATE is refused on purpose).
+- No rekeying and no idle timeout on long-lived connections (nonces are u64; no exhaustion risk).
+- Relay timing/size metadata is visible to an observer (one TCP connection per proxied stream).
+
+### ZenTorrent / librqbit 9 integration notes (leaks to close)
+librqbit takes `SessionOptions.connect.proxy_url = "socks5://127.0.0.1:PORT"` (only the
+`socks5` scheme parses). With the proxy set, TCP peer connections and HTTP(S) trackers go
+through the tunnel. These do NOT, and must be turned off while tunnelled:
+1. DHT (UDP) → `dht: None` / disabled.
+2. UDP trackers (`udp://` announce URLs) → librqbit always builds a UDP tracker client; strip
+   `udp://` trackers from torrents/magnets on the ZenTorrent side.
+3. Incoming listener (TCP/uTP) + UPnP → `listen: None`; incoming peers would reach the real IP.
+4. LSD multicast → `disable_local_service_discovery = true`.
+5. Residual: reqwest with a `socks5://` proxy resolves tracker HOSTNAMES locally, so the local
+   resolver sees which tracker domains are contacted (the traffic itself is tunnelled).

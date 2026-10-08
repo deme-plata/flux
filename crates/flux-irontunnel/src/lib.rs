@@ -44,3 +44,9 @@ pub mod ip_pool;
 
 // flux port: the one shared client handshake (CLI, GUI, ZenTorrent)
 pub mod handshake;
+
+// IronTunnel v1: Noise IK secure channel, local SOCKS5 proxy, relay with egress guard
+pub mod secure;
+pub mod socks5;
+pub mod relay;
+pub mod proxy;

@@ -44,9 +44,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = RelayConfig::new(args.listen, key, authorized);
     cfg.egress.allow_private = args.allow_private;
     cfg.egress.deny_ports.extend(args.deny_ports);
-    let n_auth = cfg.authorized.len();
+    let n_auth = cfg.authorized.read().map(|a| a.len()).unwrap_or(0);
+    let authorized = cfg.authorized.clone();
     let relay = start_relay(cfg).await?;
     println!("listening {}  authorized clients {}  allow_private {}", relay.local_addr, n_auth, args.allow_private);
+    // Re-read the authorized file when it changes: adding or revoking a client key
+    // needs no restart and drops no open tunnel. A file that fails to parse (or is
+    // empty) is reported and ignored — the previous set stays in force.
+    let path = args.authorized.clone();
+    tokio::spawn(async move {
+        let mut seen = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse_authorized(&t).map_err(|e| e.to_string())) {
+                Ok(set) if !set.is_empty() => {
+                    let n = set.len();
+                    *authorized.write().unwrap() = set;
+                    println!("authorized file reloaded: {n} client key(s)");
+                }
+                Ok(_) => eprintln!("authorized file is now empty — keeping the previous {} key(s)", authorized.read().unwrap().len()),
+                Err(e) => eprintln!("authorized file unreadable ({e}) — keeping the previous keys"),
+            }
+        }
+    });
     let st = relay.stats.clone();
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;

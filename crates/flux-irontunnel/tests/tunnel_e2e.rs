@@ -29,6 +29,7 @@ async fn echo_server() -> SocketAddr {
 
 struct Rig {
     relay: RelayHandle,
+    relay_authorized: std::sync::Arc<std::sync::RwLock<HashSet<flux_irontunnel::secure::PublicKey>>>,
     cfg: ProxyConfig,
 }
 
@@ -42,9 +43,10 @@ async fn rig(allow_private: bool, authorize_client: bool) -> Rig {
     }
     let mut rc = RelayConfig::new("127.0.0.1:0".parse().unwrap(), relay_key, authorized);
     rc.egress.allow_private = allow_private;
+    let relay_authorized = rc.authorized.clone();
     let relay = start_relay(rc).await.unwrap();
     let cfg = ProxyConfig::new(relay.local_addr.to_string(), client_key, relay_pub);
-    Rig { relay, cfg }
+    Rig { relay, relay_authorized, cfg }
 }
 
 /// Minimal SOCKS5 client: returns the stream and the server's reply code.
@@ -138,4 +140,15 @@ async fn proxy_will_not_listen_beyond_loopback() {
     let mut cfg = r.cfg.clone();
     cfg.listen = "0.0.0.0:0".parse().unwrap();
     assert!(start_proxy(cfg).await.is_err());
+}
+
+#[tokio::test]
+async fn a_client_can_be_authorized_and_revoked_while_the_relay_runs() {
+    let r = rig(false, false).await;
+    assert!(probe(&r.cfg).await.is_err(), "not on the list yet");
+    let me = *r.cfg.client_key.public();
+    r.relay_authorized.write().unwrap().insert(me);
+    assert!(probe(&r.cfg).await.is_ok(), "added without a restart");
+    r.relay_authorized.write().unwrap().remove(&me);
+    assert!(probe(&r.cfg).await.is_err(), "revoked without a restart");
 }

@@ -1,0 +1,821 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit, ComboBox, CheckBox, ScrollView, ListView, TabWidget, ProgressIndicator, GroupBox, StandardButton, TextEdit, Slider } from "std-widgets.slint";
+
+export struct ServerInfo {
+    id: string,
+    name: string,
+    country: string,
+    city: string,
+    load: int,
+    ping: int,
+}
+
+export struct ConnectionStats {
+    download_speed: string,
+    upload_speed: string,
+    ping: string,
+    data_transferred: string,
+    connection_time: string,
+}
+
+// Custom awesome button component
+component AwesomeButton inherits Rectangle {
+    in property <string> text;
+    in property <color> bg-color: #00d4ff;
+    in property <color> hover-color: #00b8e6;
+    in property <bool> enabled: true;
+    callback clicked;
+    
+    background: ta.pressed ? hover-color.darker(20%) : ta.has-hover ? hover-color : bg-color;
+    border-radius: 12px;
+    height: 50px;
+    
+    animate background { duration: 200ms; easing: ease-in-out; }
+    
+    TouchArea {
+        ta := TouchArea {
+            clicked => { if (parent.enabled) { parent.clicked(); } }
+        }
+    }
+    
+    Text {
+        text: parent.text;
+        color: white;
+        font-size: 16px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    
+    // Glow effect
+    Rectangle {
+        background: @radial-gradient(circle, rgba(0, 212, 255, 0.3) 0%, transparent 70%);
+        border-radius: 12px;
+        opacity: ta.has-hover ? 1 : 0;
+        animate opacity { duration: 300ms; }
+    }
+}
+
+// Status indicator component
+component StatusIndicator inherits Rectangle {
+    in property <bool> active: false;
+    in property <string> label;
+    
+    width: 120px;
+    height: 40px;
+    background: active ? #00ff88 : #ff4757;
+    border-radius: 20px;
+    
+    animate background { duration: 300ms; }
+    
+    HorizontalBox {
+        alignment: center;
+        
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            background: white;
+            border-radius: 6px;
+            
+            animate background { duration: 500ms; }
+        }
+        
+        Text {
+            text: label;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Cyber-style card component
+component CyberCard inherits Rectangle {
+    in property <string> title;
+    in property <string> value;
+    in property <color> accent-color: #00d4ff;
+    
+    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+    border-radius: 16px;
+    border-width: 2px;
+    border-color: accent-color;
+    
+    VerticalBox {
+        padding: 16px;
+        alignment: center;
+        
+        Text {
+            text: title;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 500;
+            horizontal-alignment: center;
+        }
+        
+        Text {
+            text: value;
+            color: accent-color;
+            font-size: 20px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+    }
+    
+    // Animated border glow
+    Rectangle {
+        border-width: 1px;
+        border-color: @linear-gradient(45deg, transparent 0%, accent-color 50%, transparent 100%);
+        border-radius: 16px;
+        opacity: 0.6;
+        
+        animate border-color { duration: 2s; easing: ease-in-out; }
+    }
+}
+
+export component MainWindow inherits Window {
+    width: 1200px;
+    height: 800px;
+    title: "IronTunnel VPN - Zero-Knowledge Secure Connection";
+    
+    in property <bool> is-connected: false;
+    in property <string> connection-status: "Disconnected";
+    in property <[ServerInfo]> servers: [];
+    in property <ConnectionStats> stats: {
+        download_speed: "0 MB/s",
+        upload_speed: "0 MB/s", 
+        ping: "0 ms",
+        data_transferred: "0 MB",
+        connection_time: "00:00:00"
+    };
+    in property <int> selected-server-index: 0;
+    in property <bool> kill-switch-enabled: true;
+    in property <bool> dns-protection-enabled: true;
+    in property <bool> wireguard-enabled: true;
+    in property <bool> multihop-enabled: false;
+    in property <bool> split-tunnel-enabled: false;
+    in property <string> zk-identity-count: "0";
+    in property <string> crypto-session-keys: "0";
+    in property <string> server-info: "No server selected";
+    in property <bool> api-available: false;
+
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback server-selected(int);
+    callback kill-switch-toggled(bool);
+    callback dns-protection-toggled(bool);
+    callback wireguard-toggled(bool);
+    callback multihop-toggled(bool);
+    callback split-tunnel-toggled(bool);
+    callback generate-zk-identity();
+    callback rotate-crypto-keys();
+    callback refresh-servers();
+
+    background: @linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+
+    // Main container
+    VerticalBox {
+        padding: 24px;
+        spacing: 20px;
+
+        // Epic Header with animated elements
+        Rectangle {
+            height: 80px;
+            background: @linear-gradient(90deg, #1e40af 0%, #3b82f6 25%, #06b6d4 50%, #8b5cf6 75%, #ec4899 100%);
+            border-radius: 16px;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: rgba(59, 130, 246, 0.3);
+            
+            // Animated background overlay
+            Rectangle {
+                background: @linear-gradient(45deg, transparent 0%, rgba(255,255,255,0.1) 50%, transparent 100%);
+                border-radius: 16px;
+                
+                animate background { duration: 3s; easing: ease-in-out; }
+            }
+            
+            HorizontalBox {
+                padding: 20px;
+                alignment: space-between;
+                
+                HorizontalBox {
+                    alignment: start;
+                    spacing: 16px;
+                    
+                    Text {
+                        text: "⚡";
+                        font-size: 32px;
+                        color: #fbbf24;
+                        
+                        animate color { duration: 1s; easing: ease-in-out; }
+                    }
+                    
+                    VerticalBox {
+                        Text {
+                            text: "IronTunnel VPN";
+                            font-size: 28px;
+                            font-weight: 800;
+                            color: white;
+                        }
+                        
+                        Text {
+                            text: "⚡ Zero-Knowledge • 🛡️ STARK Proofs • 🔒 ChaCha20-Poly1305";
+                            font-size: 14px;
+                            color: #e2e8f0;
+                            font-weight: 500;
+                        }
+                    }
+                }
+                
+                StatusIndicator {
+                    active: is-connected;
+                    label: connection-status;
+                }
+            }
+        }
+
+        // Main content area
+        ScrollView {
+            HorizontalBox {
+                spacing: 24px;
+            
+            // Left Panel - Connection Control
+            VerticalBox {
+                width: 400px;
+                spacing: 20px;
+                
+                // Connection Panel
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: is-connected ? #00ff88 : #64748b;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: is-connected ? rgba(0, 255, 136, 0.2) : rgba(100, 116, 139, 0.1);
+                    
+                    VerticalBox {
+                        padding: 24px;
+                        spacing: 20px;
+                        
+                        Text {
+                            text: "🚀 CONNECTION CONTROL";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        // Epic Connect Button
+                        Rectangle {
+                            height: 80px;
+                            background: is-connected ? 
+                                @radial-gradient(circle, #ef4444 0%, #dc2626 100%) :
+                                @radial-gradient(circle, #00ff88 0%, #00d974 100%);
+                            border-radius: 40px;
+                            drop-shadow-blur: 20px;
+                            drop-shadow-color: is-connected ? rgba(239, 68, 68, 0.5) : rgba(0, 255, 136, 0.5);
+                            
+                            TouchArea {
+                                clicked => {
+                                    if (is-connected) {
+                                        disconnect-clicked();
+                                    } else {
+                                        connect-clicked();
+                                    }
+                                }
+                            }
+                            
+                            HorizontalBox {
+                                alignment: center;
+                                spacing: 12px;
+                                
+                                Text {
+                                    text: is-connected ? "🔴" : "🟢";
+                                    font-size: 24px;
+                                }
+                                
+                                VerticalBox {
+                                    Text {
+                                        text: is-connected ? "DISCONNECT" : "CONNECT";
+                                        color: white;
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                    }
+                                    
+                                    Text {
+                                        text: is-connected ? "🔒 Secure tunnel active" : "⚡ Click to secure";
+                                        color: rgba(255, 255, 255, 0.8);
+                                        font-size: 12px;
+                                    }
+                                }
+                            }
+                            
+                            // Pulse animation when connected
+                            if is-connected: Rectangle {
+                                background: @radial-gradient(circle, rgba(255,255,255,0.3) 0%, transparent 70%);
+                                border-radius: 40px;
+                                
+                                animate background { duration: 2s; easing: ease-in-out; }
+                            }
+                        }
+                        
+                        // Server Info
+                        Rectangle {
+                            height: 50px;
+                            background: @linear-gradient(90deg, #475569 0%, #64748b 100%);
+                            border-radius: 12px;
+                            
+                            HorizontalBox {
+                                padding: 12px;
+                                alignment: space-between;
+                                
+                                Text {
+                                    text: "🌐 Server:";
+                                    color: #cbd5e1;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                }
+                                
+                                Text {
+                                    text: server-info;
+                                    color: #00d4ff;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Security Features Panel
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: #8b5cf6;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: rgba(139, 92, 246, 0.2);
+                    
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 16px;
+                        
+                        Text {
+                            text: "🛡️ SECURITY ARSENAL";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        // Feature toggles with awesome styling
+                        HorizontalBox {
+                            CheckBox {
+                                text: "🚫 Kill Switch";
+                                checked: kill-switch-enabled;
+                                toggled => { kill-switch-toggled(self.checked); }
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            CheckBox {
+                                text: "🛡️ DNS Protection";
+                                checked: dns-protection-enabled;
+                                toggled => { dns-protection-toggled(self.checked); }
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            CheckBox {
+                                text: "⚡ WireGuard Protocol";
+                                checked: wireguard-enabled;
+                                toggled => { wireguard-toggled(self.checked); }
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            CheckBox {
+                                text: "🔄 Multi-Hop VPN";
+                                checked: multihop-enabled;
+                                toggled => { multihop-toggled(self.checked); }
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            CheckBox {
+                                text: "🎯 Split Tunneling";
+                                checked: split-tunnel-enabled;
+                                toggled => { split-tunnel-toggled(self.checked); }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Right Panel - Stats & Crypto
+            VerticalBox {
+                spacing: 20px;
+                
+                // Connection Stats Dashboard
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: #06b6d4;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: rgba(6, 182, 212, 0.2);
+                    
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 16px;
+                        
+                        Text {
+                            text: "📊 REALTIME ANALYTICS";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        // Stats grid
+                        HorizontalBox {
+                            spacing: 16px;
+                            
+                            CyberCard {
+                                title: "⬇️ DOWNLOAD";
+                                value: stats.download-speed;
+                                accent-color: #00ff88;
+                            }
+                            
+                            CyberCard {
+                                title: "⬆️ UPLOAD";
+                                value: stats.upload-speed;
+                                accent-color: #3b82f6;
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 16px;
+                            
+                            CyberCard {
+                                title: "⚡ PING";
+                                value: stats.ping;
+                                accent-color: #fbbf24;
+                            }
+                            
+                            CyberCard {
+                                title: "⏱️ TIME";
+                                value: stats.connection-time;
+                                accent-color: #34d399;
+                            }
+                        }
+                        
+                        CyberCard {
+                            title: "💾 DATA TRANSFERRED";
+                            value: stats.data-transferred;
+                            accent-color: #ec4899;
+                        }
+                    }
+                }
+                
+                // Zero-Knowledge Crypto Panel
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: #ec4899;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: rgba(236, 72, 153, 0.2);
+                    
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 16px;
+                        
+                        Text {
+                            text: "🔮 ZERO-KNOWLEDGE CRYPTOGRAPHY";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 12px;
+                            alignment: space-between;
+                            
+                            Text {
+                                text: "🆔 ZK Identities:";
+                                color: #e2e8f0;
+                                font-size: 14px;
+                            }
+                            
+                            Text {
+                                text: zk-identity-count;
+                                color: #00ff88;
+                                font-size: 14px;
+                                font-weight: 700;
+                            }
+                            
+                            AwesomeButton {
+                                text: "Generate";
+                                bg-color: #8b5cf6;
+                                hover-color: #7c3aed;
+                                width: 80px;
+                                height: 30px;
+                                clicked => { generate-zk-identity(); }
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 12px;
+                            alignment: space-between;
+                            
+                            Text {
+                                text: "🔑 Session Keys:";
+                                color: #e2e8f0;
+                                font-size: 14px;
+                            }
+                            
+                            Text {
+                                text: crypto-session-keys;
+                                color: #3b82f6;
+                                font-size: 14px;
+                                font-weight: 700;
+                            }
+                            
+                            AwesomeButton {
+                                text: "Rotate";
+                                bg-color: #ec4899;
+                                hover-color: #db2777;
+                                width: 80px;
+                                height: 30px;
+                                clicked => { rotate-crypto-keys(); }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: rgba(139, 92, 246, 0.1);
+                            border-radius: 12px;
+                            
+                            Text {
+                                text: "🔐 Military-grade STARK proofs ensure your identity remains quantum-proof and completely untraceable.";
+                                color: #c7d2fe;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                                padding: 12px;
+                            }
+                        }
+                    }
+                }
+                
+                // Enhanced System Status Panel
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: #fbbf24;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: rgba(251, 191, 36, 0.2);
+                    
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 12px;
+                        
+                        Text {
+                            text: "⚙️ SYSTEM STATUS";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        // Version and Build Info
+                        VerticalBox {
+                            spacing: 4px;
+                            
+                            Text {
+                                text: "IronTunnel VPN v0.0.2-alpha";
+                                color: #fbbf24;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            
+                            Text {
+                                text: "Rust Implementation with Slint GUI";
+                                color: #cbd5e1;
+                                font-size: 11px;
+                                font-weight: 500;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        
+                        // Feature Status Grid
+                        VerticalBox {
+                            spacing: 6px;
+                            
+                            HorizontalBox {
+                                spacing: 12px;
+                                alignment: center;
+                                
+                                Text { text: "✅ STARK Proofs"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                                Text { text: "✅ ChaCha20-Poly1305"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 12px;
+                                alignment: center;
+                                
+                                Text { text: "✅ WireGuard"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                                Text { text: "✅ DNS Protection"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 12px;
+                                alignment: center;
+                                
+                                Text { text: "✅ Kill Switch"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                                Text { text: "✅ Split Tunneling"; color: #00ff88; font-size: 11px; font-weight: 600; }
+                            }
+                        }
+                        
+                        // Server Status
+                        Rectangle {
+                            background: rgba(251, 191, 36, 0.1);
+                            border-radius: 10px;
+                            
+                            VerticalBox {
+                                padding: 8px;
+                                spacing: 4px;
+                                
+                                Text {
+                                    text: "🌐 SERVER STATUS";
+                                    color: #fbbf24;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                }
+                                
+                                Text {
+                                    text: server-info;
+                                    color: #e2e8f0;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                    horizontal-alignment: center;
+                                }
+                                
+                                Text {
+                                    text: api-available ? "✅ API Connected" : "⚠️ API Offline (Fallback Mode)";
+                                    color: api-available ? #00ff88 : #fbbf24;
+                                    font-size: 9px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Settings Panel
+                Rectangle {
+                    background: @linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    border-radius: 20px;
+                    border-width: 2px;
+                    border-color: #a78bfa;
+                    drop-shadow-blur: 15px;
+                    drop-shadow-color: rgba(167, 139, 250, 0.2);
+                    
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 12px;
+                        
+                        Text {
+                            text: "⚙️ QUICK SETTINGS";
+                            color: #f1f5f9;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        
+                        // Settings Grid
+                        VerticalBox {
+                            spacing: 8px;
+                            
+                            HorizontalBox {
+                                spacing: 8px;
+                                
+                                Text {
+                                    text: "🔄 Auto-Connect:";
+                                    color: #e2e8f0;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                }
+                                
+                                Text {
+                                    text: "OFF";
+                                    color: #ef4444;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 8px;
+                                
+                                Text {
+                                    text: "📈 Auto-Reconnect:";
+                                    color: #e2e8f0;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                }
+                                
+                                Text {
+                                    text: "ON";
+                                    color: #00ff88;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 8px;
+                                
+                                Text {
+                                    text: "🔐 Protocol:";
+                                    color: #e2e8f0;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                }
+                                
+                                Text {
+                                    text: "IronTunnel + WireGuard";
+                                    color: #00d4ff;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 8px;
+                                
+                                Text {
+                                    text: "🌐 Server Location:";
+                                    color: #e2e8f0;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                }
+                                
+                                Text {
+                                    text: "Auto-Select";
+                                    color: #34d399;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: rgba(167, 139, 250, 0.1);
+                            border-radius: 8px;
+                            
+                            Text {
+                                text: "⚡ All security features active and monitoring";
+                                color: #c7d2fe;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                                padding: 8px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+        
+        // Status Bar
+        Rectangle {
+            height: 40px;
+            background: @linear-gradient(90deg, #374151 0%, #4b5563 100%);
+            border-radius: 12px;
+            
+            HorizontalBox {
+                padding: 12px;
+                alignment: space-between;
+                
+                Text {
+                    text: "🛡️ IronTunnel - Military-Grade Zero-Knowledge VPN • No Logs • Quantum-Resistant";
+                    color: #d1d5db;
+                    font-size: 11px;
+                    font-weight: 500;
+                }
+                
+                Text {
+                    text: is-connected ? "🟢 SECURED & PROTECTED" : "🔴 UNPROTECTED";
+                    color: is-connected ? #00ff88 : #ef4444;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+            }
+        }
+    }
+}

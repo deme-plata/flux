@@ -119,3 +119,30 @@ through the tunnel. These do NOT, and must be turned off while tunnelled:
 4. LSD multicast → `disable_local_service_discovery = true`.
 5. Residual: reqwest with a `socks5://` proxy resolves tracker HOSTNAMES locally, so the local
    resolver sees which tracker domains are contacted (the traffic itself is tunnelled).
+
+## The Epsilon relay (deployed 2026-10-08, operator request)
+
+| | |
+|---|---|
+| address | `quillon.xyz:1195` = `89.149.241.126:1195` (TCP) |
+| relay public key | `d7052fc1760cdb98b566e031732b35c2c0257fdfa563d42d090391fa3d592a20` |
+| service | `irontunnel-relay.service` (DynamicUser, no capabilities, ProtectSystem=strict, MemoryMax 512M, CPUQuota 200 %) |
+| binary | `/home/storage/irontunnel/bin/irontunnel-relay` (release build of flux 674547ce) |
+| keys | `/etc/irontunnel/relay.key` (0600 root, passed as a systemd credential), `/etc/irontunnel/authorized` |
+| firewall | `-A INPUT -p tcp --dport 1195 … "IronTunnel relay (ZenTorrent VPN)" -j ACCEPT`, runtime + `/etc/iptables/rules.v4` (backup `rules.v4.bak-pre-irontunnel-20261008`) |
+| ops | `/home/storage/irontunnel/check.sh` (health, real probe over the public address) · `/home/storage/irontunnel/add-client.sh <hex> "<who>"` (hot reload ≤ 5 s; revoke = delete the line) |
+
+Two independent egress guards: the relay's own policy (loopback/private/CGNAT/ULA… refused,
+SOCKS 0x02), and the unit's `IPAddressDeny=localhost link-local multicast 10/8 172.16/12
+192.168/16 100.64/10` in the kernel. Measured: a throwaway relay with its own guard OFF
+(`--allow-private`) under the same IPAddressDeny could not reach 127.0.0.1:8080 (Quillon),
+127.0.0.1:18181 (SIGIL) or 10.77.0.1:18181 (SIGIL mesh) — SOCKS 0x04 — while a public site
+answered HTTP 200 through it.
+
+Measured through the production relay (public address, from Epsilon itself — external
+reachability from another network not yet tested): ZenTorrent `--cli` downloaded the Debian
+13.7 netinst, sha256 = Debian SHA256SUMS; strace of the process: only `89.149.241.126:1195`
+and its own loopback proxy, 0 DNS. Hot reload: a key added with add-client.sh worked within
+5 s, and was refused within 5 s of being deleted, with the service never restarted.
+
+Exit traffic leaves from Epsilon's IP. Only allowlisted keys can use it.

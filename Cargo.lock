@@ -5341,6 +5341,7 @@ name = "fluxc-serve"
 version = "0.41.0"
 dependencies = [
  "blake3",
+ "flate2",
  "flux-swarm-tools",
  "fluxc-analytics",
  "fluxc-util",

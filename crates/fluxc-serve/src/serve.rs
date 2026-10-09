@@ -1050,6 +1050,7 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
     head.push_str("connection: close\r\n");
     head.push_str(&format!("content-length: {}\r\n\r\n", req.body.len()));
     if up.write_all(head.as_bytes()).is_err() || up.write_all(&req.body).is_err() { return true; }
+    let gzip = proxy_gzip_wanted(req);
     let _ = up.flush();
     // Read the upstream head first: a chunked, non-streaming response is DE-CHUNKED here and
     // re-emitted with `content-length` (see `dechunk_response`). Everything else (SSE, an
@@ -1066,7 +1067,7 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
                     head_end = find_head_end(&raw);
                     if let Some(he) = head_end {
                         let head = String::from_utf8_lossy(&raw[..he]).to_string();
-                        if !needs_dechunk(&head) {
+                        if !needs_dechunk(&head) && !(gzip && gzip_candidate(&head)) {
                             // stream mode: forward what we have, then copy the rest as it comes
                             if stream.write_all(&raw).is_err() { return true; }
                             raw.clear();
@@ -1088,12 +1089,125 @@ fn flux_proxy_to<S: Read + Write>(req: &Request, stream: &mut S) -> bool {
         }
     }
     let out = match head_end {
-        Some(he) => dechunk_response(&raw[..he], &raw[he..]).unwrap_or_else(|| raw.clone()),
-        None => raw,
+        Some(he) if needs_dechunk(&String::from_utf8_lossy(&raw[..he])) =>
+            dechunk_response(&raw[..he], &raw[he..]).unwrap_or_else(|| raw.clone()),
+        _ => raw,
     };
+    let out = if gzip { gzip_response(&out).unwrap_or(out) } else { out };
     let _ = stream.write_all(&out);
     let _ = stream.flush();
     true
+}
+
+/// Gzip for big finite replies on chosen routes (2026-10-08) — OFF unless configured.
+///
+/// Why: a sealed shielded-pool generation is ~40 MB of hex JSON; every wallet downloads one
+/// once per rotation, over a phone link. gzip level 1 makes it 21.5 MB for ~1.1 s of CPU
+/// (measured on epoch 0: 40,262,203 → 21,451,273 B).
+///
+/// Why only here, only like this: on 2026-09-15 a COMPRESSED CHUNKED body broke every
+/// HTTP/1.1 client behind q-flux (see [`needs_dechunk`] and [`proxy_forwards_header`]). The
+/// fault was the chunked framing — q-flux's buffered path relays a `content-length` reply
+/// and its `content-encoding` untouched. So this gzips only a COMPLETE, finite reply, and
+/// always re-emits it with an exact `content-length`, never chunked.
+///
+/// * `FLUX_PROXY_GZIP` — comma-separated request-path prefixes (e.g. `/v1/shielded/leaves`).
+///   Unset = never: the wire is byte-identical to before.
+/// * `FLUX_PROXY_GZIP_PROBE=1` — additionally require the request header `x-flux-gzip: 1`,
+///   so a deployment can be tested through the real front hop without changing what any
+///   existing client receives.
+/// * `FLUX_PROXY_GZIP_MIN` — smallest body worth compressing (default 64 KiB).
+///
+/// The client must have asked: `accept-encoding` containing `gzip` (not `gzip;q=0`).
+fn proxy_gzip_wanted(req: &Request) -> bool {
+    let Ok(prefixes) = std::env::var("FLUX_PROXY_GZIP") else { return false };
+    let header = |name: &str| req.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+    let probe = std::env::var("FLUX_PROXY_GZIP_PROBE").map(|v| v == "1").unwrap_or(false);
+    gzip_route_matches(&prefixes, &req.path)
+        && accepts_gzip(header("accept-encoding").unwrap_or(""))
+        && (!probe || header("x-flux-gzip") == Some("1"))
+}
+
+fn gzip_route_matches(prefixes: &str, path: &str) -> bool {
+    prefixes.split(',').map(str::trim).filter(|p| !p.is_empty()).any(|p| path.starts_with(p))
+}
+
+fn accepts_gzip(value: &str) -> bool {
+    value.split(',').any(|tok| {
+        let mut parts = tok.split(';').map(str::trim);
+        let coding = parts.next().unwrap_or("");
+        let q = parts
+            .find_map(|p| p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")).and_then(|v| v.trim().parse::<f32>().ok()))
+            .unwrap_or(1.0);
+        (coding.eq_ignore_ascii_case("gzip") || coding == "*") && q > 0.0
+    })
+}
+
+fn gzip_min() -> usize {
+    std::env::var("FLUX_PROXY_GZIP_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(64 * 1024)
+}
+
+/// Could this upstream head be gzipped? A 200 with a JSON/text body, not already encoded,
+/// not a stream, and (when it says) between the minimum and what the proxy will buffer.
+fn gzip_candidate(head: &str) -> bool {
+    let mut lines = head.lines();
+    if !lines.next().map(|l| l.split_whitespace().nth(1) == Some("200")).unwrap_or(false) { return false; }
+    let mut typed = false;
+    for line in lines {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase());
+        match k.as_str() {
+            "content-encoding" => return false,
+            "content-type" => {
+                if v.starts_with("text/event-stream") { return false; }
+                typed = v.starts_with("application/json") || v.starts_with("text/");
+            }
+            "content-length" => match v.parse::<usize>() {
+                Ok(n) if n >= gzip_min() && n <= PROXY_DECHUNK_MAX => {}
+                _ => return false,
+            },
+            _ => {}
+        }
+    }
+    typed
+}
+
+/// Gzip a complete `content-length` (or de-chunked) response. `None` = send it unchanged:
+/// not a candidate, incomplete, below the minimum, or compression would not shrink it.
+fn gzip_response(resp: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    let he = find_head_end(resp)?;
+    let head = String::from_utf8_lossy(&resp[..he]);
+    if !gzip_candidate(&head) { return None; }
+    let body = &resp[he..];
+    // Only a body that is exactly as long as it says — a truncated upstream is passed on as
+    // it came, never compressed into something that looks whole.
+    let declared = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok()).flatten()
+    })?;
+    if declared != body.len() || body.len() < gzip_min() { return None; }
+    let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 2), flate2::Compression::fast());
+    enc.write_all(body).ok()?;
+    let gz = enc.finish().ok()?;
+    if gz.len() >= body.len() { return None; }
+    let mut out = String::new();
+    for (n, line) in head.lines().enumerate() {
+        if line.is_empty() { continue; }
+        if n > 0 {
+            if let Some((k, _)) = line.split_once(':') {
+                let k = k.trim().to_ascii_lowercase();
+                if k == "content-length" || k == "vary" { continue; }
+            }
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str("content-encoding: gzip\r\nvary: accept-encoding\r\n");
+    out.push_str(&format!("content-length: {}\r\n\r\n", gz.len()));
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&gz);
+    Some(bytes)
 }
 
 /// Largest de-chunked upstream response the proxy will buffer (a full
@@ -1372,6 +1486,54 @@ mod tests {
         assert!(super::dechunk_body(b"{\"ok\":true}").is_none());
         assert!(super::dechunk_body(b"5\r\nab").is_none());
         assert_eq!(super::find_head_end(b"HTTP/1.1 200 OK\r\na: b\r\n\r\nBODY"), Some(25));
+    }
+
+    #[test]
+    fn gzip_negotiation_and_routes() {
+        assert!(super::accepts_gzip("gzip, deflate, br"));
+        assert!(super::accepts_gzip("br;q=1.0, GZIP;q=0.5"));
+        assert!(!super::accepts_gzip("gzip;q=0"));
+        assert!(!super::accepts_gzip("gzip; q=0.000"));
+        assert!(!super::accepts_gzip("identity"));
+        assert!(!super::accepts_gzip(""));
+        assert!(super::gzip_route_matches("/v1/shielded/leaves", "/v1/shielded/leaves?from=0&epoch=0"));
+        assert!(super::gzip_route_matches(" /x , /v1/shielded/leaves", "/v1/shielded/leaves"));
+        assert!(!super::gzip_route_matches("/v1/shielded/leaves", "/v1/shielded/anchor"));
+        assert!(!super::gzip_route_matches("", "/v1/shielded/leaves"));
+    }
+
+    /// A complete JSON reply comes back gzipped with an EXACT content-length (never chunked —
+    /// the 2026-09-15 shape q-flux cannot relay), and decompresses to the original bytes.
+    #[test]
+    fn gzip_response_is_exact_and_roundtrips() {
+        use std::io::Read as _;
+        let body = format!("{{\"leaves\":[{}]}}", (0..4000).map(|i| format!("\"{:064x}\"", i)).collect::<Vec<_>>().join(","));
+        let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nvary: origin\r\n\r\n{}", body.len(), body);
+        let out = super::gzip_response(resp.as_bytes()).expect("compressible");
+        let he = super::find_head_end(&out).unwrap();
+        let head = String::from_utf8_lossy(&out[..he]).to_ascii_lowercase();
+        assert!(head.contains("content-encoding: gzip\r\n"));
+        assert!(!head.contains("transfer-encoding"));
+        assert_eq!(head.matches("content-length:").count(), 1);
+        assert!(head.contains(&format!("content-length: {}\r\n", out.len() - he)));
+        let mut plain = String::new();
+        flate2::read::GzDecoder::new(&out[he..]).read_to_string(&mut plain).unwrap();
+        assert_eq!(plain, body);
+        assert!(out.len() < resp.len() / 2);
+    }
+
+    #[test]
+    fn gzip_leaves_alone_what_it_must_not_touch() {
+        let big = "x".repeat(200_000);
+        let with = |head: &str| format!("{head}\r\n\r\n{big}");
+        // already encoded, an error status, a stream, binary, and a truncated body
+        assert!(super::gzip_response(with(&format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-encoding: br\r\ncontent-length: {}", big.len())).as_bytes()).is_none());
+        assert!(super::gzip_response(with(&format!("HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}", big.len())).as_bytes()).is_none());
+        assert!(super::gzip_response(with("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream").as_bytes()).is_none());
+        assert!(super::gzip_response(with(&format!("HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}", big.len())).as_bytes()).is_none());
+        assert!(super::gzip_response(with(&format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}", big.len() + 1)).as_bytes()).is_none());
+        // and a small reply is not worth it
+        assert!(super::gzip_response(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}").is_none());
     }
 
     #[test]

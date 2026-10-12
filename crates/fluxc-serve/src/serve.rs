@@ -669,12 +669,22 @@ fn rate_ok(ip: &str) -> bool {
 }
 
 // Append one access-log line (FLUX_ACCESS_LOG=/path). Format: epoch ip method status bytes path
+// 2026-10-12: the query string is dropped by default. Wallets put addresses (?addr=, ?wallet=)
+// and note commitments (?cm=) there, so a log that keeps it is a table tying visitors to
+// notes. FLUX_ACCESS_LOG_QUERY=1 keeps it (debugging only).
 fn access_log(ip: &str, method: &str, path: &str, status: u16, bytes: usize) {
     let p = match std::env::var("FLUX_ACCESS_LOG") { Ok(p) => p, Err(_) => return };
+    let keep_query = std::env::var("FLUX_ACCESS_LOG_QUERY").as_deref() == Ok("1");
+    let path = log_path(path, keep_query);
     let line = format!("{} {} {} {} {} {}\n", now_secs(), ip, method, status, bytes, path);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+/// The path as it goes into the access log: without its query string unless asked.
+fn log_path(path: &str, keep_query: bool) -> &str {
+    if keep_query { path } else { path.split('?').next().unwrap_or(path) }
 }
 
 // Spawn a tiny listener on port 80 that 301-redirects everything to https://<host><path>.
@@ -1461,6 +1471,15 @@ fn stream_file_body<S: Write>(stream: &mut S, f: &FileBody) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn access_log_drops_the_query_string_unless_asked() {
+        let p = "/v1/shielded/has?cm=0123456789abcdef0000000000000000000000000000000000000000000000";
+        assert_eq!(super::log_path(p, false), "/v1/shielded/has");
+        assert_eq!(super::log_path("/sigil-wallet-tron-embedded.html?addr=f314", false), "/sigil-wallet-tron-embedded.html");
+        assert_eq!(super::log_path("/v1/supply", false), "/v1/supply");
+        assert_eq!(super::log_path(p, true), p);
+    }
+
     #[test]
     fn chunked_json_is_rewritten_to_content_length_but_sse_is_streamed() {
         let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nvary: accept-encoding\r\n\r\n";

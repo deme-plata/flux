@@ -61,6 +61,7 @@ fn build_registry() -> ToolRegistry {
     handlers::cortex::register(&mut registry);
     handlers::webcam::register(&mut registry);
     handlers::swarm_compile::register(&mut registry);
+    handlers::sigil_bridge::register(&mut registry);
     registry
 }
 

@@ -313,6 +313,7 @@ pub mod crosscompile;
 pub mod sigil_combos;
 pub mod sigil_ops;
 pub mod sigil_wallet;
+pub mod sigil_bridge;
 pub mod sigil_shielded;
 pub mod sigil_court;
 pub mod sigil_kgauge;

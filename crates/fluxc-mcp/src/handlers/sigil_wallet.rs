@@ -312,8 +312,13 @@ fn wallet_create(_a: &Value) -> String {
     rand::rngs::OsRng.fill_bytes(&mut sk_bytes);
     let sk = SigningKey::from_bytes(&sk_bytes);
     let pk_hex = hex::encode(sk.verifying_key().as_bytes());
+    // 2026-10-15: publish the private receiving key at once — a wallet without one cannot be
+    // paid at all (SIGIL has no public transfers). Same signed request as
+    // flux_sigil_shielded_register_from_seed.
+    let registration = publish_receiving_key(&sk_bytes);
     json!({
         "ok": true, "wallet_id": pk_hex, "pubkey": pk_hex, "secret": hex::encode(sk_bytes),
+        "receiving_key": registration,
         "warning": "SECRET grants full control — store it securely; the MCP does not keep it.",
         "next": "flux_sigil_wallet_faucet has no live backend route right now (see its tool description) — fund this wallet another way, then check flux_sigil_wallet_balance"
     }).to_string()
@@ -328,7 +333,26 @@ fn wallet_import(a: &Value) -> String {
     };
     let sk = SigningKey::from_bytes(&sk_bytes);
     let wid = hex::encode(sk.verifying_key().as_bytes());
-    json!({"ok": true, "wallet_id": wid, "pubkey": wid, "note": "derived from secret; ready for balance/send"}).to_string()
+    let registration = publish_receiving_key(&sk_bytes);
+    json!({"ok": true, "wallet_id": wid, "pubkey": wid, "receiving_key": registration,
+           "note": "derived from secret; ready for balance/send"}).to_string()
+}
+
+/// Publish the wallet's private receiving key unless the chain already has it. Returns the
+/// node's answer (or why it was not sent) so the caller sees whether the wallet is payable.
+fn publish_receiving_key(sk_bytes: &[u8; 32]) -> Value {
+    use ed25519_dalek::SigningKey;
+    let wid = hex::encode(SigningKey::from_bytes(sk_bytes).verifying_key().as_bytes());
+    if cfg!(test) {
+        return json!({"published": false, "skipped": "unit test — no network"});
+    }
+    let raw = rpc_get(&format!("/v1/shielded/address?wallet={wid}"));
+    if serde_json::from_str::<Value>(&raw).ok().and_then(|v| v.get("ok").and_then(|o| o.as_bool())) == Some(true) {
+        return json!({"published": true, "already": true});
+    }
+    let raw = super::sigil_shielded::register_from_seed(&json!({"seed": hex::encode(sk_bytes), "broadcast": true}));
+    let v: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({"raw": raw}));
+    json!({"published": v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false), "node": v})
 }
 
 /// The denomination ladder, mirrored from `sigil_state::shielded::DENOMINATIONS`.

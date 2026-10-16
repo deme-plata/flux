@@ -927,7 +927,7 @@ fn shield_from_seed(a: &Value) -> String {
     }
 }
 
-fn register_from_seed(a: &Value) -> String {
+pub(crate) fn register_from_seed(a: &Value) -> String {
     use ed25519_dalek::{Signer, SigningKey};
     let seed = match seed_of(a) {
         Ok(s) => s,

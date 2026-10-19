@@ -228,6 +228,39 @@ fn split_dep_paths(rhs: &str) -> Vec<String> {
     v
 }
 
+/// Cache T5: does every `# env-dep:` line of a stored dep-info hold in this process's env?
+/// rustc writes `# env-dep:NAME=VALUE` for a variable it read set and `# env-dep:NAME` for one
+/// it found unset, escaping `\\`, `\n` and `\r` in VALUE. An unreadable blob is a miss.
+/// `OUT_DIR` is exempt: its value is the producing target dir's own build path by design
+/// (cross-target-dir hits depend on it), and what it points at is a dep file, not a string —
+/// known gap: dep files outside the module tree are checked for existence, not content.
+fn env_deps_match(d_path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(d_path) else { return false };
+    raw.lines().filter_map(|l| l.strip_prefix("# env-dep:")).all(|dep| {
+        let (name, want) = match dep.split_once('=') {
+            Some((n, v)) => (n, Some(unescape_env_dep(v))),
+            None => (dep, None),
+        };
+        name == "OUT_DIR" || std::env::var(name).ok() == want
+    })
+}
+
+/// Inverse of rustc's `escape_dep_env` (`\\` → `\`, `\n` → newline, `\r` → CR).
+fn unescape_env_dep(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut it = v.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' { out.push(c); continue; }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Cache T3-fix: validated dep-info restore. The stored .d's TARGET side embeds the PRODUCING
 /// build's out-dir (volatile) and its DEP side lists the source files the unit was compiled from.
 /// Parse the blob; REQUIRE the current positional .rs source among the deps and every dep path to
@@ -537,9 +570,19 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
             Err(_) => return false, // no sidecar + has deps -> unverifiable -> miss
         }
     }
+    // Cache T5 env-dep gate (2026-10-19, the sigil-r3 incident): the key covers source + flags,
+    // NOT the values a crate reads through env!()/option_env!() — rustc records those in the
+    // dep-info as `# env-dep:NAME=VALUE`. A SIGIL_NETWORK=sigil-r3 build restored the sigil-g2
+    // compile of sigil-header (same source, same flags, a different `env!("SIGIL_NET_ID")`) and
+    // the "r3" node came up as g2. Every recorded env-dep must hold in THIS invocation's
+    // environment before anything is restored, or it is a miss. Checked before the first file
+    // is written, so a refused entry leaves the out-dir untouched.
+    let blob_dir = blob_dir_for(&entry.source_hash);
+    if let Some(stored_d) = entry.outputs.get("d") {
+        if !env_deps_match(&blob_dir.join(stored_d)) { return false; }
+    }
     let out_dir = find_out_dir(rustc_args);
     if out_dir.is_empty() { return false; }
-    let blob_dir = blob_dir_for(&entry.source_hash);
     if !blob_dir.exists() { return false; }
     let out_dir_path = PathBuf::from(&out_dir);
     for (ext, file_name) in &entry.outputs {
@@ -688,6 +731,8 @@ mod tests {
     fn dep_info_roundtrip() {
         iso();
         let _cwd = cwd_guard();
+        // T5: the recorded env-dep must hold in this process for the hit to apply.
+        std::env::set_var("FLUX_T5_ROUNDTRIP", "demo");
         let workspace = tmp_dir("depinfo");
         let out_dir = workspace.join("out");
         fs::create_dir_all(&out_dir).unwrap();
@@ -700,7 +745,7 @@ mod tests {
         // A producing-build .d: volatile target side, real dep side (+ an env-dep line).
         fs::write(
             out_dir.join("demo-d1d1d1.d"),
-            format!("/OLD/out/libdemo-d1d1d1.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:CARGO_PKG_NAME=demo\n"),
+            format!("/OLD/out/libdemo-d1d1d1.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:FLUX_T5_ROUNDTRIP=demo\n"),
         ).unwrap();
 
         let args: Vec<String> = vec![
@@ -721,8 +766,66 @@ mod tests {
         assert!(restored.contains(&src_str), "restored .d must list the real source dep");
         assert!(restored.contains(out_dir.to_string_lossy().as_ref()), "target side must be rewritten to THIS out-dir");
         assert!(!restored.contains("/OLD/out/"), "producing build's volatile out-dir must be gone");
-        assert!(restored.contains("# env-dep:CARGO_PKG_NAME=demo"), "env-dep lines must survive verbatim");
+        assert!(restored.contains("# env-dep:FLUX_T5_ROUNDTRIP=demo"), "env-dep lines must survive verbatim");
         fs::remove_dir_all(&workspace).ok();
+    }
+
+    /// T5 (2026-10-19, the sigil-r3 incident): a unit compiled under `SIGIL_NET_ID=sigil-g2`
+    /// must NOT be restored into a build whose environment says `sigil-r3` — same source, same
+    /// flags, a different `env!()`. The refused restore writes nothing; the matching one applies.
+    #[test]
+    fn env_dep_mismatch_is_miss() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("envdep");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"pub const NET: &str = env!(\"FLUX_T5_NET\");").unwrap();
+        let src_str = src_file.to_string_lossy().to_string();
+        fs::write(out_dir.join("libnet-e5e5e5.rmeta"), b"rm-g2").unwrap();
+        fs::write(out_dir.join("libnet-e5e5e5.rlib"), b"rl-g2").unwrap();
+        fs::write(
+            out_dir.join("net-e5e5e5.d"),
+            format!("/OLD/out/libnet-e5e5e5.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:FLUX_T5_NET=sigil-g2\n# env-dep:FLUX_T5_ABSENT\n# env-dep:OUT_DIR=/OLD/target/build/net-1/out\n"),
+        ).unwrap();
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "net".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(), "extra-filename=-e5e5e5".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_str.clone(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src_str), &args);
+        let entry = collect_outputs(&args, &key);
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        std::env::remove_var("FLUX_T5_ABSENT");
+
+        std::env::set_var("FLUX_T5_NET", "sigil-r3");
+        assert!(!apply_cached_outputs(&entry, &args), "a g2 compile must not restore into an r3 build");
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 0, "a refused restore writes nothing");
+
+        std::env::remove_var("FLUX_T5_NET");
+        assert!(!apply_cached_outputs(&entry, &args), "set at compile time, unset now: miss");
+
+        std::env::set_var("FLUX_T5_NET", "sigil-g2");
+        std::env::set_var("FLUX_T5_ABSENT", "1");
+        assert!(!apply_cached_outputs(&entry, &args), "unset at compile time, set now: miss");
+
+        std::env::remove_var("FLUX_T5_ABSENT");
+        assert!(apply_cached_outputs(&entry, &args), "same values (OUT_DIR path aside): hit");
+        assert_eq!(fs::read(out_dir.join("libnet-e5e5e5.rlib")).unwrap(), b"rl-g2");
+        std::env::remove_var("FLUX_T5_NET");
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn env_dep_unescape_inverts_rustc() {
+        assert_eq!(unescape_env_dep(r"a\\b\nc\rd"), "a\\b\nc\rd");
+        assert_eq!(unescape_env_dep("plain"), "plain");
+        assert_eq!(unescape_env_dep(r"tail\\"), "tail\\");
     }
 
     /// T3-fix healing path: a pre-fix entry (no "d" blob) served to a dep-info-emitting invocation

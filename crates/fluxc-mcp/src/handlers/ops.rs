@@ -67,7 +67,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(ToolDef { name: "flux_swarm_messages_search", description: "Search the swarm message log by from/to filter. Useful for auditing conversations or replaying threads.", input_schema: json!({"type":"object","properties":{"from":{"type":"string","description":"Filter to messages sent by this agent (optional)"},"to":{"type":"string","description":"Filter to messages sent to this agent (optional)"},"since_ts":{"type":"integer","description":"Lower bound on ts_ms (default: 0)"},"limit":{"type":"integer","description":"Max messages to return (default: 50)"}}}) }, flux_swarm_messages_search);
     // ── flux release channel (v0.16.x) — multi-product auto-update over HTTPS ──
     registry.register(ToolDef { name: "flux_release_publish", description: "Publish a release for any product (fluxc, flux-arena, flux-arena-server, ...). Copies the binary to the q-flux downloads dir and writes <product>-latest.json. Default product is 'fluxc'; default binary is the running fluxc binary.", input_schema: json!({"type":"object","properties":{"product":{"type":"string","description":"Product name (default: fluxc)"},"version":{"type":"string"},"binary_path":{"type":"string","description":"Path to binary to publish (optional; default: current fluxc exe)"}},"required":["version"]}) }, flux_release_publish);
-    registry.register(ToolDef { name: "flux_release_check", description: "Check what version of a product is currently published, and whether the live manifest is GENUINE. Fetches <product>-latest.json (sigil-* products from sigilgraph.org, everything else from quillon.xyz), reports version + URL + size + digest + targets, and — when a pinned Ed25519 key applies (sigil-* default to the SIGIL release key; pass pubkey_hex for others) — fetches <manifest>.sig and verifies it over the exact bytes. An HTML page where the manifest should be is reported as ABSENT, not as a bad signature. No download of the artifact.", input_schema: json!({"type":"object","properties":{"product":{"type":"string","description":"Product name (default: fluxc)"},"manifest_url":{"type":"string","description":"Override manifest URL (default: derived from product name)"},"pubkey_hex":{"type":"string","description":"Pinned Ed25519 public key (64 hex) to verify <manifest>.sig against. Default for sigil-* products: the SIGIL release key 150fb84d…6402. Pass \"none\" to skip."}}}) }, flux_release_check);
+    registry.register(ToolDef { name: "flux_release_check", description: "Check what version of a product is currently published, and whether the live manifest is GENUINE. Fetches <product>-latest.json (sigil-* products from sigilgraph.org, everything else from quillon.xyz), reports version + URL + size + digest + targets, and verifies its detached Ed25519 signature over the exact bytes: sigil-* products against the SIGIL release key 2 (a78061cf…, <manifest>.sig2), every other product against the Flux release key (e9b6aece…, <manifest>.sig); pass pubkey_hex to check another key at .sig. An HTML page where the manifest should be is reported as ABSENT, not as a bad signature. No download of the artifact.", input_schema: json!({"type":"object","properties":{"product":{"type":"string","description":"Product name (default: fluxc)"},"manifest_url":{"type":"string","description":"Override manifest URL (default: derived from product name)"},"pubkey_hex":{"type":"string","description":"Pinned Ed25519 public key (64 hex) to verify <manifest>.sig against. Default: SIGIL release key 2 (a78061cf…, read from .sig2) for sigil-* products, the Flux release key (e9b6aece…) for everything else. Pass \"none\" to skip."}}}) }, flux_release_check);
     registry.register(ToolDef { name: "flux_wire_audit", description: "Wire-safety audit: find serde attributes that bincode/postcard can ENCODE but never DECODE — internally-tagged enums (W1), untagged enums (W2), flatten (W3) — and skip_serializing_if (W4), which desynchronises every field after a skipped one. Scans every crate with such a codec in scope (its own dep, or a dependent crate's). Five SIGIL incidents (sigil-header ×2, sigil-tx, sigil-state, the block backfill wire that stalled a follower 6M blocks behind) were exactly these. A DIRECT finding (the crate depends on the codec itself) is a failure; a REVIEW item (codec reachable only through a dependent crate) is listed for judgement. Silence a deliberate one with `// flux-wire: allow` on/above the attribute. Pass root to audit another workspace (e.g. the sigil tree).", input_schema: json!({"type":"object","properties":{"root":{"type":"string","description":"Workspace root to audit (default: this flux workspace). E.g. /home/storage/deepseek-codewhale/sigil"},"max_findings":{"type":"integer","description":"Cap listed findings (default 80)"}}}) }, flux_wire_audit);
     registry.register(ToolDef { name: "flux_release_readiness", description: "Is the fluxc workspace's CURRENT version (Cargo.toml) ready to be tagged as a release? Checks docs/VERSION_LEDGER.md's 3-part rule against reality: a CHANGELOG.md heading for the version, a VERSION_LEDGER.md Track B row, a matching git tag, and clean release files. Verdict is one of released / stale_tag / ready_to_tag / not_ready — stale_tag means the tag exists but HEAD has moved on (time to bump for the next release).", input_schema: json!({"type":"object","properties":{}}) }, flux_release_readiness);
     registry.register(ToolDef { name: "flux_os_stage", description: "Stage QuillonOS wasm32-wasip1 modules from N packages: cargo-builds, BLAKE3-hashes, writes stub SQIsign proofs, merges into manifest.json. Preserves existing entries for modules not in this run. Output defaults to /home/orobit/q-narwhalknight/dist-final/quillonos.", input_schema: json!({"type":"object","properties":{"packages":{"type":"array","items":{"type":"string"},"description":"Cargo package names (e.g. ['quillonos-init','quillonos-sh'])"},"output_dir":{"type":"string","description":"Override dist-final/quillonos path"}},"required":["packages"]}) }, flux_os_stage);
@@ -1435,8 +1435,11 @@ fn flux_wire_audit(args: &Value) -> String {
 
 /// The SIGIL release key every sigil-top / sigil-ai / sigil-skills client pins
 /// (`crates/sigil-top/src/release.rs::RELEASE_SIGN_PUBKEY_HEX`). One trust root.
+/// KEY 2 since the 2026-10-23 rotation; its signature is `<manifest>.sig2`. Key 1
+/// (150fb84d…6402) signed `.sig` and only does so during the bridge.
 pub const SIGIL_RELEASE_PUBKEY_HEX: &str =
-    "150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402";
+    "a78061cfb9e2b2cdd5e876da5d737ba0edce6ef77ba3b91e83acb892741225ae";
+pub const SIGIL_RELEASE_SIG_SUFFIX: &str = ".sig2";
 
 /// Verify a detached 128-hex Ed25519 signature over `body` against a 64-hex key.
 /// Pure: the caller fetches. Errors name the malformed part rather than saying "bad".
@@ -1458,12 +1461,14 @@ fn flux_release_check(args: &Value) -> String {
     let manifest_url = args.get("manifest_url").and_then(|v| v.as_str())
         .map(String::from)
         .unwrap_or_else(|| fluxc_core::p2p_worker::manifest_url_for(product));
-    // Which key, if any: explicit arg wins; sigil-* products default to the pinned SIGIL key.
-    let pubkey: Option<String> = match args.get("pubkey_hex").and_then(|v| v.as_str()) {
-        Some("none") | Some("") => None,
-        Some(k) => Some(k.to_string()),
-        None if product.starts_with("sigil-") => Some(SIGIL_RELEASE_PUBKEY_HEX.to_string()),
-        None => None,
+    // Which key, if any, and which signature file: an explicit key wins (its sig at `.sig`);
+    // sigil-* products default to SIGIL key 2 at `.sig2`; everything else is a Flux release,
+    // signed since 2026-10-23 by the Flux release key at `.sig`.
+    let (pubkey, sig_suffix): (Option<String>, &str) = match args.get("pubkey_hex").and_then(|v| v.as_str()) {
+        Some("none") | Some("") => (None, ".sig"),
+        Some(k) => (Some(k.to_string()), ".sig"),
+        None if product.starts_with("sigil-") => (Some(SIGIL_RELEASE_PUBKEY_HEX.to_string()), SIGIL_RELEASE_SIG_SUFFIX),
+        None => (Some(fluxc_core::p2p_worker::FLUX_RELEASE_PUBKEY_HEX.to_string()), ".sig"),
     };
     let (m, body) = match fluxc_core::p2p_worker::fetch_manifest_raw(&manifest_url) {
         Ok(x) => x,
@@ -1481,7 +1486,7 @@ fn flux_release_check(args: &Value) -> String {
         Some(pk) => {
             let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs()).unwrap_or(0);
-            let sig_url = format!("{}.sig?t={}", manifest_url, bust);
+            let sig_url = format!("{}{}?t={}", manifest_url, sig_suffix, bust);
             let sig = std::process::Command::new("curl")
                 .args(["-fsSL", "--max-time", "10", "--connect-timeout", "5", &sig_url])
                 .output();

@@ -1671,19 +1671,25 @@ pub fn run_self_update(force: bool) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let bin_dir = format!("{}/.flux/bin", home);
     let _ = std::fs::create_dir_all(&bin_dir);
-    let target = format!("{}/fluxc", bin_dir);
+    let target = std::path::PathBuf::from(format!("{}/fluxc", bin_dir));
 
-    let url = "https://fluxapp.xyz/downloads/fluxc-musl-x64";
-    println!("  Fetching {} ...", url);
+    // 2026-10-23: through the SIGNED manifest. This used to `curl` a stable URL straight
+    // into ~/.flux/bin/fluxc with no check at all — whoever controlled the server chose
+    // the binary. On Epsilon ~/.flux/bin/fluxc is a symlink to the shared development
+    // build, so that curl would also have overwritten every session's fluxc.
+    let manifest_url = std::env::var("FLUX_MANIFEST_URL")
+        .unwrap_or_else(|_| p2p_worker::manifest_url_for("fluxc"));
+    println!("  manifest {} (+ .sig, pinned key {}…)", manifest_url, &p2p_worker::FLUX_RELEASE_PUBKEY_HEX[..8]);
+    let result = p2p_worker::fetch_verified_manifest(&manifest_url)
+        .and_then(|m| {
+            println!("  ✓ signature valid — release v{} ({})", m.version, m.url);
+            p2p_worker::download_verified(&m).map(|p| (m, p))
+        })
+        .and_then(|(m, p)| p2p_worker::install_verified(&p, &target).map(|_| m));
 
-    let status = std::process::Command::new("curl")
-        .args(["-fsSL", url, "-o", &target])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            let _ = std::process::Command::new("chmod").args(["+x", &target]).status();
-            println!("  ✓ Updated {}", target);
+    match result {
+        Ok(m) => {
+            println!("  ✓ Updated {} to v{}", target.display(), m.version);
             // `version`, not `--version`: the dashed form is the rustc -vV wrapper
             // passthrough and prints rustc's version, not fluxc's.
             if let Ok(v) = std::process::Command::new(&target).arg("version").output() {
@@ -1691,13 +1697,15 @@ pub fn run_self_update(force: bool) {
             }
             println!("  Restart clients using this fluxc for MCP.");
         }
-        _ => {
-            eprintln!("  Failed to download prebuilt. Try manual or source build.");
-            if force {
-                // fallback to current exe copy
+        Err(e) => {
+            eprintln!("  ✗ {e}");
+            eprintln!("  Nothing was installed. Try again later, or build from source.");
+            let is_link = std::fs::symlink_metadata(&target).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if force && !is_link {
+                // fallback to current exe copy (never through a symlink)
                 if let Ok(exe) = std::env::current_exe() {
                     let _ = std::fs::copy(exe, &target);
-                    println!("  Fallback: copied current exe to {}", target);
+                    println!("  Fallback: copied current exe to {}", target.display());
                 }
             }
         }

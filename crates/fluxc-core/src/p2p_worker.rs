@@ -82,6 +82,9 @@ const DEFAULT_FLUXC_MANIFEST_URL: &str =
     "https://quillon.xyz/downloads/fluxc-latest.json";
 const DEFAULT_DOWNLOADS_DIR: &str =
     "/home/orobit/q-narwhalknight/dist-final/downloads";
+/// fluxapp.xyz's download root; `fluxc release` mirrors the signed release there too.
+const DEFAULT_MIRROR_DIR: &str =
+    "/home/orobit/q-narwhalknight/dist-fluxapp/downloads";
 const DEFAULT_URL_BASE: &str =
     "https://quillon.xyz/downloads";
 const SIGIL_URL_BASE: &str =
@@ -102,6 +105,139 @@ fn binary_suffix(product: &str) -> &'static str {
         "fluxc" => "musl",
         _ => "linux-x86_64",
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release signing (2026-10-23)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Until 2026-10-23 a Flux release was trusted on TLS alone. The manifest named a
+// sha256, but it came unsigned from the same server as the binary, so whoever could
+// change one could change both — and `fluxc self-update` did not even read the
+// manifest. That server (Epsilon) had third parties with root from July to
+// September 2026. Now every Flux manifest carries a detached Ed25519 signature at
+// `<manifest>.sig` (128 hex, over the EXACT bytes), made by the release key below,
+// and every Flux updater refuses a manifest that does not verify against the key
+// compiled into it. SIGIL products (`sigil-*`) have their own pinned key and their
+// own release ceremony; this code refuses to publish or install them.
+
+/// The Flux release public key (Ed25519, 32 bytes hex). The secret half lives at
+/// `/root/.config/flux/release-sign.seed` on the release host (root-only). Changing
+/// this constant orphans every installed fluxc that pinned the old one.
+pub const FLUX_RELEASE_PUBKEY_HEX: &str =
+    "e9b6aecec3531889a49d39e148663187b3bf728ec178429aa75c50580d20d78a";
+const FLUX_RELEASE_SEED_DEFAULT: &str = "/root/.config/flux/release-sign.seed";
+
+/// Check a detached 128-hex Ed25519 signature over `body` against the pinned key.
+/// Pure — the caller fetches. Fails closed on anything that is not a valid signature
+/// by that key (including an HTML page served where the `.sig` should be).
+pub fn verify_release_sig(body: &[u8], sig_hex: &str) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk: [u8; 32] = hex::decode(FLUX_RELEASE_PUBKEY_HEX).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "pinned release key malformed".to_string())?;
+    let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| format!(
+            "release signature malformed (want 128-hex ed25519, got {} chars — an HTML page means the .sig is absent)",
+            sig_hex.trim().len()))?;
+    let vk = VerifyingKey::from_bytes(&pk).map_err(|e| format!("pinned release key invalid: {e}"))?;
+    vk.verify(body, &Signature::from_bytes(&sig))
+        .map_err(|_| "RELEASE SIGNATURE INVALID — the manifest is not signed by the pinned Flux release key; refusing".to_string())
+}
+
+/// Sign `body` with the release seed (`FLUX_RELEASE_SEED`, default the root-only file).
+/// Refuses a seed whose public key is not the pinned one: a wrong seed must fail here,
+/// on the release host, not at every client afterwards.
+fn sign_release(body: &[u8]) -> Result<String, String> {
+    let path = std::env::var("FLUX_RELEASE_SEED").unwrap_or_else(|_| FLUX_RELEASE_SEED_DEFAULT.into());
+    sign_release_with(&path, body)
+}
+
+fn sign_release_with(path: &str, body: &[u8]) -> Result<String, String> {
+    use ed25519_dalek::{Signer, SigningKey};
+    let seed: [u8; 32] = std::fs::read(path)
+        .map_err(|e| format!("release seed {path}: {e}"))?
+        .try_into()
+        .map_err(|_| format!("release seed {path} is not 32 bytes"))?;
+    let sk = SigningKey::from_bytes(&seed);
+    let pk_hex = hex_encode(sk.verifying_key().as_bytes());
+    if pk_hex != FLUX_RELEASE_PUBKEY_HEX {
+        return Err(format!("release seed {path} has pubkey {}…, not the pinned {}… — refusing to sign", &pk_hex[..8], &FLUX_RELEASE_PUBKEY_HEX[..8]));
+    }
+    let sig = hex_encode(&sk.sign(body).to_bytes());
+    verify_release_sig(body, &sig)?;
+    Ok(sig)
+}
+
+/// Fetch `<manifest_url>` and `<manifest_url>.sig`, verify, parse. The ONE way a Flux
+/// updater learns what the newest release is.
+pub fn fetch_verified_manifest(manifest_url: &str) -> Result<ReleaseManifest, String> {
+    let (m, body) = fetch_manifest_raw(manifest_url)?;
+    if m.product.starts_with("sigil-") {
+        return Err(format!("{} is a SIGIL product — it updates itself with SIGIL's own pinned key, not through fluxc", m.product));
+    }
+    let sig = http_get_string(&format!("{manifest_url}.sig"), 10)
+        .map_err(|e| format!("no release signature at {manifest_url}.sig ({e}) — an unsigned manifest is not a release"))?;
+    verify_release_sig(body.as_bytes(), &sig)?;
+    Ok(m)
+}
+
+/// Download `manifest.url` to a temp file and check it against the manifest's hash
+/// (and size, when stated). The manifest must already be verified.
+pub fn download_verified(manifest: &ReleaseManifest) -> Result<PathBuf, String> {
+    let dl_tmp = std::env::temp_dir().join(format!("{}.new.{}", manifest.product, manifest.version));
+    http_get_to_file(&manifest.url, &dl_tmp, 120)?;
+    let bytes = std::fs::read(&dl_tmp).map_err(|e| format!("read tmp: {}", e))?;
+    // A manifest names the artifact by sha256 (fluxc) or by blake3 only (sigil-*);
+    // check whichever it carries, and refuse one that carries neither — an unhashed
+    // download is not a release. Never slice an empty digest (that was a panic).
+    let (algo, want, got) = if !manifest.sha256_hex.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        ("sha256", manifest.sha256_hex.clone(), hex_encode(&hasher.finalize()))
+    } else if !manifest.blake3_hex.is_empty() {
+        ("blake3", manifest.blake3_hex.clone(), blake3::hash(&bytes).to_hex().to_string())
+    } else {
+        let _ = std::fs::remove_file(&dl_tmp);
+        return Err("manifest carries neither sha256_hex nor blake3_hex — refusing an unhashed release".into());
+    };
+    if got != want || (manifest.size_bytes != 0 && manifest.size_bytes != bytes.len() as u64) {
+        let _ = std::fs::remove_file(&dl_tmp);
+        return Err(format!(
+            "{} / size mismatch — expected {}… ({} B), got {}… ({} B)",
+            algo, &want[..16.min(want.len())], manifest.size_bytes, &got[..16.min(got.len())], bytes.len()
+        ));
+    }
+    println!("✓ {} matches ({} bytes)", algo, bytes.len());
+    let _ = Command::new("chmod").arg("+x").arg(&dl_tmp).status();
+    Ok(dl_tmp)
+}
+
+/// A path that is a cargo build output (`…/target/<profile>/…`). Installing a
+/// download over one would overwrite a developer build — on Epsilon every session's
+/// `fluxc` is `target/debug/fluxc` (via ~/.flux/bin/fluxc → symlink).
+fn is_build_output(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/target/debug/") || s.contains("/target/release/") || s.contains("/target/release-fast/")
+}
+
+/// Put a verified download in place at `target`: refuses a symlink (it would write
+/// THROUGH it) and a cargo build output; renames atomically when it can.
+pub fn install_verified(downloaded: &Path, target: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        let to = std::fs::read_link(target).map(|p| p.display().to_string()).unwrap_or_default();
+        return Err(format!("{} is a symlink to {} — refusing to write through it (replace the link yourself if you mean it)", target.display(), to));
+    }
+    if is_build_output(target) {
+        return Err(format!("{} is a cargo build output — refusing to overwrite a developer build", target.display()));
+    }
+    let staged = target.with_extension("new");
+    std::fs::copy(downloaded, &staged).map_err(|e| format!("copy to {}: {}", staged.display(), e))?;
+    let _ = Command::new("chmod").arg("+x").arg(&staged).status();
+    std::fs::rename(&staged, target).map_err(|e| format!("rename into {}: {}", target.display(), e))?;
+    let _ = std::fs::remove_file(downloaded);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +262,12 @@ pub fn publish_release_product(
 ) -> Result<(), String> {
     if product.is_empty() {
         return Err("product name required".into());
+    }
+    if product.starts_with("sigil-") {
+        return Err(format!(
+            "{product} is a SIGIL product with its own signed ceremony (scripts/release-sigil-top.sh) — \
+             fluxc release would write an UNSIGNED {product}-latest.json over the signed one"
+        ));
     }
     println!("📡 fluxc release — product={} version={}", product, version);
 
@@ -207,11 +349,46 @@ pub fn publish_release_product(
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serialize manifest: {}", e))?;
-    let tmp_man = dst_manifest.with_extension("tmp");
-    std::fs::write(&tmp_man, &manifest_json)
-        .map_err(|e| format!("write manifest: {}", e))?;
-    std::fs::rename(&tmp_man, &dst_manifest)
-        .map_err(|e| format!("rename manifest: {}", e))?;
+    // Sign the EXACT bytes that get written; nothing may re-serialise them afterwards.
+    let sig_hex = sign_release(manifest_json.as_bytes())?;
+    println!("   signed:  {} ({}…)", manifest_name, &FLUX_RELEASE_PUBKEY_HEX[..8]);
+
+    // ONE channel: identical signed bytes in every download root. On 2026-10-23 the two
+    // roots disagreed three ways (quillon.xyz said 0.28.0, fluxapp.xyz 0.36.0, and the
+    // self-update file was 0.40.0). FLUX_DOWNLOADS_MIRRORS (':'-separated) adds roots;
+    // the default root also feeds fluxapp.xyz's.
+    let mirrors: Vec<PathBuf> = match std::env::var("FLUX_DOWNLOADS_MIRRORS") {
+        Ok(v) => v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
+        Err(_) if downloads_dir == DEFAULT_DOWNLOADS_DIR => vec![PathBuf::from(DEFAULT_MIRROR_DIR)],
+        Err(_) => Vec::new(),
+    };
+    let mut roots = vec![PathBuf::from(&downloads_dir)];
+    roots.extend(mirrors.into_iter().filter(|m| m.is_dir()));
+    let put = |dst: &Path, data: &[u8]| -> Result<(), String> {
+        let tmp = dst.with_extension("tmp");
+        std::fs::write(&tmp, data).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+        std::fs::rename(&tmp, dst).map_err(|e| format!("rename {}: {}", dst.display(), e))
+    };
+    for root in &roots {
+        if root != Path::new(&downloads_dir) {
+            put(&root.join(&bin_name), &bytes)?;
+            let _ = Command::new("chmod").arg("+x").arg(root.join(&bin_name)).status();
+        }
+        // The stable name humans and setup-flux.sh fetch. Overwritten on purpose, atomically;
+        // every versioned file stays.
+        if product == "fluxc" {
+            put(&root.join("fluxc-musl-x64"), &bytes)?;
+            let _ = Command::new("chmod").arg("+x").arg(root.join("fluxc-musl-x64")).status();
+        }
+        // signature first, then the manifest it signs
+        put(&root.join(format!("{manifest_name}.sig")), sig_hex.as_bytes())?;
+        put(&root.join(&manifest_name), manifest_json.as_bytes())?;
+        // read back what landed and check it, not what we meant to write
+        let got_m = std::fs::read(root.join(&manifest_name)).map_err(|e| format!("re-read manifest: {e}"))?;
+        let got_s = std::fs::read_to_string(root.join(format!("{manifest_name}.sig"))).map_err(|e| format!("re-read sig: {e}"))?;
+        verify_release_sig(&got_m, &got_s)?;
+        println!("   ✓ {}: manifest + .sig verify against the pinned key", root.display());
+    }
     println!("   manifest:{}", dst_manifest.display());
     println!(
         "✓ Release v{} published — Delta will pull on its next auto-update tick",
@@ -302,9 +479,8 @@ fn check_once(
     target_path: Option<&Path>,
     apply: bool,
 ) -> Result<CheckOutcome, String> {
-    let manifest_json = http_get_string(manifest_url, 10)?;
-    let manifest: ReleaseManifest =
-        serde_json::from_str(&manifest_json).map_err(|e| format!("parse manifest: {}", e))?;
+    // Signature first: nothing in an unverified manifest is trusted, not even its version.
+    let manifest = fetch_verified_manifest(manifest_url)?;
 
     if !semver_gt(&manifest.version, self_version) {
         return Ok(CheckOutcome::UpToDate { version: manifest.version });
@@ -312,35 +488,7 @@ fn check_once(
 
     println!("🔔 new release available: v{} → v{}", self_version, manifest.version);
 
-    let dl_tmp = std::env::temp_dir().join(format!("fluxc.new.{}", manifest.version));
-    http_get_to_file(&manifest.url, &dl_tmp, 120)?;
-    let bytes = std::fs::read(&dl_tmp).map_err(|e| format!("read tmp: {}", e))?;
-
-    // A manifest names the artifact by sha256 (fluxc) or by blake3 only (sigil-*);
-    // check whichever it carries, and refuse one that carries neither — an unhashed
-    // download is not a release. Never slice an empty digest (that was a panic).
-    let (algo, want, got) = if !manifest.sha256_hex.is_empty() {
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        ("sha256", manifest.sha256_hex.clone(), hex_encode(&hasher.finalize()))
-    } else if !manifest.blake3_hex.is_empty() {
-        ("blake3", manifest.blake3_hex.clone(), blake3::hash(&bytes).to_hex().to_string())
-    } else {
-        let _ = std::fs::remove_file(&dl_tmp);
-        return Err("manifest carries neither sha256_hex nor blake3_hex — refusing an unhashed release".into());
-    };
-    if got != want {
-        let _ = std::fs::remove_file(&dl_tmp);
-        return Err(format!(
-            "{} mismatch — expected {}…, got {}…",
-            algo,
-            &want[..16.min(want.len())],
-            &got[..16.min(got.len())]
-        ));
-    }
-    println!("✓ {} matches ({} bytes)", algo, bytes.len());
-
-    let _ = Command::new("chmod").arg("+x").arg(&dl_tmp).status();
+    let dl_tmp = download_verified(&manifest)?;
 
     if !apply || target_path.is_none() {
         return Ok(CheckOutcome::Downloaded {
@@ -350,13 +498,7 @@ fn check_once(
         });
     }
     let target = target_path.unwrap().to_path_buf();
-
-    if std::fs::rename(&dl_tmp, &target).is_err() {
-        std::fs::copy(&dl_tmp, &target)
-            .map_err(|e| format!("copy to {}: {}", target.display(), e))?;
-        let _ = std::fs::remove_file(&dl_tmp);
-    }
-    let _ = Command::new("chmod").arg("+x").arg(&target).status();
+    install_verified(&dl_tmp, &target)?;
     Ok(CheckOutcome::Downloaded {
         version: manifest.version,
         applied: true,
@@ -877,5 +1019,80 @@ mod tests {
         assert_eq!(m.product, "fluxc");
         assert_eq!(m.sha256_hex, "aa");
         assert!(m.targets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod release_sig_tests {
+    use super::*;
+
+    /// Signed on Epsilon 2026-10-23 with the real Flux release seed (Ed25519 is
+    /// deterministic). Plain text, not a manifest: it can never pass as a release.
+    const BODY: &[u8] = b"flux release key test vector 2026-10-23 (not a manifest)";
+    const SIG: &str = "3f6df48d57f9c6e62b8d244e0989d3b91615e420e7c3c997f0d9315c9f8083bf0ff3d0c23118b600cfbf96d6d5881173f5c3911f626f980c6558b419776bf90d";
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("flux-relsig-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_pinned_key_accepts_its_own_signature() {
+        assert!(verify_release_sig(BODY, SIG).is_ok());
+        assert!(verify_release_sig(BODY, &format!("{SIG}\n")).is_ok(), "a trailing newline is not another signature");
+    }
+
+    #[test]
+    fn other_bytes_another_key_or_junk_are_refused() {
+        use ed25519_dalek::{Signer, SigningKey};
+        assert!(verify_release_sig(b"flux release key test vector 2026-10-24 (not a manifest)", SIG).is_err());
+        let thief = SigningKey::from_bytes(&[7u8; 32]);
+        let forged = hex_encode(&thief.sign(BODY).to_bytes());
+        assert!(verify_release_sig(BODY, &forged).unwrap_err().contains("RELEASE SIGNATURE INVALID"));
+        // what a missing .sig looks like on our sites: the HTML fallback page, HTTP 200
+        let e = verify_release_sig(BODY, "<!doctype html><html>…</html>").unwrap_err();
+        assert!(e.contains("HTML page"), "{e}");
+        assert!(verify_release_sig(BODY, "").is_err());
+    }
+
+    #[test]
+    fn a_seed_that_is_not_the_pinned_key_never_signs() {
+        let d = scratch("seed");
+        let wrong = d.join("wrong.seed");
+        std::fs::write(&wrong, [9u8; 32]).unwrap();
+        let e = sign_release_with(wrong.to_str().unwrap(), BODY).unwrap_err();
+        assert!(e.contains("not the pinned"), "{e}");
+        std::fs::write(&wrong, [9u8; 31]).unwrap();
+        assert!(sign_release_with(wrong.to_str().unwrap(), BODY).unwrap_err().contains("not 32 bytes"));
+    }
+
+    #[test]
+    fn sigil_products_are_never_published_by_fluxc() {
+        let e = publish_release_product("sigil-top", "99.0.0", Some(PathBuf::from("/nonexistent"))).unwrap_err();
+        assert!(e.contains("SIGIL product"), "{e}");
+    }
+
+    #[test]
+    fn install_refuses_symlinks_and_build_outputs_and_installs_a_plain_file() {
+        let d = scratch("install");
+        let real = d.join("real-fluxc");
+        std::fs::write(&real, b"dev build").unwrap();
+        let link = d.join("fluxc-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dl = d.join("downloaded");
+        std::fs::write(&dl, b"release").unwrap();
+        assert!(install_verified(&dl, &link).unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read(&real).unwrap(), b"dev build", "the link target must be untouched");
+        let build = d.join("target/debug/fluxc");
+        std::fs::create_dir_all(build.parent().unwrap()).unwrap();
+        std::fs::write(&build, b"dev build").unwrap();
+        assert!(install_verified(&dl, &build).unwrap_err().contains("build output"));
+        let plain = d.join("bin-fluxc");
+        std::fs::write(&plain, b"old").unwrap();
+        install_verified(&dl, &plain).unwrap();
+        assert_eq!(std::fs::read(&plain).unwrap(), b"release");
+        assert!(!dl.exists(), "the staged download is consumed");
     }
 }

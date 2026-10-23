@@ -69,12 +69,39 @@ ARCH="$(uname -m 2>/dev/null)"
 if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; then
   echo "  ${B}[1/2]${R} Fetching prebuilt fluxc ${D}(musl static — no build, ~2s)${R}…"
   mkdir -p "$FLUX_HOME/bin"
-  if curl -fsSL "https://fluxapp.xyz/downloads/fluxc-musl-x64" -o "$FLUX_HOME/bin/fluxc" && chmod +x "$FLUX_HOME/bin/fluxc" && "$FLUX_HOME/bin/fluxc" version >/dev/null 2>&1; then
-    FLUXC="$FLUX_HOME/bin/fluxc"; GOT_PREBUILT=1
-    echo "  ${GRN}✓${R} $("$FLUXC" version 2>/dev/null | head -c 60) ${D}($(du -h "$FLUXC" 2>/dev/null | cut -f1))${R} → ${VIO}$FLUXC${R}"
+  # 2026-10-23: installed ONLY if the signed release manifest names it — its Ed25519 signature is
+  # checked against the Flux release key pinned below, then the binary's sha256 against the
+  # manifest. Any failure → source build. (Before this the binary was fetched with no check.)
+  FLUX_RELEASE_PUB=e9b6aecec3531889a49d39e148663187b3bf728ec178429aa75c50580d20d78a
+  MF_URL="https://quillon.xyz/downloads/fluxc-latest.json"
+  PT="$(mktemp -d)"
+  hex2bin() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; }
+  verify_ed25519() { # <body-file> <sig-hex-file> <pubkey-hex>
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import cryptography' 2>/dev/null; then
+      python3 -c 'import sys; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey as K; K.from_public_bytes(bytes.fromhex(sys.argv[3])).verify(bytes.fromhex(open(sys.argv[2]).read().strip()), open(sys.argv[1],"rb").read())' "$1" "$2" "$3"
+    elif openssl version 2>/dev/null | grep -qE '^OpenSSL [3-9]'; then
+      hex2bin "302a300506032b6570032100$3" > "$PT/pub.der" && hex2bin "$(tr -d ' \n' < "$2")" > "$PT/sig.bin" \
+        && openssl pkeyutl -verify -pubin -keyform DER -inkey "$PT/pub.der" -rawin -in "$1" -sigfile "$PT/sig.bin" >/dev/null
+    else
+      echo "    ${D}(no python3 'cryptography' and no OpenSSL 3 — cannot check the release signature)${R}"; return 1
+    fi
+  }
+  if curl -fsSL "$MF_URL" -o "$PT/m.json" && curl -fsSL "$MF_URL.sig" -o "$PT/m.sig" \
+     && verify_ed25519 "$PT/m.json" "$PT/m.sig" "$FLUX_RELEASE_PUB" 2>/dev/null; then
+    BIN_URL=$(sed -n 's/^ *"url": *"\([^"]*\)".*/\1/p' "$PT/m.json" | head -1)
+    BIN_SHA=$(sed -n 's/^ *"sha256_hex": *"\([0-9a-f]\{64\}\)".*/\1/p' "$PT/m.json" | head -1)
+    if [ -n "$BIN_URL" ] && [ -n "$BIN_SHA" ] && curl -fsSL "$BIN_URL" -o "$PT/fluxc" \
+       && echo "$BIN_SHA  $PT/fluxc" | sha256sum -c --quiet - >/dev/null 2>&1 \
+       && chmod +x "$PT/fluxc" && "$PT/fluxc" version >/dev/null 2>&1 && mv -f "$PT/fluxc" "$FLUX_HOME/bin/fluxc"; then
+      FLUXC="$FLUX_HOME/bin/fluxc"; GOT_PREBUILT=1
+      echo "  ${GRN}✓${R} signed release verified (key ${FLUX_RELEASE_PUB:0:8}…) · $("$FLUXC" version 2>/dev/null | head -c 60) ${D}($(du -h "$FLUXC" 2>/dev/null | cut -f1))${R} → ${VIO}$FLUXC${R}"
+    else
+      echo "    ${D}(prebuilt binary missing or does not match the signed manifest — falling back to source build)${R}"
+    fi
   else
-    echo "    ${D}(prebuilt fetch failed — falling back to source build)${R}"
+    echo "    ${D}(release manifest unsigned or signature invalid — falling back to source build)${R}"
   fi
+  rm -rf "$PT"
 fi
 
 # ── source-build fallback (only if the prebuilt path didn't land) ──────────

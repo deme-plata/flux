@@ -12,6 +12,10 @@ members = [
 # deps), 60 of 143 crates. The other 83 stay members (still addressable via
 # -p / --workspace) but no longer tax the default build. Regenerate this list
 # with `fluxc prune-report` (which also reports the unreachable set).
+# sigil-rpc-wasm depends on sigil/crates/sigil-rpc, DELETED 2026-09-22 (operator; the crate that
+# restarted itself 1,288 times). Excluded so the workspace manifest loads again; the crate itself
+# (242 lines, untouched since the 2026-06-05 release) is dead with its dependency.
+exclude = ["crates/sigil-rpc-wasm"]
 default-members = [
     "crates/flux-0x",
     "crates/flux-soneium",

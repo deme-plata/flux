@@ -219,7 +219,16 @@ pub fn download_verified(manifest: &ReleaseManifest) -> Result<PathBuf, String> 
 /// `fluxc` is `target/debug/fluxc` (via ~/.flux/bin/fluxc → symlink).
 fn is_build_output(p: &Path) -> bool {
     let s = p.to_string_lossy();
-    s.contains("/target/debug/") || s.contains("/target/release/") || s.contains("/target/release-fast/")
+    if s.contains("/target/debug/") || s.contains("/target/release/") || s.contains("/target/release-fast/") {
+        return true;
+    }
+    // Any profile, any target triple (`target/x86_64-unknown-linux-musl/release/fluxc` slipped through the
+    // path test above): cargo marks every target dir with a CACHEDIR.TAG carrying this signature.
+    p.ancestors().skip(1).any(|a| {
+        std::fs::read_to_string(a.join("CACHEDIR.TAG"))
+            .map(|t| t.starts_with("Signature: 8a477f597d28d172789f06886806bc55"))
+            .unwrap_or(false)
+    })
 }
 
 /// Put a verified download in place at `target`: refuses a symlink (it would write
@@ -1089,6 +1098,14 @@ mod release_sig_tests {
         std::fs::create_dir_all(build.parent().unwrap()).unwrap();
         std::fs::write(&build, b"dev build").unwrap();
         assert!(install_verified(&dl, &build).unwrap_err().contains("build output"));
+        // a cross build: no /target/<profile>/ in the path, only cargo's CACHEDIR.TAG says what it is
+        let tgt = d.join("tgt");
+        let cross = tgt.join("x86_64-unknown-linux-musl/release/fluxc");
+        std::fs::create_dir_all(cross.parent().unwrap()).unwrap();
+        std::fs::write(tgt.join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n").unwrap();
+        std::fs::write(&cross, b"musl build").unwrap();
+        assert!(install_verified(&dl, &cross).unwrap_err().contains("build output"));
+        assert_eq!(std::fs::read(&cross).unwrap(), b"musl build");
         let plain = d.join("bin-fluxc");
         std::fs::write(&plain, b"old").unwrap();
         install_verified(&dl, &plain).unwrap();

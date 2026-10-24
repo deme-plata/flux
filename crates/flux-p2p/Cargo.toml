@@ -41,6 +41,8 @@ sha3 = "0.10"
 
 # Serde
 serde = { version = "1", features = ["derive"] }
+# 2026-10-24: connection_limits' event type (it never emits one)
+void = "1"
 serde_json = "1"
 
 # Cortex-driven autonomous optimization (opt-in, see [features].cortex-optimizer above)

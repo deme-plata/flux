@@ -49,6 +49,10 @@ use chacha20poly1305::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+
+/// Re-exported: it already appears in this crate's public signatures, so a caller should not
+/// need its own `x25519-dalek` dependency (and version) to name it.
+pub use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroize;
 
 const KDF_CTX: &str = "flux-swarm-secret v1 sealed-box x25519 aead-key";
@@ -160,27 +164,8 @@ fn derive_key_nonce(ss: &[u8; 32], eph_pk: &[u8; 32], recipient_pk: &[u8; 32]) -
 /// Seal `plaintext` to `recipient_pk`. Anyone can call this (sealed-box style);
 /// only the holder of the matching secret key can open it.
 pub fn seal(plaintext: &[u8], recipient_pk: &PublicKey) -> SealedEnvelope {
-    let eph_sk = EphemeralSecret::random_from_rng(OsRng);
-    let eph_pk = PublicKey::from(&eph_sk);
-    let shared = eph_sk.diffie_hellman(recipient_pk); // consumes eph_sk → forward secrecy
-    let (mut key, nonce) = derive_key_nonce(shared.as_bytes(), eph_pk.as_bytes(), &recipient_pk.to_bytes());
-
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let ct = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload { msg: plaintext, aad: SUITE_X25519.as_bytes() },
-        )
-        .expect("ChaCha20Poly1305 encrypt is infallible for valid key/nonce");
-    key.zeroize();
-
-    SealedEnvelope {
-        v: 1,
-        suite: SUITE_X25519.to_string(),
-        eph_pk: hex::encode(eph_pk.to_bytes()),
-        ct: hex::encode(ct),
-        kem_ct: None,
-    }
+    // One sealing path: the view tag is computed and dropped (one BLAKE3 call).
+    seal_with_view_tag(plaintext, recipient_pk).0
 }
 
 impl SecretIdentity {
@@ -214,6 +199,59 @@ pub fn open(env: &SealedEnvelope, id: &SecretIdentity) -> Result<Vec<u8>, Secret
     pt
 }
 
+/// Domain for the one-byte view tag (2026-10-16, SIGIL 1M-users step 2).
+const VIEW_TAG_CTX: &str = "flux-swarm-secret v1 sealed-box x25519 view-tag";
+
+fn view_tag_from(ss: &[u8; 32], eph_pk: &[u8; 32], recipient_pk: &[u8; 32]) -> u8 {
+    let mut km = Vec::with_capacity(96);
+    km.extend_from_slice(ss);
+    km.extend_from_slice(eph_pk);
+    km.extend_from_slice(recipient_pk);
+    let t = blake3::derive_key(VIEW_TAG_CTX, &km)[0];
+    km.zeroize();
+    t
+}
+
+/// [`seal`], plus a one-byte VIEW TAG bound to the same shared secret.
+///
+/// A recipient scanning many envelopes needs only `(eph_pk, tag)` per envelope to rule out
+/// 255 of every 256 that are not theirs: one X25519 and one BLAKE3, no AEAD and no download
+/// of the ciphertext. The tag is a separate KDF output (its own context), so it reveals
+/// nothing about the AEAD key; to anyone without the recipient's key it is a uniform byte.
+/// The envelope itself is byte-for-byte what [`seal`] produces — carrying the tag is the
+/// caller's choice.
+pub fn seal_with_view_tag(plaintext: &[u8], recipient_pk: &PublicKey) -> (SealedEnvelope, u8) {
+    let eph_sk = EphemeralSecret::random_from_rng(OsRng);
+    let eph_pk = PublicKey::from(&eph_sk);
+    let shared = eph_sk.diffie_hellman(recipient_pk); // consumes eph_sk → forward secrecy
+    let ss = shared.as_bytes();
+    let tag = view_tag_from(ss, eph_pk.as_bytes(), &recipient_pk.to_bytes());
+    let (mut key, nonce) = derive_key_nonce(ss, eph_pk.as_bytes(), &recipient_pk.to_bytes());
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload { msg: plaintext, aad: SUITE_X25519.as_bytes() },
+        )
+        .expect("ChaCha20Poly1305 encrypt is infallible for valid key/nonce");
+    key.zeroize();
+    let env = SealedEnvelope {
+        v: 1,
+        suite: SUITE_X25519.to_string(),
+        eph_pk: hex::encode(eph_pk.to_bytes()),
+        ct: hex::encode(ct),
+        kem_ct: None,
+    };
+    (env, tag)
+}
+
+/// The view tag `id` expects for an envelope with ephemeral key `eph_pk`. Equal to the
+/// sender's tag exactly when the envelope was sealed to `id` (else equal by chance, 1/256).
+pub fn view_tag(id: &SecretIdentity, eph_pk: &PublicKey) -> u8 {
+    let ss = id.dh(eph_pk);
+    view_tag_from(&ss, eph_pk.as_bytes(), &id.pk.to_bytes())
+}
+
 /// Convenience: seal to a hex public-key address, returning a JSON string ready
 /// to drop into the swarm bus `payload`.
 pub fn seal_to_hex(plaintext: &[u8], recipient_pk_hex: &str) -> Result<String, SecretError> {
@@ -230,6 +268,36 @@ pub fn open_from_json(json: &str, id: &SecretIdentity) -> Result<Vec<u8>, Secret
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_tag_matches_for_the_recipient_and_the_envelope_still_opens() {
+        let alice = SecretIdentity::generate();
+        let (env, tag) = seal_with_view_tag(b"note", &alice.public_key());
+        let eph = parse_pubkey_hex(&env.eph_pk).unwrap();
+        assert_eq!(view_tag(&alice, &eph), tag);
+        assert_eq!(open(&env, &alice).unwrap(), b"note", "a tagged envelope is a normal envelope");
+        // and through the JSON path an untagged reader uses
+        assert_eq!(open_from_json(&serde_json::to_string(&env).unwrap(), &alice).unwrap(), b"note");
+    }
+
+    #[test]
+    fn view_tag_is_uniform_for_strangers() {
+        // 4,096 envelopes to Alice; Bob's computed tag agrees ~1/256 of the time by chance.
+        let alice = SecretIdentity::generate();
+        let bob = SecretIdentity::generate();
+        let n = 4096;
+        let mut hits = 0;
+        for _ in 0..n {
+            let (env, tag) = seal_with_view_tag(b"x", &alice.public_key());
+            let eph = parse_pubkey_hex(&env.eph_pk).unwrap();
+            assert_eq!(view_tag(&alice, &eph), tag);
+            if view_tag(&bob, &eph) == tag {
+                hits += 1;
+            }
+        }
+        // expected 16; 0..=40 is far outside any plausible bias toward matching
+        assert!(hits <= 40, "stranger matched {hits} of {n}");
+    }
 
     #[test]
     fn roundtrip() {

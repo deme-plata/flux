@@ -90,6 +90,54 @@ fn required_exts(args: &[String]) -> Vec<&'static str> {
     req
 }
 
+/// Cache T4: the EXTRA artifacts a `--emit=link` pass writes when the unit's crate-type list goes
+/// beyond `lib`/`rlib` — a `cdylib`/`dylib` shared object or a `staticlib` archive, named for the
+/// target (`lib<crate><extra>.so` on Linux, `.dylib` on Apple, `<crate><extra>.dll` on Windows,
+/// `<crate><extra>.wasm` on wasm32). T2 only ever required the `.rlib`, so a hit restored the rlib
+/// and never the `.so`: cargo found its output missing (`FailedToReadMetadata { …/libif_watch-
+/// <hash>.so }`) and marked the unit dirty on EVERY build. if-watch declares
+/// `crate-type = ["cdylib", "lib"]` and sits under libp2p-tcp, so each sigil "no-op" rebuilt
+/// if-watch → libp2p → flux-p2p → sigil-api → sigil-node → sigil-top (measured 2026-10-08:
+/// 46–64 s and 61–236 s CPU for a build with nothing changed). Proc-macros need no entry here:
+/// they never produce an `.rlib`, so T2 already makes them a miss.
+fn extra_link_artifacts(args: &[String]) -> Vec<String> {
+    let mut emit = String::new();
+    let mut types: Vec<String> = Vec::new();
+    let mut target = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let next = args.get(i + 1);
+        if a == "--emit" { if let Some(v) = next { emit = v.clone(); } }
+        else if let Some(v) = a.strip_prefix("--emit=") { emit = v.to_string(); }
+        else if a == "--crate-type" { if let Some(v) = next { types.push(v.clone()); } }
+        else if let Some(v) = a.strip_prefix("--crate-type=") { types.push(v.to_string()); }
+        else if a == "--target" { if let Some(v) = next { target = v.clone(); } }
+        else if let Some(v) = a.strip_prefix("--target=") { target = v.to_string(); }
+        i += 1;
+    }
+    if !emit.split(',').any(|p| p.split('=').next() == Some("link")) { return Vec::new(); }
+    let cn = find_crate_name(args);
+    if cn.is_empty() { return Vec::new(); }
+    let stem = format!("{}{}", cn, find_extra_filename(args));
+    let windows = target.contains("windows");
+    let msvc = windows && target.contains("msvc");
+    let mut out = Vec::new();
+    for t in types.iter().flat_map(|t| t.split(',')) {
+        let name = match t {
+            "cdylib" | "dylib" if target.starts_with("wasm32") => format!("{stem}.wasm"),
+            "cdylib" | "dylib" if windows => format!("{stem}.dll"),
+            "cdylib" | "dylib" if target.contains("apple") => format!("lib{stem}.dylib"),
+            "cdylib" | "dylib" => format!("lib{stem}.so"),
+            "staticlib" if msvc => format!("{stem}.lib"),
+            "staticlib" => format!("lib{stem}.a"),
+            _ => continue,
+        };
+        if !out.contains(&name) { out.push(name); }
+    }
+    out
+}
+
 /// Cache T2b: the `-C extra-filename=<suffix>` (e.g. "-361b6c44…") that determines this crate's output
 /// filename `lib<crate><suffix>.<ext>`. Cargo passes it as `-C extra-filename=…` or `-Cextra-filename=…`.
 fn find_extra_filename(args: &[String]) -> String {
@@ -178,6 +226,39 @@ fn split_dep_paths(rhs: &str) -> Vec<String> {
     }
     if !cur.is_empty() { v.push(cur); }
     v
+}
+
+/// Cache T5: does every `# env-dep:` line of a stored dep-info hold in this process's env?
+/// rustc writes `# env-dep:NAME=VALUE` for a variable it read set and `# env-dep:NAME` for one
+/// it found unset, escaping `\\`, `\n` and `\r` in VALUE. An unreadable blob is a miss.
+/// `OUT_DIR` is exempt: its value is the producing target dir's own build path by design
+/// (cross-target-dir hits depend on it), and what it points at is a dep file, not a string —
+/// known gap: dep files outside the module tree are checked for existence, not content.
+fn env_deps_match(d_path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(d_path) else { return false };
+    raw.lines().filter_map(|l| l.strip_prefix("# env-dep:")).all(|dep| {
+        let (name, want) = match dep.split_once('=') {
+            Some((n, v)) => (n, Some(unescape_env_dep(v))),
+            None => (dep, None),
+        };
+        name == "OUT_DIR" || std::env::var(name).ok() == want
+    })
+}
+
+/// Inverse of rustc's `escape_dep_env` (`\\` → `\`, `\n` → newline, `\r` → CR).
+fn unescape_env_dep(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut it = v.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' { out.push(c); continue; }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Cache T3-fix: validated dep-info restore. The stored .d's TARGET side embeds the PRODUCING
@@ -352,6 +433,23 @@ pub fn collect_outputs(rustc_args: &[String], cache_key: &str) -> flux_cache::Ca
                     }
                 }
             }
+            // Cache T4: the shared object / static archive a cdylib|dylib|staticlib unit also
+            // wrote, plus a Windows import library beside a .dll when rustc made one. Keyed
+            // `x:<file name>` so apply can demand exactly the files this invocation expects.
+            if !outputs.is_empty() {
+                let mut extras = extra_link_artifacts(&raw_args);
+                for dll in extras.clone().iter().filter(|n| n.ends_with(".dll")) {
+                    extras.push(format!("{dll}.lib"));
+                    extras.push(format!("lib{dll}.a"));
+                }
+                for fname in extras {
+                    if out_dir_path.join(&fname).exists() {
+                        if let Some(stored) = copy_output_to_blob(&out_dir_path, &blob_dir, &fname) {
+                            outputs.insert(format!("x:{fname}"), stored);
+                        }
+                    }
+                }
+            }
             // Cache T3-fix: ALSO capture the dep-info (.d) rustc just wrote. Without it a later
             // cache HIT skips rustc, cargo never gets dep-info to encode into .fingerprint/
             // dep-lib-*, and the unit is dirty on every subsequent build forever. Restore is
@@ -426,6 +524,10 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
     for ext in required_exts(rustc_args) {
         if !entry.outputs.contains_key(ext) { return false; }
     }
+    // Cache T4 gate: a cdylib/dylib/staticlib link pass also needs its .so/.dll/.a. An entry
+    // stored before T4 carries only the rlib — MISS once, and real rustc re-stores it complete.
+    let extras = extra_link_artifacts(rustc_args);
+    if extras.iter().any(|n| !entry.outputs.contains_key(&format!("x:{n}"))) { return false; }
     // Cache T3-fix gate: when this invocation emits dep-info (every real cargo unit does), a hit
     // MUST also restore a .d — a restore without one leaves the fingerprint permanently incomplete
     // (dep-lib-* never written -> unit dirty on every future build; the sigil 216s "no-op" bug).
@@ -468,9 +570,19 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
             Err(_) => return false, // no sidecar + has deps -> unverifiable -> miss
         }
     }
+    // Cache T5 env-dep gate (2026-10-19, the sigil-r3 incident): the key covers source + flags,
+    // NOT the values a crate reads through env!()/option_env!() — rustc records those in the
+    // dep-info as `# env-dep:NAME=VALUE`. A SIGIL_NETWORK=sigil-r3 build restored the sigil-g2
+    // compile of sigil-header (same source, same flags, a different `env!("SIGIL_NET_ID")`) and
+    // the "r3" node came up as g2. Every recorded env-dep must hold in THIS invocation's
+    // environment before anything is restored, or it is a miss. Checked before the first file
+    // is written, so a refused entry leaves the out-dir untouched.
+    let blob_dir = blob_dir_for(&entry.source_hash);
+    if let Some(stored_d) = entry.outputs.get("d") {
+        if !env_deps_match(&blob_dir.join(stored_d)) { return false; }
+    }
     let out_dir = find_out_dir(rustc_args);
     if out_dir.is_empty() { return false; }
-    let blob_dir = blob_dir_for(&entry.source_hash);
     if !blob_dir.exists() { return false; }
     let out_dir_path = PathBuf::from(&out_dir);
     for (ext, file_name) in &entry.outputs {
@@ -494,6 +606,7 @@ pub fn apply_cached_outputs(entry: &flux_cache::CacheEntry, rustc_args: &[String
             }
         }
     }
+    if extras.iter().any(|n| !out_dir_path.join(n).exists()) { return false; }
     // Cache T3-fix: materialize the dep-info LAST, once the hit is otherwise definitive, so cargo
     // can encode a complete fingerprint (dep-lib-*) exactly as if rustc had run. Validation failure
     // (foreign paths, missing sources) is a MISS — real rustc then rewrites everything it touched.
@@ -618,6 +731,8 @@ mod tests {
     fn dep_info_roundtrip() {
         iso();
         let _cwd = cwd_guard();
+        // T5: the recorded env-dep must hold in this process for the hit to apply.
+        std::env::set_var("FLUX_T5_ROUNDTRIP", "demo");
         let workspace = tmp_dir("depinfo");
         let out_dir = workspace.join("out");
         fs::create_dir_all(&out_dir).unwrap();
@@ -630,7 +745,7 @@ mod tests {
         // A producing-build .d: volatile target side, real dep side (+ an env-dep line).
         fs::write(
             out_dir.join("demo-d1d1d1.d"),
-            format!("/OLD/out/libdemo-d1d1d1.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:CARGO_PKG_NAME=demo\n"),
+            format!("/OLD/out/libdemo-d1d1d1.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:FLUX_T5_ROUNDTRIP=demo\n"),
         ).unwrap();
 
         let args: Vec<String> = vec![
@@ -651,8 +766,66 @@ mod tests {
         assert!(restored.contains(&src_str), "restored .d must list the real source dep");
         assert!(restored.contains(out_dir.to_string_lossy().as_ref()), "target side must be rewritten to THIS out-dir");
         assert!(!restored.contains("/OLD/out/"), "producing build's volatile out-dir must be gone");
-        assert!(restored.contains("# env-dep:CARGO_PKG_NAME=demo"), "env-dep lines must survive verbatim");
+        assert!(restored.contains("# env-dep:FLUX_T5_ROUNDTRIP=demo"), "env-dep lines must survive verbatim");
         fs::remove_dir_all(&workspace).ok();
+    }
+
+    /// T5 (2026-10-19, the sigil-r3 incident): a unit compiled under `SIGIL_NET_ID=sigil-g2`
+    /// must NOT be restored into a build whose environment says `sigil-r3` — same source, same
+    /// flags, a different `env!()`. The refused restore writes nothing; the matching one applies.
+    #[test]
+    fn env_dep_mismatch_is_miss() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("envdep");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src_file = workspace.join("src").join("lib.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, b"pub const NET: &str = env!(\"FLUX_T5_NET\");").unwrap();
+        let src_str = src_file.to_string_lossy().to_string();
+        fs::write(out_dir.join("libnet-e5e5e5.rmeta"), b"rm-g2").unwrap();
+        fs::write(out_dir.join("libnet-e5e5e5.rlib"), b"rl-g2").unwrap();
+        fs::write(
+            out_dir.join("net-e5e5e5.d"),
+            format!("/OLD/out/libnet-e5e5e5.rmeta: {src_str}\n\n{src_str}:\n\n# env-dep:FLUX_T5_NET=sigil-g2\n# env-dep:FLUX_T5_ABSENT\n# env-dep:OUT_DIR=/OLD/target/build/net-1/out\n"),
+        ).unwrap();
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "net".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(), "extra-filename=-e5e5e5".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src_str.clone(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src_str), &args);
+        let entry = collect_outputs(&args, &key);
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        std::env::remove_var("FLUX_T5_ABSENT");
+
+        std::env::set_var("FLUX_T5_NET", "sigil-r3");
+        assert!(!apply_cached_outputs(&entry, &args), "a g2 compile must not restore into an r3 build");
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 0, "a refused restore writes nothing");
+
+        std::env::remove_var("FLUX_T5_NET");
+        assert!(!apply_cached_outputs(&entry, &args), "set at compile time, unset now: miss");
+
+        std::env::set_var("FLUX_T5_NET", "sigil-g2");
+        std::env::set_var("FLUX_T5_ABSENT", "1");
+        assert!(!apply_cached_outputs(&entry, &args), "unset at compile time, set now: miss");
+
+        std::env::remove_var("FLUX_T5_ABSENT");
+        assert!(apply_cached_outputs(&entry, &args), "same values (OUT_DIR path aside): hit");
+        assert_eq!(fs::read(out_dir.join("libnet-e5e5e5.rlib")).unwrap(), b"rl-g2");
+        std::env::remove_var("FLUX_T5_NET");
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn env_dep_unescape_inverts_rustc() {
+        assert_eq!(unescape_env_dep(r"a\\b\nc\rd"), "a\\b\nc\rd");
+        assert_eq!(unescape_env_dep("plain"), "plain");
+        assert_eq!(unescape_env_dep(r"tail\\"), "tail\\");
     }
 
     /// T3-fix healing path: a pre-fix entry (no "d" blob) served to a dep-info-emitting invocation
@@ -846,6 +1019,69 @@ mod tests {
         assert_eq!(find_extra_filename(&["-C".into(), "extra-filename=-361b6c44".into()]), "-361b6c44");
         assert_eq!(find_extra_filename(&["-Cextra-filename=-cf571322".into()]), "-cf571322");
         assert_eq!(find_extra_filename(&["--crate-name".into(), "demo".into()]), "");
+    }
+
+    #[test]
+    fn t4_extra_link_artifact_names() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        let base = ["--crate-name", "if_watch", "-C", "extra-filename=-0f49", "--emit=dep-info,metadata,link"];
+        let with = |extra: &[&str]| { let mut v = a(&base); v.extend(a(extra)); v };
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--crate-type", "lib"])),
+                   vec!["libif_watch-0f49.so"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "lib"])), Vec::<String>::new());
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "x86_64-pc-windows-gnu"])),
+                   vec!["if_watch-0f49.dll"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type=staticlib", "--target=x86_64-pc-windows-msvc"])),
+                   vec!["if_watch-0f49.lib"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "aarch64-apple-darwin"])),
+                   vec!["libif_watch-0f49.dylib"]);
+        assert_eq!(extra_link_artifacts(&with(&["--crate-type", "cdylib", "--target", "wasm32-unknown-unknown"])),
+                   vec!["if_watch-0f49.wasm"]);
+        // A metadata-only pass of the same unit writes no shared object: nothing extra required.
+        let mut meta = with(&["--crate-type", "cdylib", "--crate-type", "lib"]);
+        meta.retain(|s| !s.starts_with("--emit"));
+        meta.push("--emit=metadata".into());
+        assert!(extra_link_artifacts(&meta).is_empty());
+    }
+
+    /// T4: a cdylib+lib unit (if-watch's shape) round-trips its .so, and an entry stored before T4
+    /// (rlib only) is a MISS instead of a hit that leaves cargo's expected output missing forever.
+    #[test]
+    fn t4_cdylib_roundtrip_and_rlib_only_entry_misses() {
+        iso();
+        let _cwd = cwd_guard();
+        let workspace = tmp_dir("cdylib");
+        let out_dir = workspace.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let src = workspace.join("lib.rs");
+        fs::write(&src, b"// cdylib").unwrap();
+        fs::write(out_dir.join("libdemo-c4c4.rlib"), b"rl").unwrap();
+        fs::write(out_dir.join("libdemo-c4c4.so"), b"shared object").unwrap();
+        let args: Vec<String> = vec![
+            "--crate-name".into(), "demo".into(),
+            "--crate-type".into(), "cdylib".into(), "--crate-type".into(), "lib".into(),
+            "--emit=link".into(),
+            "-C".into(), "extra-filename=-c4c4".into(),
+            "--out-dir".into(), out_dir.to_string_lossy().to_string(),
+            src.to_string_lossy().to_string(),
+        ];
+        let key = flux_cache::compute_hash(Some(&src.to_string_lossy()), &args);
+        let entry = collect_outputs(&args, &key);
+        assert!(entry.outputs.contains_key("x:libdemo-c4c4.so"), "collect must store the .so — got {:?}", entry.outputs);
+
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(apply_cached_outputs(&entry, &args), "complete cdylib entry must apply");
+        assert_eq!(fs::read(out_dir.join("libdemo-c4c4.so")).unwrap(), b"shared object");
+        assert!(out_dir.join("libdemo-c4c4.rlib").exists());
+
+        let mut rlib_only = entry.clone();
+        rlib_only.outputs.retain(|k, _| !k.starts_with("x:"));
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+        assert!(!apply_cached_outputs(&rlib_only, &args),
+            "T4: an rlib-only entry must NOT satisfy a cdylib link pass");
+        fs::remove_dir_all(&workspace).ok();
     }
 
     #[test]

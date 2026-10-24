@@ -1,0 +1,22 @@
+[server]
+listen = "0.0.0.0"
+port = 1194
+mode = "hybrid"
+max_clients = 100
+
+[authentication]
+zk_params = "/etc/irontunnel/zk_params.bin"
+allow_anonymous = false
+session_timeout = 3600
+
+[tor]
+enable_hidden_service = true
+hs_port = 1194
+hs_dir = "/var/lib/tor/irontunnel/"
+control_port = 9051
+
+[security]
+enable_kill_switch = true
+key_rotation_interval = 3600
+max_connection_time = 86400
+enable_pfs = true

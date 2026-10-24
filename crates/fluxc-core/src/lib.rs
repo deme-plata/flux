@@ -4,6 +4,8 @@
 // fluxc (CLI) depends on it for build orchestration.
 
 pub mod tdg;
+// compile-cost consequences: per-unit CPU/RSS samples, baselines, verdicts
+pub mod pulse;
 pub mod tdg_sched;
 pub mod combo_v2;
 pub mod warm_bin_cache;
@@ -416,13 +418,78 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
     // (signing) semantics; it no longer controls the wrapper.
     apply_wrapper_env(&mut cmd);
 
+    let mut pulse_inv = pulse_begin(&mut cmd);
+
     // FIP-0003 phase 1: every build-family invocation leaves a TDG breadcrumb
     // (node + run stamp). Advisory — tdg swallows its own failures.
     let tdg_start = std::time::Instant::now();
-    let s = cmd.status().expect("cargo");
+    let s = pulse_status(&mut cmd, &mut pulse_inv).expect("cargo");
+    let wall_ms = tdg_start.elapsed().as_millis() as u64;
     tdg::record_invocation(cargo_cmd, config.package.as_deref(), config.release,
-        s.success(), tdg_start.elapsed().as_millis() as u64);
+        s.success(), wall_ms);
+    pulse_end(&pulse_inv, cargo_cmd, config.package.as_deref(), config.release, s.success());
     if !s.success() { process::exit(s.code().unwrap_or(1)); }
+}
+
+/// Compile pulse, invocation side. Tags every rustc unit this cargo spawns
+/// with one id, so the verdict judges exactly this invocation's work even
+/// while other agents build on the same box. A caller (the MCP combo) may
+/// pre-set FLUX_INVOCATION_ID to read the verdict back afterwards.
+pub struct PulseInvocation {
+    pub inv: String,
+    pub start_ms: u64,
+    pub lock_busy: bool,
+    pub waits: pulse::LockWaits,
+}
+
+/// `cmd.status()` with cargo's lock-wait notices timed (stderr relayed
+/// unchanged). With FLUX_PULSE=0 this is a plain status().
+pub fn pulse_status(cmd: &mut Command, pi: &mut PulseInvocation) -> std::io::Result<std::process::ExitStatus> {
+    if !pulse::enabled() {
+        return cmd.status();
+    }
+    let (st, w) = pulse::status_with_lock_watch(cmd)?;
+    pi.waits = w;
+    Ok(st)
+}
+
+pub fn pulse_begin(cmd: &mut Command) -> PulseInvocation {
+    let inv = env::var("FLUX_INVOCATION_ID").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(pulse::new_invocation_id);
+    cmd.env("FLUX_INVOCATION_ID", &inv);
+    let target = env::var("CARGO_TARGET_DIR").ok().filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let cwd = env::current_dir().unwrap_or_default();
+            tdg_sched::find_workspace_root(&cwd).unwrap_or(cwd).join("target")
+        });
+    let lock_busy = pulse::enabled() && pulse::cargo_lock_busy(&target);
+    PulseInvocation { inv, start_ms: pulse::now_ms(), lock_busy, waits: Default::default() }
+}
+
+/// Judge, persist, print one line to stderr, fire `compile_pulse`.
+pub fn pulse_end(pi: &PulseInvocation, cmd: &str, package: Option<&str>, release: bool, green: bool)
+    -> Option<pulse::Pulse>
+{
+    let wall_ms = pulse::now_ms().saturating_sub(pi.start_ms);
+    let facts = pulse::InvocationFacts {
+        start_ms: pi.start_ms,
+        lock_busy_at_start: pi.lock_busy,
+        lock_wait_build_dir_ms: pi.waits.build_dir_ms,
+        lock_wait_pkg_cache_ms: pi.waits.package_cache_ms,
+        lock_added: None,
+        tests_failed: pi.waits.tests_failed,
+    };
+    let p = pulse::finish_invocation_facts(&pi.inv, cmd, package, release, green, wall_ms, &facts)?;
+    let worth_saying = p.units_compiled + p.units_failed > 0 || wall_ms >= 5000;
+    if worth_saying && env::var("FLUX_PULSE_QUIET").is_err() {
+        eprintln!("  \u{23f1} {}", p.headline);
+        if let Some(l) = p.levers.first() {
+            eprintln!("    \u{21b3} lever: {}", l);
+        }
+    }
+    pulse::dispatch(&p);
+    Some(p)
 }
 
 // ── LaTeX Build ──
@@ -822,13 +889,63 @@ pub fn wrapper_mode(args: &[String]) {
     // outside the tree also flips the key) — that's over-INVALIDATION, which
     // costs a rebuild, never correctness. ⚠ This changes every key: one cold
     // rebuild fleet-wide after deploying this binary.
+    let (tree_digest, src_bytes) = module_tree_digest_bytes(src_file);
+    // Compile pulse: WHY did this unit rebuild? Dependency content (the
+    // substituted --extern hashes) vs its own source tree.
+    let pulse_dep_digest = {
+        let mut h = blake3::Hasher::new();
+        for w in normalized_args.windows(2) {
+            if w[0] == "--extern" {
+                h.update(w[1].as_bytes());
+                h.update(b"\0");
+            }
+        }
+        h.finalize().to_hex()[..12].to_string()
+    };
+    let pulse_src_digest = {
+        let mut h = blake3::Hasher::new();
+        if let Some(f) = src_file {
+            if let Ok(b) = std::fs::read(f) {
+                h.update(blake3::hash(&b).as_bytes());
+            }
+        }
+        h.update(tree_digest.as_bytes());
+        h.finalize().to_hex()[..12].to_string()
+    };
     let cache_key = if root_key.is_empty() {
         root_key
     } else {
         let mut h = blake3::Hasher::new();
         h.update(root_key.as_bytes());
-        h.update(module_tree_digest(src_file).as_bytes());
+        h.update(tree_digest.as_bytes());
         h.finalize().to_hex().to_string()
+    };
+
+    // Compile pulse: one sample per unit — CPU + peak RSS of the rustc child,
+    // the unit's shape and size. Recorded for hits and misses alike, so a
+    // build's cache rate and its cost come from the same measurement.
+    let shape = pulse::shape_from_args(&rustc_args);
+    let pulse_sample = |outcome: &str, wall_ms: u64, cpu_ms: u64, rss_kb: u64| pulse::UnitSample {
+        ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        inv: std::env::var("FLUX_INVOCATION_ID").unwrap_or_default(),
+        pkg: tdg_pkg.clone(),
+        crate_name: tdg_crate.clone(),
+        kind: shape.kind.clone(),
+        mode: shape.mode.clone(),
+        is_test: tdg_is_test,
+        opt: shape.opt.clone(),
+        target: shape.target.clone(),
+        feat: shape.feat.clone(),
+        local: pulse::is_local_manifest(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()),
+        outcome: outcome.to_string(),
+        wall_ms,
+        cpu_ms,
+        rss_kb,
+        src_bytes,
+        load1: pulse::load1(),
+        end_ms: pulse::now_ms(),
+        dep_digest: pulse_dep_digest.clone(),
+        src_digest: pulse_src_digest.clone(),
     };
 
     // Try a cache hit. apply_cached_outputs returns `true` only when every
@@ -857,6 +974,7 @@ pub fn wrapper_mode(args: &[String]) {
                 if flux_driver::apply_cached_outputs(&entry, &rustc_args) {
                     if trace { eprintln!("FLUXCACHE HIT {} key={}", cn, kp); }
                     record_cache_event(true);
+                    pulse::record_unit(&pulse_sample("restored", tdg_t0.elapsed().as_millis() as u64, 0, 0));
                     tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_pkg, tdg_is_test,
                         &tdg_deps, "skipped", tdg_t0.elapsed().as_millis() as u64);
                     return;
@@ -874,8 +992,15 @@ pub fn wrapper_mode(args: &[String]) {
     // Cache miss — run real rustc.
     let mut cmd = Command::new(rustc_path);
     for a in &rustc_args { cmd.arg(a); }
-    match cmd.status() {
+    let (cpu0, _) = pulse::children_rusage();
+    let rustc_t0 = std::time::Instant::now();
+    let status = cmd.status();
+    let rustc_wall = rustc_t0.elapsed().as_millis() as u64;
+    let (cpu1, rss_kb) = pulse::children_rusage();
+    let rustc_cpu = cpu1.saturating_sub(cpu0);
+    match status {
         Ok(s) if s.success() => {
+            pulse::record_unit(&pulse_sample("compiled", rustc_wall, rustc_cpu, rss_kb));
             // Successful build — capture outputs + store under the key for
             // future runs. The collect_outputs result includes paths to the
             // rmeta/rlib/dep-info files rustc just produced; store with the
@@ -894,6 +1019,7 @@ pub fn wrapper_mode(args: &[String]) {
                 &tdg_deps, "green", tdg_t0.elapsed().as_millis() as u64);
         }
         Ok(s) => {
+            pulse::record_unit(&pulse_sample("failed", rustc_wall, rustc_cpu, rss_kb));
             tdg::spool_wrapper_unit(&cache_key, &tdg_crate, &tdg_pkg, tdg_is_test,
                 &tdg_deps, "red", tdg_t0.elapsed().as_millis() as u64);
             process::exit(s.code().unwrap_or(1));
@@ -911,9 +1037,16 @@ pub fn wrapper_mode(args: &[String]) {
 /// key). Empty string when the unit has no siblings — keys for single-file
 /// units are unchanged. See the cache-correctness comment at the call site.
 fn module_tree_digest(src_file: Option<&str>) -> String {
-    let Some(root) = src_file else { return String::new() };
+    module_tree_digest_bytes(src_file).0
+}
+
+/// `module_tree_digest` plus the total source bytes of the unit (root file +
+/// every sibling `.rs`) — the size signal the compile pulse pairs with cost.
+fn module_tree_digest_bytes(src_file: Option<&str>) -> (String, u64) {
+    let Some(root) = src_file else { return (String::new(), 0) };
+    let mut total_bytes: u64 = std::fs::metadata(root).map(|m| m.len()).unwrap_or(0);
     let root_path = std::path::Path::new(root);
-    let Some(dir) = root_path.parent() else { return String::new() };
+    let Some(dir) = root_path.parent() else { return (String::new(), total_bytes) };
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -937,6 +1070,7 @@ fn module_tree_digest(src_file: Option<&str>) -> String {
         if f == root_path { continue; }
         let Ok(content) = std::fs::read(f) else { continue };
         any = true;
+        total_bytes += content.len() as u64;
         // RELATIVE path in the digest — absolute paths would re-break the
         // cross-workspace key stability the arg normalization establishes.
         let rel = f.strip_prefix(dir).unwrap_or(f);
@@ -944,8 +1078,8 @@ fn module_tree_digest(src_file: Option<&str>) -> String {
         h.update(b"\0");
         h.update(blake3::hash(&content).as_bytes());
     }
-    if !any { return String::new(); }
-    h.finalize().to_hex().to_string()
+    if !any { return (String::new(), total_bytes); }
+    (h.finalize().to_hex().to_string(), total_bytes)
 }
 
 /// Normalize rustc args so the cache key is workspace-independent.
@@ -1231,8 +1365,10 @@ pub fn self_build(config: BuildConfig) {
     // target/.rustc_info.json and made every subsequent self-build fail).
     cmd.stdin(Stdio::null());
 
-    let status = cmd.status().expect("cargo");
+    let mut pi = pulse_begin(&mut cmd);
+    let status = pulse_status(&mut cmd, &mut pi).expect("cargo");
     let elapsed_ms = start.elapsed().as_millis() as u64;
+    pulse_end(&pi, "self", Some("<workspace>"), config.release, status.success());
     TOTAL_BUILD_TIME_MS.fetch_add(elapsed_ms, Ordering::Relaxed);
 
     if !status.success() {
@@ -1315,7 +1451,10 @@ pub fn run_tests(package: Option<&str>, extra: &[String]) {
     cmd.args(build_test_args(package, extra));
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
-    let status = cmd.status().unwrap_or(std::process::ExitStatus::default());
+    let release = extra.iter().any(|a| a == "--release" || a == "-r");
+    let mut pi = pulse_begin(&mut cmd);
+    let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
+    pulse_end(&pi, "test", package, release, status.success());
     if !status.success() {
         eprintln!("Some tests failed");
         process::exit(status.code().unwrap_or(1));
@@ -1358,10 +1497,12 @@ pub fn run_test_bins(package: Option<&str>) {
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
     cmd.stderr(Stdio::inherit());
+    let pi = pulse_begin(&mut cmd);
     let out = match cmd.output() {
         Ok(o) => o,
         Err(e) => { eprintln!("cargo spawn failed: {}", e); process::exit(1); }
     };
+    pulse_end(&pi, "test-bins", package, false, out.status.success());
     let bins = parse_test_executables(&String::from_utf8_lossy(&out.stdout));
     if !out.status.success() {
         eprintln!("test-bins: build failed");
@@ -1530,19 +1671,25 @@ pub fn run_self_update(force: bool) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let bin_dir = format!("{}/.flux/bin", home);
     let _ = std::fs::create_dir_all(&bin_dir);
-    let target = format!("{}/fluxc", bin_dir);
+    let target = std::path::PathBuf::from(format!("{}/fluxc", bin_dir));
 
-    let url = "https://fluxapp.xyz/downloads/fluxc-musl-x64";
-    println!("  Fetching {} ...", url);
+    // 2026-10-23: through the SIGNED manifest. This used to `curl` a stable URL straight
+    // into ~/.flux/bin/fluxc with no check at all — whoever controlled the server chose
+    // the binary. On Epsilon ~/.flux/bin/fluxc is a symlink to the shared development
+    // build, so that curl would also have overwritten every session's fluxc.
+    let manifest_url = std::env::var("FLUX_MANIFEST_URL")
+        .unwrap_or_else(|_| p2p_worker::manifest_url_for("fluxc"));
+    println!("  manifest {} (+ .sig, pinned key {}…)", manifest_url, &p2p_worker::FLUX_RELEASE_PUBKEY_HEX[..8]);
+    let result = p2p_worker::fetch_verified_manifest(&manifest_url)
+        .and_then(|m| {
+            println!("  ✓ signature valid — release v{} ({})", m.version, m.url);
+            p2p_worker::download_verified(&m).map(|p| (m, p))
+        })
+        .and_then(|(m, p)| p2p_worker::install_verified(&p, &target).map(|_| m));
 
-    let status = std::process::Command::new("curl")
-        .args(["-fsSL", url, "-o", &target])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            let _ = std::process::Command::new("chmod").args(["+x", &target]).status();
-            println!("  ✓ Updated {}", target);
+    match result {
+        Ok(m) => {
+            println!("  ✓ Updated {} to v{}", target.display(), m.version);
             // `version`, not `--version`: the dashed form is the rustc -vV wrapper
             // passthrough and prints rustc's version, not fluxc's.
             if let Ok(v) = std::process::Command::new(&target).arg("version").output() {
@@ -1550,13 +1697,15 @@ pub fn run_self_update(force: bool) {
             }
             println!("  Restart clients using this fluxc for MCP.");
         }
-        _ => {
-            eprintln!("  Failed to download prebuilt. Try manual or source build.");
-            if force {
-                // fallback to current exe copy
+        Err(e) => {
+            eprintln!("  ✗ {e}");
+            eprintln!("  Nothing was installed. Try again later, or build from source.");
+            let is_link = std::fs::symlink_metadata(&target).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if force && !is_link {
+                // fallback to current exe copy (never through a symlink)
                 if let Ok(exe) = std::env::current_exe() {
                     let _ = std::fs::copy(exe, &target);
-                    println!("  Fallback: copied current exe to {}", target);
+                    println!("  Fallback: copied current exe to {}", target.display());
                 }
             }
         }

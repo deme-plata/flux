@@ -26,8 +26,9 @@ sha3 = "0.10"
 blake3 = "1.0"
 
 # GPU acceleration with WebGPU
-wgpu = { version = "0.17" }
-bytemuck = { version = "1.0", features = ["derive"] }
+# optional since 2026-10-03: only the `gpu-acceleration` feature (default ON) needs them
+wgpu = { version = "0.17", optional = true }
+bytemuck = { version = "1.0", features = ["derive"], optional = true }
 
 # Mathematics and field operations
 # Note: These are simplified dependencies for Phase 3 implementation
@@ -48,7 +49,7 @@ tokio-test = "0.4"
 
 [features]
 default = ["gpu-acceleration"]
-gpu-acceleration = []
+gpu-acceleration = ["dep:wgpu", "dep:bytemuck"]
 cpu-only = []
 benchmark-mode = []
 

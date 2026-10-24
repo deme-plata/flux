@@ -26,7 +26,7 @@ pqcrypto-traits = "0.3"
 rayon = "1"
 
 # Vendored Quillon Graph ZK stack — opt-in via the `pq` feature.
-flux-zk-stark = { path = "../flux-zk-stark", optional = true }
+flux-zk-stark = { path = "../flux-zk-stark", optional = true, default-features = false } # no GPU prover used here; keeps wgpu/naga/ash out of fluxc (pulse, 2026-10-03)
 flux-lattice-guard = { path = "../flux-lattice-guard", optional = true }
 flux-recursive-proofs = { path = "../flux-recursive-proofs", optional = true, default-features = false }
 flux-tip-proof-stir = { path = "../flux-tip-proof-stir", optional = true }

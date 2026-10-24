@@ -17,3 +17,5 @@ fluxc-util = { path = "../fluxc-util" }
 fluxc-analytics = { path = "../fluxc-analytics" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 2026-10-08: opt-in gzip of large finite proxied replies (sigilgraph.org sealed pool epochs).
+flate2 = "1"

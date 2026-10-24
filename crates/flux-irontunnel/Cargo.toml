@@ -1,0 +1,87 @@
+[package]
+name = "flux-irontunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IronTunnel VPN ported into Flux — framed TCP tunnel server/client (Linux TUN + NAT, Windows packet capture), DNS forwarder, IP pool, REST API and Slint GUI. Ported from the IronTunnel v0.0.2 tree (Beta backup); see PORT.md for what is real and what is still pretend."
+
+# Feature layout: the default build is the LIGHT core (tunnel protocol, TUN/NAT,
+# DNS forwarder, IP pool, monitor) so another app (ZenTorrent) can depend on it
+# without pulling a GUI toolkit, an HTTP server or a STARK prover into its lock.
+[features]
+default = []
+# reqwest client for the server's REST API (was `api` upstream).
+api = ["dep:reqwest"]
+# warp REST API + metrics endpoint inside the server (was `server-api` upstream).
+server-api = ["dep:warp"]
+# Slint desktop client (was `gui` upstream).
+gui = ["dep:slint", "dep:slint-build"]
+# Command-line binaries (server, CLI client, API test client).
+cli = ["dep:clap", "dep:colored", "dep:tracing-subscriber", "dep:toml"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+rand = "0.8"
+libc = "0.2"
+sysinfo = "0.30"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# IronTunnel v1 secure channel (Noise IK) — audited crates, nothing hand-rolled
+snow = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
+hex = "0.4"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+warp = { version = "0.3", optional = true }
+slint = { version = "1.8", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+colored = { version = "2", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+toml = { version = "0.8", optional = true }
+
+[[bin]]
+name = "irontunnel-server"
+path = "src/bin/irontunnel-server.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-client"
+path = "src/bin/irontunnel-client.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-keygen"
+path = "src/bin/irontunnel-keygen.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-relay"
+path = "src/bin/irontunnel-relay.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "irontunnel-socks"
+path = "src/bin/irontunnel-socks.rs"
+required-features = ["cli"]
+
+# The Slint desktop client. Ported from upstream src/bin/gui_fixed_auth.rs — the source
+# of every shipped Windows exe (md5-matched: IronTunnel-VPN.exe in the v0.0.2 zips).
+[[bin]]
+name = "irontunnel-gui"
+path = "src/bin/irontunnel-gui.rs"
+required-features = ["gui"]
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef", "minwindef", "iphlpapi", "netioapi"] }
+
+[build-dependencies]
+slint-build = { version = "1.8", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

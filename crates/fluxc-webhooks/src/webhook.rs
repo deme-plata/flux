@@ -479,8 +479,9 @@ fn send_http_post(
     timeout_secs: u64,
 ) -> Result<u16, String> {
     // SEC-006: re-check at the dispatch chokepoint — catches DNS rebinding and
-    // any webhook entry that predates the register-time guard.
-    ssrf_check(url)?;
+    // any webhook entry that predates the register-time guard. Literal loopback
+    // IPs are exempt (they cannot rebind; see ssrf_check_dispatch).
+    crate::webhook_ssrf::ssrf_check_dispatch(url)?;
     let mut cmd = std::process::Command::new("curl");
     cmd.arg("-s")
         .arg("-o").arg("/dev/null")
@@ -562,6 +563,11 @@ pub fn auto_dispatch(event: &str, data: serde_json::Value) {
 
 /// Test a webhook URL by sending a signed ping. Returns (success, http_status, message).
 pub fn test_webhook_url(url: &str, secret: &str) -> (bool, u16, String) {
+    // An ad-hoc URL is NOT a registered endpoint: hold it to the full
+    // registration policy (no loopback exemption — that's dispatch-only).
+    if let Err(e) = ssrf_check(url) {
+        return (false, 0, e);
+    }
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let body = serde_json::to_string(&serde_json::json!({
         "event": "ping",

@@ -1,0 +1,629 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit, ComboBox, CheckBox, ScrollView, ListView, TabWidget, ProgressIndicator, GroupBox, StandardButton, TextEdit, Slider } from "std-widgets.slint";
+
+export struct ServerInfo {
+    id: string,
+    name: string,
+    country: string,
+    city: string,
+    load: int,
+    ping: int,
+}
+
+export struct ConnectionStats {
+    download_speed: string,
+    upload_speed: string,
+    ping: string,
+    data_transferred: string,
+    connection_time: string,
+}
+
+export component MainWindow inherits Window {
+    in property <bool> is-connected: false;
+    in property <string> connection-status: "Disconnected";
+    in property <[ServerInfo]> servers: [
+        { id: "us-east-1", name: "US East", country: "United States", city: "New York", load: 45, ping: 25 },
+        { id: "us-west-1", name: "US West", country: "United States", city: "Los Angeles", load: 62, ping: 35 },
+        { id: "eu-west-1", name: "EU West", country: "Germany", city: "Frankfurt", load: 38, ping: 85 },
+        { id: "eu-north-1", name: "EU North", country: "Sweden", city: "Stockholm", load: 29, ping: 95 },
+        { id: "asia-1", name: "Asia Pacific", country: "Singapore", city: "Singapore", load: 51, ping: 145 },
+    ];
+    in property <ConnectionStats> stats: {
+        download_speed: "0 MB/s",
+        upload_speed: "0 MB/s", 
+        ping: "0 ms",
+        data_transferred: "0 MB",
+        connection_time: "00:00:00"
+    };
+    in property <int> selected-server-index: 0;
+    in property <bool> kill-switch-enabled: true;
+    in property <bool> dns-protection-enabled: true;
+    in property <bool> wireguard-enabled: true;
+    in property <bool> multihop-enabled: false;
+    in property <bool> split-tunnel-enabled: false;
+    in property <string> zk-identity-count: "0";
+    in property <string> crypto-session-keys: "0";
+
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback server-selected(int);
+    callback kill-switch-toggled(bool);
+    callback dns-protection-toggled(bool);
+    callback wireguard-toggled(bool);
+    callback multihop-toggled(bool);
+    callback split-tunnel-toggled(bool);
+    callback generate-zk-identity();
+    callback rotate-crypto-keys();
+    callback refresh-servers();
+
+    title: "IronTunnel VPN - Next-Generation Secure VPN";
+    width: 1000px;
+    height: 700px;
+    background: #1a1a1a;
+
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+
+        // Header
+        HorizontalBox {
+            height: 60px;
+            Rectangle {
+                background: @linear-gradient(90deg, #2d5a87 0%, #1e3a5f 100%);
+                border-radius: 8px;
+                
+                HorizontalBox {
+                    padding: 15px;
+                    alignment: space-between;
+                    
+                    Text {
+                        text: "🛡️ IronTunnel VPN";
+                        font-size: 24px;
+                        font-weight: 700;
+                        color: white;
+                    }
+                    
+                    Text {
+                        text: connection-status;
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: is-connected ? #4ade80 : #ef4444;
+                    }
+                }
+            }
+        }
+
+        // Main Content
+        HorizontalBox {
+            spacing: 20px;
+            
+            // Left Panel - Connection & Servers
+            VerticalBox {
+                width: 400px;
+                spacing: 15px;
+                
+                // Connection Control
+                GroupBox {
+                    title: "Connection Control";
+                    
+                    VerticalBox {
+                        padding: 15px;
+                        spacing: 15px;
+                        
+                        // Quick Connect Button
+                        Rectangle {
+                            height: 80px;
+                            background: is-connected ? #dc2626 : #16a34a;
+                            border-radius: 12px;
+                            
+                            TouchArea {
+                                clicked => {
+                                    if (is-connected) {
+                                        disconnect-clicked();
+                                    } else {
+                                        connect-clicked();
+                                    }
+                                }
+                            }
+                            
+                            VerticalBox {
+                                alignment: center;
+                                
+                                Text {
+                                    text: is-connected ? "🔴 DISCONNECT" : "🟢 CONNECT";
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    color: white;
+                                }
+                                
+                                Text {
+                                    text: is-connected ? "Secure connection active" : "Click to connect";
+                                    font-size: 12px;
+                                    color: white;
+                                    opacity: 0.8;
+                                }
+                            }
+                        }
+                        
+                        // Connection Progress
+                        if !is-connected && connection-status != "Disconnected": ProgressIndicator {
+                            indeterminate: true;
+                        }
+                    }
+                }
+                
+                // Server Selection
+                GroupBox {
+                    title: "Server Selection";
+                    
+                    VerticalBox {
+                        padding: 15px;
+                        spacing: 10px;
+                        
+                        HorizontalBox {
+                            spacing: 10px;
+                            
+                            Text {
+                                text: "Current Server:";
+                                color: #e5e7eb;
+                                vertical-alignment: center;
+                            }
+                            
+                            Button {
+                                text: "🔄 Refresh";
+                                clicked => { refresh-servers(); }
+                            }
+                        }
+                        
+                        ScrollView {
+                            height: 200px;
+                            
+                            VerticalBox {
+                                for server[index] in servers: Rectangle {
+                                    height: 60px;
+                                    background: index == selected-server-index ? #374151 : (Math.mod(index, 2) == 0 ? #2d3748 : #1a202c);
+                                    border-radius: 6px;
+                                    
+                                    TouchArea {
+                                        clicked => {
+                                            server-selected(index);
+                                        }
+                                    }
+                                    
+                                    HorizontalBox {
+                                        padding: 12px;
+                                        spacing: 15px;
+                                        
+                                        VerticalBox {
+                                            alignment: start;
+                                            
+                                            Text {
+                                                text: server.name + " (" + server.city + ")";
+                                                font-size: 14px;
+                                                font-weight: 600;
+                                                color: white;
+                                            }
+                                            
+                                            Text {
+                                                text: server.country;
+                                                font-size: 12px;
+                                                color: #9ca3af;
+                                            }
+                                        }
+                                        
+                                        Rectangle {
+                                            width: 1px;
+                                        }
+                                        
+                                        VerticalBox {
+                                            alignment: center;
+                                            
+                                            Text {
+                                                text: "Load: " + server.load + "%";
+                                                font-size: 11px;
+                                                color: server.load < 50 ? #4ade80 : (server.load < 80 ? #fbbf24 : #ef4444);
+                                            }
+                                            
+                                            Text {
+                                                text: "Ping: " + server.ping + "ms";
+                                                font-size: 11px;
+                                                color: #9ca3af;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Right Panel - Tabs
+            VerticalBox {
+                spacing: 15px;
+                
+                TabWidget {
+                    height: 100%;
+                    
+                    Tab {
+                        title: "📊 Statistics";
+                        
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 20px;
+                                
+                                // Connection Stats
+                                GroupBox {
+                                    title: "Connection Statistics";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        GridLayout {
+                                            spacing: 15px;
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Download Speed:";
+                                                    color: #e5e7eb;
+                                                }
+                                                Text {
+                                                    text: stats.download_speed;
+                                                    color: #4ade80;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Upload Speed:";
+                                                    color: #e5e7eb;
+                                                }
+                                                Text {
+                                                    text: stats.upload_speed;
+                                                    color: #60a5fa;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Ping:";
+                                                    color: #e5e7eb;
+                                                }
+                                                Text {
+                                                    text: stats.ping;
+                                                    color: #fbbf24;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Data Transferred:";
+                                                    color: #e5e7eb;
+                                                }
+                                                Text {
+                                                    text: stats.data_transferred;
+                                                    color: #a78bfa;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Connection Time:";
+                                                    color: #e5e7eb;
+                                                }
+                                                Text {
+                                                    text: stats.connection_time;
+                                                    color: #34d399;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Security Stats
+                                GroupBox {
+                                    title: "Security Status";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        GridLayout {
+                                            spacing: 15px;
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "ZK Identities:";
+                                                    color: #e5e7eb;
+                                                }
+                                                HorizontalBox {
+                                                    Text {
+                                                        text: zk-identity-count;
+                                                        color: #4ade80;
+                                                        font-weight: 600;
+                                                    }
+                                                    Button {
+                                                        text: "Generate";
+                                                        clicked => { generate-zk-identity(); }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            Row {
+                                                Text {
+                                                    text: "Crypto Sessions:";
+                                                    color: #e5e7eb;
+                                                }
+                                                HorizontalBox {
+                                                    Text {
+                                                        text: crypto-session-keys;
+                                                        color: #60a5fa;
+                                                        font-weight: 600;
+                                                    }
+                                                    Button {
+                                                        text: "Rotate";
+                                                        clicked => { rotate-crypto-keys(); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    Tab {
+                        title: "⚙️ Settings";
+                        
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 20px;
+                                
+                                // Core Features
+                                GroupBox {
+                                    title: "Core Features";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        HorizontalBox {
+                                            CheckBox {
+                                                text: "Kill Switch Protection";
+                                                checked: kill-switch-enabled;
+                                                toggled => { kill-switch-toggled(self.checked); }
+                                            }
+                                        }
+                                        
+                                        HorizontalBox {
+                                            CheckBox {
+                                                text: "DNS Leak Protection";
+                                                checked: dns-protection-enabled;
+                                                toggled => { dns-protection-toggled(self.checked); }
+                                            }
+                                        }
+                                        
+                                        Text {
+                                            text: "🛡️ Blocks ads, malware, and trackers";
+                                            font-size: 12px;
+                                            color: #9ca3af;
+                                        }
+                                    }
+                                }
+                                
+                                // Protocol Settings
+                                GroupBox {
+                                    title: "Protocol & Advanced Features";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        HorizontalBox {
+                                            CheckBox {
+                                                text: "WireGuard Protocol";
+                                                checked: wireguard-enabled;
+                                                toggled => { wireguard-toggled(self.checked); }
+                                            }
+                                        }
+                                        
+                                        Text {
+                                            text: "⚡ Modern, fast, and secure VPN protocol";
+                                            font-size: 12px;
+                                            color: #9ca3af;
+                                        }
+                                        
+                                        HorizontalBox {
+                                            CheckBox {
+                                                text: "Multi-Hop VPN (Double VPN)";
+                                                checked: multihop-enabled;
+                                                toggled => { multihop-toggled(self.checked); }
+                                            }
+                                        }
+                                        
+                                        Text {
+                                            text: "🔀 Route traffic through multiple servers for extra security";
+                                            font-size: 12px;
+                                            color: #9ca3af;
+                                        }
+                                        
+                                        HorizontalBox {
+                                            CheckBox {
+                                                text: "Split Tunneling";
+                                                checked: split-tunnel-enabled;
+                                                toggled => { split-tunnel-toggled(self.checked); }
+                                            }
+                                        }
+                                        
+                                        Text {
+                                            text: "🚦 Choose which apps use the VPN";
+                                            font-size: 12px;
+                                            color: #9ca3af;
+                                        }
+                                    }
+                                }
+                                
+                                // Zero-Knowledge Section
+                                GroupBox {
+                                    title: "Zero-Knowledge Proofs";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        Text {
+                                            text: "🔐 IronTunnel uses cutting-edge zero-knowledge STARK proofs for authentication, ensuring your identity remains completely private even from us.";
+                                            font-size: 13px;
+                                            color: #e5e7eb;
+                                            wrap: word-wrap;
+                                        }
+                                        
+                                        Text {
+                                            text: "No logs. No tracking. Mathematically proven privacy.";
+                                            font-size: 12px;
+                                            color: #4ade80;
+                                            font-weight: 600;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    Tab {
+                        title: "🔧 Advanced";
+                        
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 20px;
+                                
+                                GroupBox {
+                                    title: "Tor Integration";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        Text {
+                                            text: "🧅 Tor Integration Options";
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                            color: #e5e7eb;
+                                        }
+                                        
+                                        ComboBox {
+                                            model: ["Direct Connection", "VPN over Tor", "Tor over VPN", "Hybrid Mode"];
+                                            current-value: "Direct Connection";
+                                        }
+                                        
+                                        Text {
+                                            text: "• Direct: Standard VPN connection\n• VPN over Tor: Connect to VPN through Tor network\n• Tor over VPN: Route Tor traffic through VPN\n• Hybrid: Dynamic routing based on destination";
+                                            font-size: 12px;
+                                            color: #9ca3af;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                                
+                                GroupBox {
+                                    title: "Performance Tuning";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 15px;
+                                        
+                                        HorizontalBox {
+                                            Text {
+                                                text: "Connection Timeout:";
+                                                color: #e5e7eb;
+                                                vertical-alignment: center;
+                                            }
+                                            Slider {
+                                                minimum: 5;
+                                                maximum: 60;
+                                                value: 30;
+                                            }
+                                            Text {
+                                                text: "30s";
+                                                color: #9ca3af;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        
+                                        HorizontalBox {
+                                            Text {
+                                                text: "Key Rotation Interval:";
+                                                color: #e5e7eb;
+                                                vertical-alignment: center;
+                                            }
+                                            Slider {
+                                                minimum: 300;
+                                                maximum: 7200;
+                                                value: 3600;
+                                            }
+                                            Text {
+                                                text: "1h";
+                                                color: #9ca3af;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                GroupBox {
+                                    title: "Debug Information";
+                                    
+                                    VerticalBox {
+                                        padding: 15px;
+                                        spacing: 10px;
+                                        
+                                        TextEdit {
+                                            height: 150px;
+                                            text: "IronTunnel VPN v0.1.0\nRust Implementation\n\nFeatures Enabled:\n✓ Zero-Knowledge STARK Proofs\n✓ ChaCha20-Poly1305 Encryption\n✓ WireGuard Protocol\n✓ DNS Leak Protection\n✓ Kill Switch\n\nConnection Log:\n[INFO] GUI initialized\n[INFO] Crypto engine ready\n[INFO] ZK proof system online\n[INFO] Ready for connection";
+                                            read-only: true;
+                                            font-size: 11px;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Status Bar
+        Rectangle {
+            height: 30px;
+            background: #374151;
+            border-radius: 6px;
+            
+            HorizontalBox {
+                padding: 8px;
+                alignment: space-between;
+                
+                Text {
+                    text: "🛡️ IronTunnel - Zero-Knowledge VPN • Rust + STARK Proofs • No Logs Guaranteed";
+                    font-size: 11px;
+                    color: #9ca3af;
+                }
+                
+                Text {
+                    text: is-connected ? "🟢 SECURE" : "🔴 UNPROTECTED";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: is-connected ? #4ade80 : #ef4444;
+                }
+            }
+        }
+    }
+}

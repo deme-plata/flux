@@ -56,7 +56,23 @@ fn flux_cortex_loop(args: &Value) -> String {
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_loop: {e}") };
     let mut cortex = flux_cortex::Cortex::with_persistence(ws);
     let result = cortex.run_loop(preset);
-    serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("❌ {e}"))
+    honest_envelope(serde_json::to_value(&result).unwrap_or_default())
+}
+
+/// The cortex's VALIDATE phase is simulated (flux-cortex lib.rs: "actual =
+/// estimated × accuracy ± noise") — its "actual" gains are not measurements.
+/// Say so in-band, and put the one thing that IS measured next to it.
+fn honest_envelope(result: Value) -> String {
+    // First line, outside the JSON: serde_json sorts keys, so an in-band
+    // warning would land at the bottom where nobody reads it.
+    let banner = "⚠ cortex VALIDATE is SIMULATED (actual = estimate × accuracy ± noise) — its gains are not measurements. Real compile cost: measured_compile_pressure below / flux_compile_pulse.";
+    let body = serde_json::to_string_pretty(&json!({
+        "validation": "SIMULATED — actual_impact/actual_total_gain = estimate × accuracy ± noise (flux-cortex VALIDATE phase); not measured. Do not cite as a result.",
+        "measured_compile_pressure": crate::handlers::pulse::measured_compile_pressure(),
+        "cortex": result,
+    }))
+    .unwrap_or_else(|e| format!("❌ {e}"));
+    format!("{}\n{}", banner, body)
 }
 
 fn flux_cortex_continuous(args: &Value) -> String {
@@ -71,15 +87,15 @@ fn flux_cortex_continuous(args: &Value) -> String {
     let mut cortex = flux_cortex::Cortex::with_persistence(ws);
     let results = cortex.run_continuous(iterations, preset);
     let total_gain: f64 = results.iter().filter_map(|r| r.actual_total_gain_pct).sum();
-    let summary = json!({"iterations_completed": results.len(), "iterations_requested": iterations, "total_actual_gain_pct": format!("{:.2}%", total_gain), "results": results});
-    serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("❌ {e}"))
+    let summary = json!({"iterations_completed": results.len(), "iterations_requested": iterations, "total_simulated_gain_pct": format!("{:.2}%", total_gain), "results": results});
+    honest_envelope(summary)
 }
 
 fn flux_cortex_summary(_args: &Value) -> String {
     let ws = match discover_workspace() { Ok(w) => w, Err(e) => return format!("❌ cortex_summary: {e}") };
     let cortex = flux_cortex::Cortex::with_persistence(ws);
     let summary = cortex.summary();
-    serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("❌ {e}"))
+    honest_envelope(serde_json::to_value(&summary).unwrap_or_default())
 }
 
 fn flux_cortex_reset(_args: &Value) -> String {

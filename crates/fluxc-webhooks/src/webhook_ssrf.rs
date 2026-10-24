@@ -63,6 +63,41 @@ pub fn ssrf_check_with(url: &str, allow_private: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Dispatch-time guard for an endpoint that is ALREADY in the 0600 webhook
+/// config (it passed `ssrf_check` at registration). A literal loopback IP
+/// (`127.0.0.0/8`, `[::1]`) cannot DNS-rebind, which is what the dispatch
+/// re-check exists to catch — so it is allowed here even when the current
+/// process lacks FLUX_WEBHOOK_ALLOW_PRIVATE. Without this, a same-host
+/// receiver (fluxc serve's /api/build_event) only ever heard from builds the
+/// MCP server spawned, and silently nothing from a `fluxc build` in a shell.
+/// Hostnames (even `localhost`), private ranges and metadata stay checked.
+pub fn ssrf_check_dispatch(url: &str) -> Result<(), String> {
+    if is_literal_loopback_url(url) {
+        return Ok(());
+    }
+    ssrf_check(url)
+}
+
+fn is_literal_loopback_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.contains('@') {
+        return false; // userinfo games: fall back to the full check
+    }
+    let host = if let Some(h) = authority.strip_prefix('[') {
+        h.split(']').next().unwrap_or("")
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    };
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 /// The cloud-metadata SSRF target — blocked unconditionally.
 pub fn is_metadata_ip(ip: &IpAddr) -> bool {
     matches!(ip, IpAddr::V4(v4) if v4.octets() == [169, 254, 169, 254])
@@ -90,3 +125,21 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 }
 
 
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn literal_loopback_passes_dispatch_but_nothing_else_does() {
+        assert!(is_literal_loopback_url("http://127.0.0.1:8084/api/build_event"));
+        assert!(is_literal_loopback_url("http://[::1]:8084/x"));
+        assert!(!is_literal_loopback_url("http://localhost:8084/x"), "names can rebind");
+        assert!(!is_literal_loopback_url("http://10.0.0.5/x"));
+        assert!(!is_literal_loopback_url("http://169.254.169.254/latest"));
+        assert!(!is_literal_loopback_url("http://evil.com@127.0.0.1/x"));
+        assert!(!is_literal_loopback_url("file:///etc/passwd"));
+        // metadata still refused at dispatch, regardless of env
+        assert!(ssrf_check_dispatch("http://169.254.169.254/").is_err());
+    }
+}

@@ -85,6 +85,8 @@ fn flux_quickstart(_args: &Value) -> String {
     qs.push("  flux_quickstart     — this (docs + rules + combos)".to_string());
     qs.push("  Call flux_mcp_status FIRST after connecting a new MCP.".to_string());
     qs.push("".to_string());
+    qs.push(fluxc_core::pulse::weather());
+    qs.push("".to_string());
 
     // Dynamic, portable paths — works for first-time users on any machine.
     // ws() walks from the running fluxc exe (target/debug/fluxc or ~/.flux/bin/fluxc)

@@ -61,7 +61,10 @@ pub const DEFAULT_PROBES: &str = "http://127.0.0.1:18181/v1/integrity#height,htt
 /// Containment: the build's memory cap is MemAvailable − floor, clamped to [MIN_CAP, BUILD_MAX].
 pub const DEFAULT_BUILD_MAX_GB: f64 = 16.0;
 pub const MIN_CAP_GB: f64 = 4.0;
-/// IO cap on the target dir's device inside a contained build; FLUX_GUARD_IO_MBPS overrides, 0 = none.
+/// IO WRITE cap on the target dir's device inside a contained build; the READ cap is twice it
+/// (a build's reads are bursty metadata, and a 150 MB/s read cap on a cold `cargo` fingerprint
+/// scan of this target dir measured 7.6–23.7 s against 5–16 s uncapped, noise included).
+/// FLUX_GUARD_IO_MBPS overrides the write cap (read = 2×), 0 = no IO caps at all.
 pub const IO_CAP_MBPS: u64 = 150;
 /// What an UNCONTAINED guarded build is assumed to reserve, for admission control.
 pub const UNCONTAINED_RESERVE_GB: f64 = 8.0;
@@ -680,7 +683,7 @@ pub fn contain_plan(g: &Guard) -> Contain {
         "-p".into(), format!("MemoryHigh={}M", (high_gb * 1024.0) as u64),
         "-p".into(), "OOMPolicy=kill".into()];
     if let Some(dev) = &io_dev {
-        launcher.push("-p".into()); launcher.push(format!("IOReadBandwidthMax={dev} {io_mbps}M"));
+        launcher.push("-p".into()); launcher.push(format!("IOReadBandwidthMax={dev} {}M", io_mbps * 2));
         launcher.push("-p".into()); launcher.push(format!("IOWriteBandwidthMax={dev} {io_mbps}M"));
     }
     launcher.push("--".into());
@@ -775,8 +778,8 @@ pub fn render(r: &MagicResult) -> String {
     s.push_str(&r.headline); s.push('\n');
     s.push_str(&render_guard(&r.guard)); s.push('\n');
     if let Some(c) = &r.contained {
-        s.push_str(&format!("  contained  systemd scope · MemoryMax {:.1} GB · MemoryHigh {:.1} GB · OOMPolicy=kill (whole build) · IO {} MB/s on {}\n",
-            c.max_gb, c.high_gb, c.io_mbps, c.io_dev.clone().unwrap_or_else(|| "(no device cap)".into())));
+        s.push_str(&format!("  contained  systemd scope · MemoryMax {:.1} GB · MemoryHigh {:.1} GB · OOMPolicy=kill (whole build) · IO read {}/write {} MB/s on {}\n",
+            c.max_gb, c.high_gb, c.io_mbps * 2, c.io_mbps, c.io_dev.clone().unwrap_or_else(|| "(no device cap)".into())));
     }
     for p in &r.receipt_problems { s.push_str(&format!("  ⚠ {p}\n")); }
     for u in &r.receipt_after.units {

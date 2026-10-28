@@ -35,6 +35,19 @@
 //! three g0 are the embedded wallet page's legacy JavaScript). Neither can win.
 //! Mentions are still reported, as information. Quillon has one network; `mainnet-genesis`
 //! is reported by mention and labelled so.
+//!
+//! THE WRITER (since 2026-10-28). fluxc is the rustc wrapper for every build on this box, so
+//! it sees the final link of every binary. For a unit that links an ELF executable (bin or
+//! test, Linux target, gcc-flavour linker) it appends `-C link-arg=-Wl,--build-id=0x<hex>`
+//! where the hex is a small JSON stamp: crate, package, version, bin, the raw `SIGIL_NETWORK`
+//! (and friends) the build was INVOKED with, the git head, opt level, target, host, fluxc
+//! version — no timestamp, so links stay deterministic. The stamp lands in the standard
+//! `.note.gnu.build-id` note (readable with `readelf -n`), replacing the linker's default id.
+//! The reader parses that note first; a stamp beats wire topics, wire topics beat mentions.
+//! Measured: the note survives mold, GNU ld and a musl static-pie link; the JSON is padded to
+//! a multiple of 4 bytes because an ELF note body is 4-byte aligned (readelf rejected a
+//! 25-byte one). `FLUX_STARDUST=0` turns the writer off; `FLUX_STARDUST_ENV` lists the env
+//! names to record (default `SIGIL_NETWORK,SIGIL_NET_ID,Q_NETWORK`).
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -52,6 +65,11 @@ pub const TOPIC_MARGIN: usize = 2;
 pub const MIN_RUN: usize = 6;
 /// Refuse to download artifacts above this (a sigil-top is ~47 MB).
 pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Env names the writer records into the stamp (comma list; `FLUX_STARDUST_ENV` overrides).
+pub const STAMP_ENV_DEFAULT: &str = "SIGIL_NETWORK,SIGIL_NET_ID,Q_NETWORK";
+/// The build-id note's owner name and type (NT_GNU_BUILD_ID).
+const NOTE_OWNER_GNU: &[u8] = b"GNU\0";
+const NT_GNU_BUILD_ID: u32 = 3;
 
 #[derive(Debug, Clone, Default)]
 pub struct Opts {
@@ -120,6 +138,8 @@ pub struct Dust {
     pub network_ambiguous: bool,
     /// Output of `<bin> network-id`, only with `--exec`.
     pub network_exec: Option<String>,
+    /// The writer's stamp from `.note.gnu.build-id`, when the binary was linked through fluxc.
+    pub stamp: Option<Value>,
     pub unit: Option<UnitFacts>,
     pub manifest: Option<ManifestFacts>,
     pub warnings: Vec<String>,
@@ -364,7 +384,21 @@ fn fill_file(d: &mut Dust, p: &Path, opts: &Opts) {
     d.rustc = scan.rustc;
     d.flux_rev = scan.flux_rev;
     d.versions = scan.versions;
-    let (net, basis, amb) = network_verdict(&scan.wire_topics, &scan.topic_hits, &scan.mentions);
+    let (mut net, mut basis, mut amb) = network_verdict(&scan.wire_topics, &scan.topic_hits, &scan.mentions);
+    // A writer stamp is exact and beats every heuristic.
+    d.stamp = elf_build_id(&bytes).and_then(|desc| decode_stamp(&desc));
+    if let Some(st) = &d.stamp {
+        match st.get("env").and_then(|e| e.get("SIGIL_NETWORK")) {
+            Some(Value::String(n)) => {
+                if let Some(w) = &net { if w != n { d.warnings.push(format!("wire topics said {w} but the build was invoked with SIGIL_NETWORK={n} — trust the stamp, and look at why the topics disagree")); } }
+                net = Some(n.clone()); basis = "stamp".into(); amb = false;
+            }
+            Some(Value::Null) if st.get("pkg").and_then(|v| v.as_str()).map(|p| p.starts_with("sigil")).unwrap_or(false) => {
+                d.warnings.push("stamp: built with SIGIL_NETWORK UNSET — sigil-header's build default (sigil-g2) applied; verdict below is from wire topics".into());
+            }
+            _ => {}
+        }
+    }
     d.mentions = scan.mentions;
     d.wire_topics = scan.wire_topics;
     d.topic_hits = scan.topic_hits;
@@ -642,6 +676,201 @@ fn curl(url: &str, to: Option<&Path>, max_secs: u64) -> Result<Vec<u8>, String> 
     Ok(o.stdout)
 }
 
+// ───────────────────────────── the writer ─────────────────────────────
+
+/// Does this rustc invocation link an ELF executable we can stamp? Pure. A bin or `--test`
+/// unit whose `--emit` includes link (or is unset), targeting Linux (host or `*-linux-*`),
+/// with a gcc-flavour linker (the `-Wl,` prefix must be understood; lld/ld direct flavours skip).
+pub fn links_elf_executable(args: &[String]) -> bool {
+    let (mut is_bin, mut is_test, mut emit_link, mut flavor_ok) = (false, false, true, true);
+    let mut target: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        let mut take = |v: &str| v.split(',').any(|t| t == "bin");
+        if a == "--crate-type" { if take(next) { is_bin = true; } i += 1; }
+        else if let Some(v) = a.strip_prefix("--crate-type=") { if take(v) { is_bin = true; } }
+        else if a == "--test" { is_test = true; }
+        else if a == "--emit" { emit_link = next.split(',').any(|e| e == "link"); i += 1; }
+        else if let Some(v) = a.strip_prefix("--emit=") { emit_link = v.split(',').any(|e| e == "link"); }
+        else if a == "--target" { target = Some(next.to_string()); i += 1; }
+        else if let Some(v) = a.strip_prefix("--target=") { target = Some(v.to_string()); }
+        else if a == "-C" || a.starts_with("-C") {
+            let c = if a == "-C" { i += 1; next } else { &a[2..] };
+            if let Some(v) = c.strip_prefix("linker=") {
+                let base = v.rsplit('/').next().unwrap_or(v);
+                flavor_ok = base.contains("cc") || base.contains("clang") || base.contains("gcc");
+            } else if let Some(v) = c.strip_prefix("linker-flavor=") {
+                flavor_ok = v.contains("gcc") || v.contains("cc");
+            }
+        }
+        i += 1;
+    }
+    let elf = match &target {
+        None => cfg!(target_os = "linux"),
+        Some(t) => t.contains("-linux-"),
+    };
+    (is_bin || is_test) && emit_link && elf && flavor_ok
+}
+
+/// What the wrapper knows at link time, as the stamp. `env` is injected for testability.
+pub fn build_stamp(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Value {
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let mut opt = "0".to_string();
+    let mut target = "host".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        if a == "--target" { target = next.to_string(); i += 1; }
+        else if let Some(v) = a.strip_prefix("--target=") { target = v.to_string(); }
+        else if a == "-C" || a.starts_with("-C") {
+            let c = if a == "-C" { i += 1; next } else { &a[2..] };
+            if let Some(v) = c.strip_prefix("opt-level=") { opt = v.to_string(); }
+        }
+        i += 1;
+    }
+    let names = env("FLUX_STARDUST_ENV").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| STAMP_ENV_DEFAULT.to_string());
+    let mut envs = serde_json::Map::new();
+    for n in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        envs.insert(n.to_string(), env(n).map(Value::String).unwrap_or(Value::Null));
+    }
+    let git_head = env("CARGO_MANIFEST_DIR").and_then(|d| git_head_short(Path::new(&d)));
+    let host = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty()).or_else(|| env("HOSTNAME"));
+    json!({
+        "stardust": 1,
+        "crate": env("CARGO_CRATE_NAME").or_else(|| after("--crate-name")),
+        "pkg": env("CARGO_PKG_NAME"),
+        "version": env("CARGO_PKG_VERSION"),
+        "bin": env("CARGO_BIN_NAME"),
+        "test": args.iter().any(|a| a == "--test"),
+        "env": Value::Object(envs),
+        "git_head": git_head,
+        "opt": opt,
+        "target": target,
+        "host": host,
+        "fluxc": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// The two rustc args that embed `stamp` as the binary's build-id. The JSON is padded with
+/// spaces to a multiple of 4 bytes — an ELF note body is 4-byte aligned.
+pub fn stamp_link_args(stamp: &Value) -> Vec<String> {
+    let mut s = stamp.to_string();
+    while s.len() % 4 != 0 { s.push(' '); }
+    vec!["-C".to_string(), format!("link-arg=-Wl,--build-id=0x{}", hex::encode(s.as_bytes()))]
+}
+
+/// The wrapper's one call: extra rustc args for this unit, or None when it does not link an
+/// ELF executable or the writer is off (`FLUX_STARDUST=0`).
+pub fn link_stamp_args(args: &[String]) -> Option<Vec<String>> {
+    if matches!(std::env::var("FLUX_STARDUST").ok().as_deref().map(str::trim), Some("0") | Some("off") | Some("false")) {
+        return None;
+    }
+    if !links_elf_executable(args) { return None; }
+    Some(stamp_link_args(&build_stamp(args, &|k| std::env::var(k).ok())))
+}
+
+/// Short git HEAD of the repository containing `start`, read from `.git` directly (no
+/// subprocess; worktrees' `gitdir:` files and `commondir` handled; packed-refs searched).
+pub fn git_head_short(start: &Path) -> Option<String> {
+    let mut dir = Some(start);
+    let dot = loop {
+        let d = dir?;
+        let cand = d.join(".git");
+        if cand.exists() { break cand; }
+        dir = d.parent();
+    };
+    let gitdir = if dot.is_dir() { dot.clone() } else {
+        let txt = std::fs::read_to_string(&dot).ok()?;
+        let p = txt.trim().strip_prefix("gitdir:")?.trim();
+        let p = PathBuf::from(p);
+        if p.is_absolute() { p } else { dot.parent()?.join(p) }
+    };
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let sha = match head.strip_prefix("ref:") {
+        None => head.to_string(),
+        Some(r) => {
+            let r = r.trim();
+            let common = std::fs::read_to_string(gitdir.join("commondir")).ok()
+                .map(|c| { let c = c.trim(); let p = PathBuf::from(c); if p.is_absolute() { p } else { gitdir.join(p) } })
+                .unwrap_or_else(|| gitdir.clone());
+            let loose = [gitdir.join(r), common.join(r)].iter().find_map(|p| std::fs::read_to_string(p).ok().map(|s| s.trim().to_string()));
+            match loose {
+                Some(x) => x,
+                None => {
+                    let packed = std::fs::read_to_string(common.join("packed-refs")).ok()?;
+                    packed.lines().find_map(|l| { let mut it = l.split_whitespace(); let sha = it.next()?; let name = it.next()?; (name == r).then(|| sha.to_string()) })?
+                }
+            }
+        }
+    };
+    if sha.len() >= 12 && sha.bytes().all(|c| c.is_ascii_hexdigit()) { Some(sha[..12].to_string()) } else { None }
+}
+
+// ───────────────────────────── the ELF reader ─────────────────────────────
+
+fn u16le(b: &[u8], o: usize) -> Option<u16> { b.get(o..o + 2).map(|x| u16::from_le_bytes([x[0], x[1]])) }
+fn u32le(b: &[u8], o: usize) -> Option<u32> { b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])) }
+fn u64le(b: &[u8], o: usize) -> Option<u64> { b.get(o..o + 8).map(|x| u64::from_le_bytes([x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]])) }
+
+/// The NT_GNU_BUILD_ID note body of an ELF64 little-endian file, via its section headers.
+pub fn elf_build_id(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 64 || &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 { return None; }
+    let shoff = u64le(bytes, 0x28)? as usize;
+    let shentsize = u16le(bytes, 0x3a)? as usize;
+    let shnum = u16le(bytes, 0x3c)? as usize;
+    let shstrndx = u16le(bytes, 0x3e)? as usize;
+    if shentsize < 64 || shnum == 0 || shstrndx >= shnum { return None; }
+    let sh = |i: usize| -> Option<&[u8]> { bytes.get(shoff + i * shentsize..shoff + i * shentsize + 64) };
+    let strtab = sh(shstrndx)?;
+    let str_off = u64le(strtab, 0x18)? as usize;
+    let str_size = u64le(strtab, 0x20)? as usize;
+    let strs = bytes.get(str_off..str_off + str_size)?;
+    for i in 0..shnum {
+        let h = sh(i)?;
+        if u32le(h, 4)? != 7 { continue; } // SHT_NOTE
+        let name_off = u32le(h, 0)? as usize;
+        let name = strs.get(name_off..).and_then(|t| t.split(|&c| c == 0).next())?;
+        if name != b".note.gnu.build-id" { continue; }
+        let off = u64le(h, 0x18)? as usize;
+        let size = u64le(h, 0x20)? as usize;
+        return parse_note_desc(bytes.get(off..off + size)?, NOTE_OWNER_GNU, NT_GNU_BUILD_ID);
+    }
+    None
+}
+
+/// Walk a note section for (owner, type) and return that note's body.
+pub fn parse_note_desc(sec: &[u8], owner: &[u8], ty: u32) -> Option<Vec<u8>> {
+    let mut o = 0;
+    while o + 12 <= sec.len() {
+        let namesz = u32le(sec, o)? as usize;
+        let descsz = u32le(sec, o + 4)? as usize;
+        let t = u32le(sec, o + 8)?;
+        let name_start = o + 12;
+        let desc_start = name_start + ((namesz + 3) & !3);
+        let desc_end = desc_start + descsz;
+        if desc_end > sec.len() { return None; }
+        if t == ty && sec.get(name_start..name_start + namesz) == Some(owner) {
+            return Some(sec[desc_start..desc_end].to_vec());
+        }
+        o = desc_start + ((descsz + 3) & !3);
+    }
+    None
+}
+
+/// A build-id body is a stardust stamp when it is UTF-8 JSON with `"stardust": <n>`.
+pub fn decode_stamp(desc: &[u8]) -> Option<Value> {
+    let txt = std::str::from_utf8(desc).ok()?.trim();
+    if !txt.starts_with('{') { return None; }
+    let v: Value = serde_json::from_str(txt).ok()?;
+    v.get("stardust").and_then(|x| x.as_u64())?;
+    Some(v)
+}
+
 // ───────────────────────────── render ─────────────────────────────
 
 pub fn to_json(d: &Dust) -> Value {
@@ -690,6 +919,12 @@ pub fn render(d: &Dust) -> String {
         s.push_str(&format!("  mentions    {}   (literal counts — information only, NOT the verdict)\n", list.join("  ")));
     }
     if let Some(e) = &d.network_exec { s.push_str(&format!("  network-id  {e}   (executed, --exec)\n")); }
+    if let Some(st) = &d.stamp {
+        let g = |k: &str| st.get(k).map(|v| match v { Value::String(x) => x.clone(), Value::Null => "-".into(), o => o.to_string() }).unwrap_or_else(|| "-".into());
+        let envs = st.get("env").and_then(|e| e.as_object()).map(|o| o.iter().map(|(k, v)| format!("{k}={}", match v { Value::String(x) => x.as_str(), _ => "unset" })).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        s.push_str(&format!("  stamp       {} {} bin {} · {} · git {} · opt {} · target {} · host {} · fluxc {}   (written by the fluxc wrapper into .note.gnu.build-id)\n",
+            g("pkg"), g("version"), g("bin"), envs, g("git_head"), g("opt"), g("target"), g("host"), g("fluxc")));
+    }
     if let Some(r) = &d.flux_rev { s.push_str(&format!("  flux-rev    {r}\n")); }
     if !d.versions.is_empty() { s.push_str(&format!("  versions    {}\n", d.versions.join("  "))); }
     if let Some(r) = &d.rustc { s.push_str(&format!("  rustc       {r}\n")); }
@@ -833,6 +1068,121 @@ mod tests {
         assert!(version_tokens("http://a/b/c").is_empty());
         assert!(version_tokens("sigil-top/10.7").is_empty());
         assert!(version_tokens("X/1.2.3").is_empty());
+    }
+
+    /// A minimal ELF64 LE file with one .note.gnu.build-id section carrying `desc`.
+    fn fake_elf(desc: &[u8]) -> Vec<u8> {
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes());
+        note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        note.extend_from_slice(&3u32.to_le_bytes());
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(desc);
+        while note.len() % 4 != 0 { note.push(0); }
+        let strs = b"\0.note.gnu.build-id\0.shstrtab\0".to_vec();
+        let note_off = 64usize;
+        let strs_off = note_off + note.len();
+        let mut shoff = strs_off + strs.len();
+        while shoff % 8 != 0 { shoff += 1; }
+        let mut f = vec![0u8; shoff + 3 * 64];
+        f[0..4].copy_from_slice(b"\x7fELF"); f[4] = 2; f[5] = 1; f[6] = 1;
+        f[16..18].copy_from_slice(&2u16.to_le_bytes()); f[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+        f[20..24].copy_from_slice(&1u32.to_le_bytes());
+        f[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+        f[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());
+        f[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        f[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());
+        f[0x3e..0x40].copy_from_slice(&2u16.to_le_bytes());
+        f[note_off..note_off + note.len()].copy_from_slice(&note);
+        f[strs_off..strs_off + strs.len()].copy_from_slice(&strs);
+        let mut sh = |i: usize, name: u32, ty: u32, off: usize, size: usize| {
+            let b = shoff + i * 64;
+            f[b..b + 4].copy_from_slice(&name.to_le_bytes());
+            f[b + 4..b + 8].copy_from_slice(&ty.to_le_bytes());
+            f[b + 0x18..b + 0x20].copy_from_slice(&(off as u64).to_le_bytes());
+            f[b + 0x20..b + 0x28].copy_from_slice(&(size as u64).to_le_bytes());
+        };
+        sh(1, 1, 7, note_off, note.len());
+        sh(2, 20, 3, strs_off, strs.len());
+        f
+    }
+
+    #[test]
+    fn elf_build_id_reads_a_synthetic_note_and_a_real_one() {
+        let desc = b"{\"stardust\":1,\"pkg\":\"x\"}   ";
+        let f = fake_elf(desc);
+        assert_eq!(elf_build_id(&f).as_deref(), Some(&desc[..]));
+        let st = decode_stamp(desc).expect("stamp json");
+        assert_eq!(st["pkg"], "x");
+        // a plain sha1 build-id (20 bytes) is not a stamp
+        assert_eq!(elf_build_id(&fake_elf(&[7u8; 20])).map(|d| d.len()), Some(20));
+        assert!(decode_stamp(&[7u8; 20]).is_none());
+        assert!(elf_build_id(b"not an elf at all, really not").is_none());
+        // Our own test binary: if it was linked through the fluxc wrapper it carries a stamp
+        // naming this crate; if it was linked by raw cargo it carries the linker's sha1 or none.
+        let me = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        if let Some(st) = elf_build_id(&me).and_then(|d| decode_stamp(&d)) {
+            assert_eq!(st["stardust"], 1);
+            assert_eq!(st["crate"], "fluxc_core");
+            assert_eq!(st["test"], true);
+            assert!(st["git_head"].as_str().map(|g| g.len() == 12).unwrap_or(false), "{st}");
+        }
+    }
+
+    #[test]
+    fn writer_gates_on_elf_executable_links() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(links_elf_executable(&v(&["--crate-name", "a", "src/main.rs", "--crate-type", "bin", "--emit=dep-info,link", "-C", "opt-level=3"])));
+        assert!(links_elf_executable(&v(&["--crate-name", "a", "src/lib.rs", "--test", "--emit=dep-info,link"])));
+        assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type=bin", "--target", "x86_64-unknown-linux-musl"])));
+        assert!(!links_elf_executable(&v(&["src/lib.rs", "--crate-type", "lib", "--emit=dep-info,metadata,link"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--emit=dep-info,metadata"])));       // cargo check
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "x86_64-pc-windows-gnu"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "wasm32-unknown-unknown"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker=rust-lld"])));
+        assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker=/home/storage/tools/zig/zcc"])));
+    }
+
+    #[test]
+    fn stamp_round_trips_through_the_link_args() {
+        let fake_env = |k: &str| -> Option<String> {
+            match k {
+                "CARGO_CRATE_NAME" => Some("sigil_top".into()),
+                "CARGO_PKG_NAME" => Some("sigil-top".into()),
+                "CARGO_PKG_VERSION" => Some("10.7.5".into()),
+                "CARGO_BIN_NAME" => Some("sigil-top".into()),
+                "SIGIL_NETWORK" => Some("sigil-g3".into()),
+                _ => None,
+            }
+        };
+        let args: Vec<String> = ["--crate-name", "sigil_top", "src/main.rs", "--crate-type", "bin", "-C", "opt-level=3", "--target", "x86_64-unknown-linux-gnu"].iter().map(|s| s.to_string()).collect();
+        let st = build_stamp(&args, &fake_env);
+        assert_eq!(st["env"]["SIGIL_NETWORK"], "sigil-g3");
+        assert!(st["env"]["SIGIL_NET_ID"].is_null());
+        assert_eq!(st["opt"], "3");
+        assert_eq!(st["target"], "x86_64-unknown-linux-gnu");
+        assert_eq!(st["bin"], "sigil-top");
+        assert_eq!(st["test"], false);
+        let la = stamp_link_args(&st);
+        assert_eq!(la[0], "-C");
+        let hexpart = la[1].strip_prefix("link-arg=-Wl,--build-id=0x").expect("build-id arg");
+        let raw = hex::decode(hexpart).unwrap();
+        assert_eq!(raw.len() % 4, 0, "note body must be 4-byte aligned");
+        let back = decode_stamp(&raw).expect("decodes");
+        assert_eq!(back, st);
+        // And the whole thing through a synthetic ELF → the reader's verdict path.
+        let f = fake_elf(&raw);
+        let d2 = elf_build_id(&f).and_then(|x| decode_stamp(&x)).unwrap();
+        assert_eq!(d2["env"]["SIGIL_NETWORK"], "sigil-g3");
+    }
+
+    #[test]
+    fn git_head_short_reads_the_flux_tree() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let h = git_head_short(here).expect("the flux tree has a git HEAD");
+        assert_eq!(h.len(), 12);
+        assert!(h.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert!(git_head_short(Path::new("/proc")).is_none());
     }
 
     #[test]

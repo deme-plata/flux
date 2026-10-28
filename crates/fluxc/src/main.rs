@@ -111,7 +111,13 @@ fn main() {
                     }
                     (None, _) => (None, rest),
                 };
-            fluxc_core::run_tests(pkg, extra);
+            // Every -p given reaches cargo (`-p A -p B` used to keep only one).
+            let pkgs: Vec<String> = if !config.packages.is_empty() {
+                config.packages.clone()
+            } else {
+                pkg.map(|p| vec![p.to_string()]).unwrap_or_default()
+            };
+            fluxc_core::run_tests_multi(&pkgs, extra);
         }
         Some("test-bins") | Some("tb") => fluxc_core::run_test_bins(
             config.package.as_deref().or_else(|| {

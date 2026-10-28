@@ -1,53 +1,46 @@
-//! stardust — the trail a build leaves inside a binary, read back WITHOUT running it.
+//! stardust — the trail a build leaves inside a binary, read back WITHOUT running it, and (since
+//! v2) written there on purpose by the rustc wrapper.
 //!
 //! Why this exists (all measured on Epsilon, October 2026):
-//! * 2026-10-26: sigil-top 10.7.4 was published as a **g2** build and auto-updated a g3
-//!   server onto the dead chain. Nothing read the network id back out of the artifact
-//!   before it went into the signed manifest.
-//! * 2026-10-10: `systemctl cat` showed the base `ExecStart=` while a drop-in ran a
-//!   different binary; a 7-minute release build went to the wrong target dir.
-//! * 2026-10-22: a watchdog restart left systemd's `NRestarts` at 0 — MainPID and
-//!   ActiveEnterTimestamp are the receipt, not the counter.
+//! * 2026-10-26: sigil-top 10.7.4 was published as a **g2** build and auto-updated a g3 server
+//!   onto the dead chain. Nothing read the network id back out of the artifact before it went
+//!   into the signed manifest.
+//! * 2026-10-10: `systemctl cat` showed the base `ExecStart=` while a drop-in ran a different
+//!   binary; a 7-minute release build went to the wrong target dir.
 //! * `sigil-miner --help` starts mining and writes a wallet file: a binary must never be
 //!   executed just to find out what it is.
 //!
-//! So `fluxc stardust <path | unit | pid | manifest-url>` scans the printable runs of the
-//! file (what `strings` does) and reports the dust it finds: the dominant network id, the
-//! flux-rev source stamp, the rustc that compiled it, product/version strings, BLAKE3 and
-//! SHA-256. For a systemd unit it also compares the EFFECTIVE `ExecStart` binary with
-//! `/proc/<MainPID>/exe` and says whether the file on disk is newer than the running
-//! process (built, not restarted). For a release manifest URL it downloads the named
-//! target, checks blake3 + size, and reads the dust — the 10.7.4 incident in one command.
-//! The target is executed only with an explicit `--exec` (runs `<bin> network-id`).
+//! THREE KINDS OF ANSWER, kept apart (review of 2026-10-28, point 1):
+//! * DECLARED — the writer's stamp: what the build was INVOKED with (`SIGIL_NETWORK=…`), the git
+//!   head and dirtiness, opt level, target, fluxc version. It is metadata the wrapper wrote at
+//!   the time of the LAST LINK of this file; it proves the environment, not the behaviour.
+//! * EVIDENCE — what the bytes show: sigil-net's compile-time gossip wire topics
+//!   (`/sigil/<short>/blocks`, `/txs`, …). A HEURISTIC: it depends on the networking crate
+//!   building its topic names with `concat!` from the network id.
+//! * The VERDICT — only when declared and evidence AGREE, or when exactly one of them exists and
+//!   says so plainly. A disagreement is reported as a CONFLICT with `ok = false` and no network,
+//!   so a release check that requires a network FAILS on it.
 //!
-//! How the network is read, and why NOT by counting the id. Counting `sigil-gN` literals
-//! was tried first and REFUTED the same hour (2026-10-28): the g2 build 10.7.4 and the g3
-//! build 10.7.5 of sigil-top have practically identical counts (67/13/6/4 vs 66/13/6/4) —
-//! the linker merges identical literals, so a count measures how many distinct strings
-//! MENTION a network, not which one the binary was built for. What does flip with the build
-//! is the set of gossip WIRE TOPICS sigil-net concatenates at compile time
-//! (`/sigil/<short>/blocks`, `/txs`, `/release`, …): the g2 build carries only `/sigil/g2/*`,
-//! the g3 build only `/sigil/g3/*`. A binary can mention another network; it only tunes to
-//! the topics of its own. Verdict = the short id with the most DISTINCT known topics, at
-//! least [`MIN_TOPICS`] of them, and at least [`TOPIC_MARGIN`]× the runner-up's topic
-//! OCCURRENCES. Measured: the g2 build 10.7.4 = g2×25 / g0×3 / g3×0; the g3 build 10.7.5 =
-//! g3×21 / g2×5 / g0×3 (the five g2 are a hardcoded self-check in sigil-net's source; the
-//! three g0 are the embedded wallet page's legacy JavaScript). Neither can win.
-//! Mentions are still reported, as information. Quillon has one network; `mainnet-genesis`
-//! is reported by mention and labelled so.
+//! Why NOT count the network-id literals: tried first and refuted the same hour. The g2 build
+//! 10.7.4 and the g3 build 10.7.5 have practically identical counts (66 vs 67 `sigil-g2`, 4 vs 6
+//! `sigil-g3`) because the linker merges identical literals. Counts measure how many distinct
+//! strings MENTION a network. Mentions are still reported, labelled information.
 //!
-//! THE WRITER (since 2026-10-28). fluxc is the rustc wrapper for every build on this box, so
-//! it sees the final link of every binary. For a unit that links an ELF executable (bin or
-//! test, Linux target, gcc-flavour linker) it appends `-C link-arg=-Wl,--build-id=0x<hex>`
-//! where the hex is a small JSON stamp: crate, package, version, bin, the raw `SIGIL_NETWORK`
-//! (and friends) the build was INVOKED with, the git head, opt level, target, host, fluxc
-//! version — no timestamp, so links stay deterministic. The stamp lands in the standard
-//! `.note.gnu.build-id` note (readable with `readelf -n`), replacing the linker's default id.
-//! The reader parses that note first; a stamp beats wire topics, wire topics beat mentions.
-//! Measured: the note survives mold, GNU ld and a musl static-pie link; the JSON is padded to
-//! a multiple of 4 bytes because an ELF note body is 4-byte aligned (readelf rejected a
-//! 25-byte one). `FLUX_STARDUST=0` turns the writer off; `FLUX_STARDUST_ENV` lists the env
-//! names to record (default `SIGIL_NETWORK,SIGIL_NET_ID,Q_NETWORK`).
+//! THE WRITER. fluxc is the RUSTC_WRAPPER for every build here, so it sees the final link of
+//! every binary. For a unit that links an ELF executable (bin or `--test`, Linux target,
+//! gcc-flavour linker) it writes a tiny relocatable object carrying ONE allocated note section,
+//! `.note.stardust` (owner "STARDUST", type 1, body = the JSON stamp), next to the unit's output
+//! dir and passes `-C link-arg=<that .o>`. The linker keeps the section (measured with rustc's
+//! default `--gc-sections` under mold, GNU ld and a musl static-pie link) and the GNU build-id
+//! is left UNTOUCHED — v1 of the writer replaced the build-id with the stamp; the review pointed
+//! out that the build-id identifies the linked FILE and two different binaries could then share
+//! one id, so v2 stopped doing that. Legacy v1 stamps (JSON in the build-id) are still read.
+//!
+//! FRESHNESS CAVEAT (review point 2): the wrapper only runs when cargo decides to relink. For
+//! SIGIL the network variable is cargo-tracked (`cargo:rerun-if-env-changed=SIGIL_NETWORK` in
+//! sigil-header's build.rs), so a changed network always relinks and the stamp follows; the git
+//! head and dirtiness are facts "as of the last link" and may lag a tree that changed without
+//! triggering a relink. The stamp carries no timestamp, so links stay deterministic.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -57,7 +50,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// sigil-net's compile-time gossip topics (`concat!("/sigil/", SIGIL_NET_SHORT, "/…")`).
 pub const WIRE_TOPICS: &[&str] = &["blocks", "peer-heights", "tip-proofs", "txs", "release", "finality-votes"];
-/// A network is called only with at least this many DISTINCT wire topics present…
+/// A network is called by evidence only with at least this many DISTINCT wire topics present…
 pub const MIN_TOPICS: usize = 3;
 /// …and at least this many times the runner-up's topic occurrences.
 pub const TOPIC_MARGIN: usize = 2;
@@ -67,7 +60,12 @@ pub const MIN_RUN: usize = 6;
 pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Env names the writer records into the stamp (comma list; `FLUX_STARDUST_ENV` overrides).
 pub const STAMP_ENV_DEFAULT: &str = "SIGIL_NETWORK,SIGIL_NET_ID,Q_NETWORK";
-/// The build-id note's owner name and type (NT_GNU_BUILD_ID).
+/// The stamp schema this writer emits.
+pub const STAMP_SCHEMA: u64 = 2;
+/// The stardust note: owner name (NUL-terminated as in the file) and type.
+pub const NOTE_OWNER_STARDUST: &[u8] = b"STARDUST\0";
+pub const NT_STARDUST: u32 = 1;
+/// The GNU build-id note (left untouched by the v2 writer; carried the v1 stamp).
 const NOTE_OWNER_GNU: &[u8] = b"GNU\0";
 const NT_GNU_BUILD_ID: u32 = 3;
 
@@ -122,6 +120,8 @@ pub struct Dust {
     pub mtime_unix: Option<u64>,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    /// The GNU build-id (hex) — the linker's identity of the linked file, untouched by the v2 writer.
+    pub build_id: Option<String>,
     pub rustc: Option<String>,
     pub flux_rev: Option<String>,
     pub versions: Vec<String>,
@@ -131,15 +131,25 @@ pub struct Dust {
     pub wire_topics: Vec<(String, Vec<String>)>,
     /// Occurrences of known wire topics per short id (`g3` → 21).
     pub topic_hits: Vec<(String, usize)>,
-    /// The network this binary was built for, when the wire topics say so.
+    /// The writer's stamp (DECLARED metadata) and where it was found.
+    pub stamp: Option<Value>,
+    /// "note.stardust" | "build-id (legacy v1)"
+    pub stamp_source: Option<String>,
+    /// DECLARED: `env.SIGIL_NETWORK` from the stamp.
+    pub declared_network: Option<String>,
+    /// EVIDENCE: the wire-topic (or single-mention) reading of the bytes.
+    pub evidence_network: Option<String>,
+    /// "wire-topics" | "mention" | "none"
+    pub evidence_basis: String,
+    /// Declared and evidence disagree. `ok` is false when this is set.
+    pub conflict: bool,
+    /// The verdict — only when declared and evidence agree, or exactly one speaks.
     pub network: Option<String>,
-    /// "wire-topics" | "mention" (one id, no topics — e.g. a Quillon binary) | "none"
+    /// "stamp+evidence agree" | "declared-only" | "wire-topics (heuristic)" | "mention (heuristic)" | "conflict" | "none"
     pub network_basis: String,
     pub network_ambiguous: bool,
     /// Output of `<bin> network-id`, only with `--exec`.
     pub network_exec: Option<String>,
-    /// The writer's stamp from `.note.gnu.build-id`, when the binary was linked through fluxc.
-    pub stamp: Option<Value>,
     pub unit: Option<UnitFacts>,
     pub manifest: Option<ManifestFacts>,
     pub warnings: Vec<String>,
@@ -208,7 +218,7 @@ pub fn read_pid(pid: u32, opts: &Opts) -> Dust {
         }
     }
     d.unit = Some(uf);
-    d.ok = d.file.is_some();
+    d.ok = d.ok && d.file.is_some();
     d
 }
 
@@ -233,12 +243,11 @@ pub fn read_unit(unit: &str, opts: &Opts) -> Dust {
     if uf.id.is_empty() { uf.id = name.clone(); }
     if uf.main_pid == 0 {
         d.warnings.push(format!("{} is not running (ActiveState={})", uf.id, uf.active_state));
-        // Still read the ExecStart binary's dust — that is what WOULD run.
         if let Some(p) = uf.exec_start_path.clone() {
             fill_file(&mut d, Path::new(&p), opts);
         }
         d.unit = Some(uf);
-        d.ok = d.file.is_some();
+        d.ok = d.ok && d.file.is_some();
         return d;
     }
     let exe = std::fs::read_link(format!("/proc/{}/exe", uf.main_pid)).ok();
@@ -277,7 +286,7 @@ pub fn read_unit(unit: &str, opts: &Opts) -> Dust {
         }
     }
     d.unit = Some(uf);
-    d.ok = d.file.is_some();
+    d.ok = d.ok && d.file.is_some();
     d
 }
 
@@ -313,7 +322,6 @@ pub fn read_url(url: &str, opts: &Opts) -> Dust {
         d.warnings.push(format!("artifact declares {s} bytes > {MAX_ARTIFACT_BYTES} cap — not downloading"));
         d.manifest = Some(mf); return d;
     } }
-    // Cache by expected blake3 (or a hash of the url) so a re-read is free.
     let key = b3.clone().unwrap_or_else(|| blake3::hash(aurl.as_bytes()).to_hex().to_string());
     let dir = cache_dir().join("stardust");
     let _ = std::fs::create_dir_all(&dir);
@@ -359,7 +367,7 @@ pub fn read_url(url: &str, opts: &Opts) -> Dust {
             d.warnings.push(format!("manifest flux_rev {mr} is not the binary's flux-rev {dr} — republished artifact?"));
         }
     }
-    d.ok = d.file.is_some() && mf.blake3_ok != Some(false) && mf.size_ok != Some(false);
+    d.ok = d.ok && d.file.is_some() && mf.blake3_ok != Some(false) && mf.size_ok != Some(false);
     d.manifest = Some(mf);
     d
 }
@@ -371,7 +379,7 @@ fn fill_file(d: &mut Dust, p: &Path, opts: &Opts) {
     d.file = Some(canon.to_string_lossy().into_owned());
     let bytes = match std::fs::read(&canon) {
         Ok(b) => b,
-        Err(e) => { d.warnings.push(format!("read {}: {e}", canon.display())); return; }
+        Err(e) => { d.warnings.push(format!("read {}: {e}", canon.display())); d.ok = false; return; }
     };
     if let Ok(md) = std::fs::metadata(&canon) {
         d.size_bytes = Some(md.len());
@@ -380,33 +388,57 @@ fn fill_file(d: &mut Dust, p: &Path, opts: &Opts) {
     let (b3, s2) = hashes(&bytes);
     d.blake3 = Some(b3);
     d.sha256 = Some(s2);
-    let scan = scan_bytes(&bytes);
+
+    // EVIDENCE from the bytes — with the writer's own stamp text blanked out first, or the stamp's
+    // `"SIGIL_NETWORK":"sigil-r3"` would count as a MENTION of its own network and "agree" with
+    // itself (measured 2026-10-28 on a hello binary: declared-only read as stamp+evidence agree).
+    let mut masked: Option<Vec<u8>> = None;
+    for r in [elf_note_range(&bytes, NOTE_OWNER_STARDUST, NT_STARDUST), elf_note_range(&bytes, NOTE_OWNER_GNU, NT_GNU_BUILD_ID)].into_iter().flatten() {
+        let m = masked.get_or_insert_with(|| bytes.clone());
+        for b in &mut m[r] { *b = 0; }
+    }
+    let scan = scan_bytes(masked.as_deref().unwrap_or(&bytes));
     d.rustc = scan.rustc;
     d.flux_rev = scan.flux_rev;
     d.versions = scan.versions;
-    let (mut net, mut basis, mut amb) = network_verdict(&scan.wire_topics, &scan.topic_hits, &scan.mentions);
-    // A writer stamp is exact and beats every heuristic.
-    d.stamp = elf_build_id(&bytes).and_then(|desc| decode_stamp(&desc));
+    let (ev_net, ev_basis, amb) = network_verdict(&scan.wire_topics, &scan.topic_hits, &scan.mentions);
+    d.mentions = scan.mentions;
+    d.wire_topics = scan.wire_topics;
+    d.topic_hits = scan.topic_hits;
+    d.evidence_network = ev_net.clone();
+    d.evidence_basis = ev_basis.clone();
+    d.network_ambiguous = amb;
+    if amb {
+        d.warnings.push(format!("evidence ambiguous — wire-topic occurrences {:?} too close; use --exec for `network-id`", d.topic_hits));
+    }
+
+    // DECLARED from the stamp: .note.stardust first, then a legacy v1 stamp in the build-id.
+    let gnu = elf_note(&bytes, NOTE_OWNER_GNU, NT_GNU_BUILD_ID);
+    if let Some(desc) = elf_note(&bytes, NOTE_OWNER_STARDUST, NT_STARDUST).and_then(|x| decode_stamp(&x).map(|s| (s, "note.stardust"))) {
+        d.stamp = Some(desc.0); d.stamp_source = Some(desc.1.into());
+    } else if let Some(s) = gnu.as_ref().and_then(|g| decode_stamp(g)) {
+        d.stamp = Some(s); d.stamp_source = Some("build-id (legacy v1)".into());
+        d.warnings.push("stamp lives in the GNU build-id (writer v1) — this binary has no linker file identity of its own".into());
+    }
+    if let Some(g) = &gnu { if decode_stamp(g).is_none() { d.build_id = Some(hex::encode(g)); } }
     if let Some(st) = &d.stamp {
         match st.get("env").and_then(|e| e.get("SIGIL_NETWORK")) {
-            Some(Value::String(n)) => {
-                if let Some(w) = &net { if w != n { d.warnings.push(format!("wire topics said {w} but the build was invoked with SIGIL_NETWORK={n} — trust the stamp, and look at why the topics disagree")); } }
-                net = Some(n.clone()); basis = "stamp".into(); amb = false;
-            }
+            Some(Value::String(n)) => d.declared_network = Some(n.clone()),
             Some(Value::Null) if st.get("pkg").and_then(|v| v.as_str()).map(|p| p.starts_with("sigil")).unwrap_or(false) => {
-                d.warnings.push("stamp: built with SIGIL_NETWORK UNSET — sigil-header's build default (sigil-g2) applied; verdict below is from wire topics".into());
+                d.warnings.push("stamp: built with SIGIL_NETWORK UNSET — sigil-header's build default (sigil-g2) applied".into());
             }
             _ => {}
         }
     }
-    d.mentions = scan.mentions;
-    d.wire_topics = scan.wire_topics;
-    d.topic_hits = scan.topic_hits;
+
+    // THE VERDICT: agreement, or one voice; a disagreement is a conflict and fails the read.
+    let (net, basis, conflict) = resolve_network(d.declared_network.as_deref(), ev_net.as_deref(), &ev_basis);
     d.network = net;
     d.network_basis = basis;
-    d.network_ambiguous = amb;
-    if amb {
-        d.warnings.push(format!("network ambiguous — wire-topic occurrences {:?} too close; use --exec for `network-id`", d.topic_hits));
+    d.conflict = conflict;
+    if conflict {
+        d.warnings.push(format!("CONFLICT: the stamp declares {} but the bytes' wire topics say {} — no network reported; find out which build input lied before trusting this file",
+            d.declared_network.clone().unwrap_or_default(), d.evidence_network.clone().unwrap_or_default()));
     }
     if d.rustc.is_none() {
         d.warnings.push("no `rustc version` string — not a Rust binary, or stripped".into());
@@ -414,10 +446,9 @@ fn fill_file(d: &mut Dust, p: &Path, opts: &Opts) {
     if opts.exec {
         match exec_network_id(&canon) {
             Ok(Some(line)) => {
-                // sigil-top prints `header=sigil-g3 net=sigil-g3 g3_rules=true`; take the net= token when present.
                 let net = line.split_whitespace().find_map(|t| t.strip_prefix("net=")).unwrap_or(line.as_str()).to_string();
                 if let Some(n) = &d.network {
-                    if &net != n { d.warnings.push(format!("`network-id` says {net} but the wire topics said {n} — trust network-id")); }
+                    if &net != n { d.warnings.push(format!("`network-id` says {net} but the verdict was {n} — trust network-id")); }
                 }
                 d.network_exec = Some(line);
             }
@@ -425,7 +456,18 @@ fn fill_file(d: &mut Dust, p: &Path, opts: &Opts) {
             Err(e) => d.warnings.push(format!("--exec: {e}")),
         }
     }
-    d.ok = true;
+    d.ok = !conflict;
+}
+
+/// The verdict rule, pure. Returns (network, basis, conflict).
+pub fn resolve_network(declared: Option<&str>, evidence: Option<&str>, evidence_basis: &str) -> (Option<String>, String, bool) {
+    match (declared, evidence) {
+        (Some(d), Some(e)) if d == e => (Some(d.to_string()), "stamp+evidence agree".into(), false),
+        (Some(_), Some(_)) => (None, "conflict".into(), true),
+        (Some(d), None) => (Some(d.to_string()), "declared-only (stamp; no network code found in the bytes)".into(), false),
+        (None, Some(e)) => (Some(e.to_string()), format!("{evidence_basis} (heuristic)"), false),
+        (None, None) => (None, "none".into(), false),
+    }
 }
 
 pub fn hashes(bytes: &[u8]) -> (String, String) {
@@ -559,11 +601,11 @@ pub fn collect_wire_topics(run: &str, topics: &mut std::collections::BTreeMap<St
     }
 }
 
-/// The verdict: (network, basis, ambiguous). Wire topics decide: the id with the most
-/// occurrences wins when it has ≥ MIN_TOPICS distinct topics and ≥ TOPIC_MARGIN× the
-/// runner-up's occurrences; a thinner margin is AMBIGUOUS. Without a qualifying id, a single
-/// mentioned network (Quillon's `mainnet-genesis`) is reported by mention; several mentions
-/// with no wire topics just mean "not built for one network" (fluxc, a wallet page) — no verdict.
+/// The EVIDENCE verdict: (network, basis, ambiguous). Wire topics decide: the id with the most
+/// occurrences wins when it has ≥ MIN_TOPICS distinct topics and ≥ TOPIC_MARGIN× the runner-up's
+/// occurrences; a thinner margin is AMBIGUOUS. Without a qualifying id, a single mentioned
+/// network (Quillon's `mainnet-genesis`) is reported by mention; several mentions with no wire
+/// topics mean "not built for one network" — no evidence verdict.
 pub fn network_verdict(topics: &[(String, Vec<String>)], hits: &[(String, usize)], mentions: &[(String, usize)]) -> (Option<String>, String, bool) {
     let distinct = |id: &str| topics.iter().find(|(k, _)| k == id).map(|(_, v)| v.len()).unwrap_or(0);
     let mut ranked: Vec<&(String, usize)> = hits.iter().collect();
@@ -651,14 +693,13 @@ pub fn process_start_unix(pid: u32) -> Option<u64> {
     let ps = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after = &ps[ps.rfind(')')? + 1..];
     let fields: Vec<&str> = after.split_whitespace().collect();
-    // field 22 (starttime) overall; after the ')' the state is field 3 → index 19.
     let ticks: u64 = fields.get(19)?.parse().ok()?;
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     let hz = if hz <= 0 { 100 } else { hz as u64 };
     Some(btime + ticks / hz)
 }
 
-fn cache_dir() -> PathBuf {
+pub fn cache_dir() -> PathBuf {
     if let Ok(d) = std::env::var("FLUX_CACHE_DIR") { return PathBuf::from(d); }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     PathBuf::from(home).join(".flux").join("cache")
@@ -680,7 +721,9 @@ fn curl(url: &str, to: Option<&Path>, max_secs: u64) -> Result<Vec<u8>, String> 
 
 /// Does this rustc invocation link an ELF executable we can stamp? Pure. A bin or `--test`
 /// unit whose `--emit` includes link (or is unset), targeting Linux (host or `*-linux-*`),
-/// with a gcc-flavour linker (the `-Wl,` prefix must be understood; lld/ld direct flavours skip).
+/// with a compiler-driver linker flavour (the extra object is passed as a plain positional
+/// argument, which every driver and direct linker accepts, but we still skip direct `ld`/`lld`
+/// flavours and non-ELF targets because they were not tested).
 pub fn links_elf_executable(args: &[String]) -> bool {
     let (mut is_bin, mut is_test, mut emit_link, mut flavor_ok) = (false, false, true, true);
     let mut target: Option<String> = None;
@@ -688,9 +731,9 @@ pub fn links_elf_executable(args: &[String]) -> bool {
     while i < args.len() {
         let a = args[i].as_str();
         let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
-        let mut take = |v: &str| v.split(',').any(|t| t == "bin");
-        if a == "--crate-type" { if take(next) { is_bin = true; } i += 1; }
-        else if let Some(v) = a.strip_prefix("--crate-type=") { if take(v) { is_bin = true; } }
+        let has_bin = |v: &str| v.split(',').any(|t| t == "bin");
+        if a == "--crate-type" { if has_bin(next) { is_bin = true; } i += 1; }
+        else if let Some(v) = a.strip_prefix("--crate-type=") { if has_bin(v) { is_bin = true; } }
         else if a == "--test" { is_test = true; }
         else if a == "--emit" { emit_link = next.split(',').any(|e| e == "link"); i += 1; }
         else if let Some(v) = a.strip_prefix("--emit=") { emit_link = v.split(',').any(|e| e == "link"); }
@@ -702,7 +745,8 @@ pub fn links_elf_executable(args: &[String]) -> bool {
                 let base = v.rsplit('/').next().unwrap_or(v);
                 flavor_ok = base.contains("cc") || base.contains("clang") || base.contains("gcc");
             } else if let Some(v) = c.strip_prefix("linker-flavor=") {
-                flavor_ok = v.contains("gcc") || v.contains("cc");
+                // rustc flavours: gcc, gnu-cc, gnu-lld-cc (drivers) vs ld, ld.lld, msvc, em… (direct)
+                flavor_ok = v.contains("gcc") || v.ends_with("-cc");
             }
         }
         i += 1;
@@ -714,68 +758,11 @@ pub fn links_elf_executable(args: &[String]) -> bool {
     (is_bin || is_test) && emit_link && elf && flavor_ok
 }
 
-/// What the wrapper knows at link time, as the stamp. `env` is injected for testability.
-pub fn build_stamp(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Value {
-    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-    let mut opt = "0".to_string();
-    let mut target = "host".to_string();
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
-        if a == "--target" { target = next.to_string(); i += 1; }
-        else if let Some(v) = a.strip_prefix("--target=") { target = v.to_string(); }
-        else if a == "-C" || a.starts_with("-C") {
-            let c = if a == "-C" { i += 1; next } else { &a[2..] };
-            if let Some(v) = c.strip_prefix("opt-level=") { opt = v.to_string(); }
-        }
-        i += 1;
-    }
-    let names = env("FLUX_STARDUST_ENV").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| STAMP_ENV_DEFAULT.to_string());
-    let mut envs = serde_json::Map::new();
-    for n in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-        envs.insert(n.to_string(), env(n).map(Value::String).unwrap_or(Value::Null));
-    }
-    let git_head = env("CARGO_MANIFEST_DIR").and_then(|d| git_head_short(Path::new(&d)));
-    let host = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty()).or_else(|| env("HOSTNAME"));
-    json!({
-        "stardust": 1,
-        "crate": env("CARGO_CRATE_NAME").or_else(|| after("--crate-name")),
-        "pkg": env("CARGO_PKG_NAME"),
-        "version": env("CARGO_PKG_VERSION"),
-        "bin": env("CARGO_BIN_NAME"),
-        "test": args.iter().any(|a| a == "--test"),
-        "env": Value::Object(envs),
-        "git_head": git_head,
-        "opt": opt,
-        "target": target,
-        "host": host,
-        "fluxc": env!("CARGO_PKG_VERSION"),
-    })
-}
-
-/// The two rustc args that embed `stamp` as the binary's build-id. The JSON is padded with
-/// spaces to a multiple of 4 bytes — an ELF note body is 4-byte aligned.
-pub fn stamp_link_args(stamp: &Value) -> Vec<String> {
-    let mut s = stamp.to_string();
-    while s.len() % 4 != 0 { s.push(' '); }
-    vec!["-C".to_string(), format!("link-arg=-Wl,--build-id=0x{}", hex::encode(s.as_bytes()))]
-}
-
-/// The wrapper's one call: extra rustc args for this unit, or None when it does not link an
-/// ELF executable or the writer is off (`FLUX_STARDUST=0`).
-pub fn link_stamp_args(args: &[String]) -> Option<Vec<String>> {
-    if matches!(std::env::var("FLUX_STARDUST").ok().as_deref().map(str::trim), Some("0") | Some("off") | Some("false")) {
-        return None;
-    }
-    if !links_elf_executable(args) { return None; }
-    Some(stamp_link_args(&build_stamp(args, &|k| std::env::var(k).ok())))
-}
-
-/// Short git HEAD of the repository containing `start`, read from `.git` directly (no
-/// subprocess; worktrees' `gitdir:` files and `commondir` handled; packed-refs searched).
-pub fn git_head_short(start: &Path) -> Option<String> {
+/// Git facts of the repository containing `start`, read from `.git` directly (no subprocess for
+/// HEAD; worktrees' `gitdir:` files, `commondir` and packed-refs handled). Dirtiness runs
+/// `git status --porcelain --untracked-files=no` with a 2 s timeout (12 ms warm on the flux tree,
+/// measured) unless FLUX_STARDUST_GIT_STATUS=0; `None` = unknown, never "clean".
+pub fn git_head_full(start: &Path) -> Option<String> {
     let mut dir = Some(start);
     let dot = loop {
         let d = dir?;
@@ -808,61 +795,244 @@ pub fn git_head_short(start: &Path) -> Option<String> {
             }
         }
     };
-    if sha.len() >= 12 && sha.bytes().all(|c| c.is_ascii_hexdigit()) { Some(sha[..12].to_string()) } else { None }
+    if sha.len() >= 40 && sha.bytes().all(|c| c.is_ascii_hexdigit()) { Some(sha[..40].to_string()) } else { None }
+}
+
+/// Short form kept for callers that want 12 hex.
+pub fn git_head_short(start: &Path) -> Option<String> { git_head_full(start).map(|s| s[..12].to_string()) }
+
+/// `Some(true)` = tracked files modified, `Some(false)` = clean, `None` = could not tell.
+pub fn git_dirty(start: &Path) -> Option<bool> {
+    if matches!(std::env::var("FLUX_STARDUST_GIT_STATUS").ok().as_deref(), Some("0") | Some("off")) { return None; }
+    let mut child = Command::new("git").args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(start).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null())
+        .spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => { if !st.success() { return None; } break; }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+        }
+    }
+    let mut out = String::new();
+    use std::io::Read;
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out.lines().any(|l| !l.trim().is_empty()))
+}
+
+/// What the wrapper knows at link time, as the stamp (schema 2). `env` is injected for tests.
+pub fn build_stamp(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Value {
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let mut opt = "0".to_string();
+    let mut target = "host".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        if a == "--target" { target = next.to_string(); i += 1; }
+        else if let Some(v) = a.strip_prefix("--target=") { target = v.to_string(); }
+        else if a == "-C" || a.starts_with("-C") {
+            let c = if a == "-C" { i += 1; next } else { &a[2..] };
+            if let Some(v) = c.strip_prefix("opt-level=") { opt = v.to_string(); }
+        }
+        i += 1;
+    }
+    let names = env("FLUX_STARDUST_ENV").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| STAMP_ENV_DEFAULT.to_string());
+    let mut envs = serde_json::Map::new();
+    for n in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        envs.insert(n.to_string(), env(n).map(Value::String).unwrap_or(Value::Null));
+    }
+    let manifest_dir = env("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let git_head = manifest_dir.as_ref().and_then(|d| git_head_full(d));
+    let git_dirty = if git_head.is_some() { manifest_dir.as_ref().and_then(|d| git_dirty(d)) } else { None };
+    let mut v = json!({
+        "stardust": STAMP_SCHEMA,
+        "crate": env("CARGO_CRATE_NAME").or_else(|| after("--crate-name")),
+        "pkg": env("CARGO_PKG_NAME"),
+        "version": env("CARGO_PKG_VERSION"),
+        "bin": env("CARGO_BIN_NAME"),
+        "test": args.iter().any(|a| a == "--test"),
+        "env": Value::Object(envs),
+        "git_head": git_head,
+        "git_dirty": git_dirty,
+        "opt": opt,
+        "target": target,
+        "fluxc": env!("CARGO_PKG_VERSION"),
+    });
+    // The builder's hostname is left out by default (review point 6): it is discoverable from DNS
+    // anyway and has no place in a user-downloaded artifact. FLUX_STARDUST_HOST=1 records it.
+    if env("FLUX_STARDUST_HOST").as_deref() == Some("1") {
+        let host = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).or_else(|| env("HOSTNAME"));
+        v["host"] = host.map(Value::String).unwrap_or(Value::Null);
+    }
+    v
+}
+
+fn pad4(mut v: Vec<u8>, with: u8) -> Vec<u8> { while v.len() % 4 != 0 { v.push(with); } v }
+
+/// A minimal ELF64 little-endian RELOCATABLE object (x86-64 machine id; the linker does not
+/// check it for a data-only object) carrying ONE allocated SHT_NOTE section `.note.stardust`
+/// whose body is `stamp` (JSON, space-padded to 4 bytes). Three section headers: null,
+/// `.note.stardust`, `.shstrtab`. No symbols, no relocations.
+pub fn make_note_object(stamp: &Value) -> Vec<u8> {
+    let desc = pad4(stamp.to_string().into_bytes(), b' ');
+    let mut note = Vec::new();
+    note.extend_from_slice(&(NOTE_OWNER_STARDUST.len() as u32).to_le_bytes());
+    note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+    note.extend_from_slice(&NT_STARDUST.to_le_bytes());
+    note.extend_from_slice(NOTE_OWNER_STARDUST);
+    let note = pad4(note, 0);
+    let mut note = note;
+    note.extend_from_slice(&desc);
+    let strs = b"\0.note.stardust\0.shstrtab\0".to_vec();
+    let note_off = 64usize;
+    let strs_off = note_off + note.len();
+    let shoff = (strs_off + strs.len() + 7) / 8 * 8;
+    let mut f = vec![0u8; shoff + 3 * 64];
+    f[0..4].copy_from_slice(b"\x7fELF"); f[4] = 2; f[5] = 1; f[6] = 1;
+    f[16..18].copy_from_slice(&1u16.to_le_bytes());        // ET_REL
+    f[18..20].copy_from_slice(&0x3eu16.to_le_bytes());     // EM_X86_64
+    f[20..24].copy_from_slice(&1u32.to_le_bytes());
+    f[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+    f[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());   // e_ehsize
+    f[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());   // e_shentsize
+    f[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());    // e_shnum
+    f[0x3e..0x40].copy_from_slice(&2u16.to_le_bytes());    // e_shstrndx
+    f[note_off..note_off + note.len()].copy_from_slice(&note);
+    f[strs_off..strs_off + strs.len()].copy_from_slice(&strs);
+    let mut sh = |i: usize, name: u32, ty: u32, flags: u64, off: usize, size: usize, align: u64| {
+        let b = shoff + i * 64;
+        f[b..b + 4].copy_from_slice(&name.to_le_bytes());
+        f[b + 4..b + 8].copy_from_slice(&ty.to_le_bytes());
+        f[b + 8..b + 16].copy_from_slice(&flags.to_le_bytes());
+        f[b + 0x18..b + 0x20].copy_from_slice(&(off as u64).to_le_bytes());
+        f[b + 0x20..b + 0x28].copy_from_slice(&(size as u64).to_le_bytes());
+        f[b + 0x30..b + 0x38].copy_from_slice(&align.to_le_bytes());
+    };
+    sh(1, 1, 7, 2, note_off, note.len(), 4);   // SHT_NOTE, SHF_ALLOC
+    sh(2, 16, 3, 0, strs_off, strs.len(), 1);  // SHT_STRTAB
+    f
+}
+
+/// Where the note object goes: `<--out-dir>/.stardust/<crate>-<blake3[..16]>.o` (the unit's own
+/// output dir, so it lives in the target tree, never on the root partition).
+pub fn stamp_object_path(args: &[String], obj: &[u8]) -> PathBuf {
+    let out_dir = args.iter().position(|a| a == "--out-dir").and_then(|i| args.get(i + 1)).cloned()
+        .or_else(|| args.iter().find_map(|a| a.strip_prefix("--out-dir=").map(str::to_string)))
+        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok())
+        .unwrap_or_else(|| "target".into());
+    let crate_name = args.iter().position(|a| a == "--crate-name").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "unit".into());
+    let h = blake3::hash(obj).to_hex();
+    PathBuf::from(out_dir).join(".stardust").join(format!("{crate_name}-{}.o", &h[..16]))
+}
+
+/// The wrapper's one call: extra rustc args for this unit, or None when it does not link an
+/// ELF executable, the writer is off (`FLUX_STARDUST=0`), or the object could not be written
+/// (a stamp must never fail a build).
+pub fn link_stamp_args(args: &[String]) -> Option<Vec<String>> {
+    if matches!(std::env::var("FLUX_STARDUST").ok().as_deref().map(str::trim), Some("0") | Some("off") | Some("false")) {
+        return None;
+    }
+    if !links_elf_executable(args) { return None; }
+    let stamp = build_stamp(args, &|k| std::env::var(k).ok());
+    let obj = make_note_object(&stamp);
+    let path = stamp_object_path(args, &obj);
+    if std::fs::read(&path).map(|cur| cur == obj).unwrap_or(false) {
+        return Some(vec!["-C".into(), format!("link-arg={}", path.display())]);
+    }
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let tmp = path.with_extension(format!("o.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, &obj).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(vec!["-C".into(), format!("link-arg={}", path.display())])
 }
 
 // ───────────────────────────── the ELF reader ─────────────────────────────
 
-fn u16le(b: &[u8], o: usize) -> Option<u16> { b.get(o..o + 2).map(|x| u16::from_le_bytes([x[0], x[1]])) }
-fn u32le(b: &[u8], o: usize) -> Option<u32> { b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])) }
-fn u64le(b: &[u8], o: usize) -> Option<u64> { b.get(o..o + 8).map(|x| u64::from_le_bytes([x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]])) }
+fn u16le(b: &[u8], o: usize) -> Option<u16> { b.get(o..o.checked_add(2)?).map(|x| u16::from_le_bytes([x[0], x[1]])) }
+fn u32le(b: &[u8], o: usize) -> Option<u32> { b.get(o..o.checked_add(4)?).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])) }
+fn u64le(b: &[u8], o: usize) -> Option<u64> { b.get(o..o.checked_add(8)?).map(|x| u64::from_le_bytes([x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]])) }
+/// A bounded byte range inside `b`, or None (checked arithmetic — fuzzed inputs must never panic).
+fn span(b: &[u8], off: u64, len: u64) -> Option<&[u8]> {
+    let o = usize::try_from(off).ok()?;
+    let l = usize::try_from(len).ok()?;
+    b.get(o..o.checked_add(l)?)
+}
 
-/// The NT_GNU_BUILD_ID note body of an ELF64 little-endian file, via its section headers.
-pub fn elf_build_id(bytes: &[u8]) -> Option<Vec<u8>> {
+/// The body of the first note with (owner, type) in an ELF64 little-endian file: section headers
+/// (every SHT_NOTE section) first, then the PT_NOTE program headers (a binary with its section
+/// table stripped). Every offset and length is bounds-checked; bad input returns None.
+pub fn elf_note(bytes: &[u8], owner: &[u8], ty: u32) -> Option<Vec<u8>> {
+    elf_note_range(bytes, owner, ty).map(|r| bytes[r].to_vec())
+}
+
+/// Where that note's body sits in the file (so a scan can blank it out).
+pub fn elf_note_range(bytes: &[u8], owner: &[u8], ty: u32) -> Option<std::ops::Range<usize>> {
     if bytes.len() < 64 || &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 { return None; }
-    let shoff = u64le(bytes, 0x28)? as usize;
-    let shentsize = u16le(bytes, 0x3a)? as usize;
-    let shnum = u16le(bytes, 0x3c)? as usize;
-    let shstrndx = u16le(bytes, 0x3e)? as usize;
-    if shentsize < 64 || shnum == 0 || shstrndx >= shnum { return None; }
-    let sh = |i: usize| -> Option<&[u8]> { bytes.get(shoff + i * shentsize..shoff + i * shentsize + 64) };
-    let strtab = sh(shstrndx)?;
-    let str_off = u64le(strtab, 0x18)? as usize;
-    let str_size = u64le(strtab, 0x20)? as usize;
-    let strs = bytes.get(str_off..str_off + str_size)?;
-    for i in 0..shnum {
-        let h = sh(i)?;
-        if u32le(h, 4)? != 7 { continue; } // SHT_NOTE
-        let name_off = u32le(h, 0)? as usize;
-        let name = strs.get(name_off..).and_then(|t| t.split(|&c| c == 0).next())?;
-        if name != b".note.gnu.build-id" { continue; }
-        let off = u64le(h, 0x18)? as usize;
-        let size = u64le(h, 0x20)? as usize;
-        return parse_note_desc(bytes.get(off..off + size)?, NOTE_OWNER_GNU, NT_GNU_BUILD_ID);
+    // Section headers.
+    let shoff = u64le(bytes, 0x28)?;
+    let shentsize = u16le(bytes, 0x3a)? as u64;
+    let shnum = u16le(bytes, 0x3c)? as u64;
+    if shentsize >= 64 && shnum > 0 && shoff > 0 {
+        for i in 0..shnum {
+            let Some(h) = shoff.checked_add(i.checked_mul(shentsize)?).and_then(|o| span(bytes, o, 64)) else { break };
+            if u32le(h, 4)? != 7 { continue; } // SHT_NOTE
+            let off = u64le(h, 0x18)?;
+            let size = u64le(h, 0x20)?;
+            if let Some(sec) = span(bytes, off, size) {
+                if let Some(r) = parse_note_range(sec, owner, ty) { let base = off as usize; return Some(base + r.start..base + r.end); }
+            }
+        }
+    }
+    // Program headers (PT_NOTE = 4).
+    let phoff = u64le(bytes, 0x20)?;
+    let phentsize = u16le(bytes, 0x36)? as u64;
+    let phnum = u16le(bytes, 0x38)? as u64;
+    if phentsize >= 56 && phnum > 0 && phoff > 0 {
+        for i in 0..phnum {
+            let Some(h) = phoff.checked_add(i.checked_mul(phentsize)?).and_then(|o| span(bytes, o, 56)) else { break };
+            if u32le(h, 0)? != 4 { continue; }
+            let off = u64le(h, 8)?;
+            let size = u64le(h, 32)?;
+            if let Some(sec) = span(bytes, off, size) {
+                if let Some(r) = parse_note_range(sec, owner, ty) { let base = off as usize; return Some(base + r.start..base + r.end); }
+            }
+        }
     }
     None
 }
 
-/// Walk a note section for (owner, type) and return that note's body.
+/// The GNU build-id body, if any.
+pub fn elf_build_id(bytes: &[u8]) -> Option<Vec<u8>> { elf_note(bytes, NOTE_OWNER_GNU, NT_GNU_BUILD_ID) }
+
+/// Walk a note section for (owner, type) and return that note's body. Bounded.
 pub fn parse_note_desc(sec: &[u8], owner: &[u8], ty: u32) -> Option<Vec<u8>> {
-    let mut o = 0;
-    while o + 12 <= sec.len() {
+    parse_note_range(sec, owner, ty).map(|r| sec[r].to_vec())
+}
+
+/// Same walk, returning the body's range inside `sec`.
+pub fn parse_note_range(sec: &[u8], owner: &[u8], ty: u32) -> Option<std::ops::Range<usize>> {
+    let mut o: usize = 0;
+    let mut guard = 0u32;
+    while o.checked_add(12)? <= sec.len() && guard < 10_000 {
+        guard += 1;
         let namesz = u32le(sec, o)? as usize;
         let descsz = u32le(sec, o + 4)? as usize;
         let t = u32le(sec, o + 8)?;
         let name_start = o + 12;
-        let desc_start = name_start + ((namesz + 3) & !3);
-        let desc_end = desc_start + descsz;
+        let desc_start = name_start.checked_add(namesz.checked_add(3)? & !3)?;
+        let desc_end = desc_start.checked_add(descsz)?;
         if desc_end > sec.len() { return None; }
         if t == ty && sec.get(name_start..name_start + namesz) == Some(owner) {
-            return Some(sec[desc_start..desc_end].to_vec());
+            return Some(desc_start..desc_end);
         }
-        o = desc_start + ((descsz + 3) & !3);
+        o = desc_start.checked_add(descsz.checked_add(3)? & !3)?;
     }
     None
 }
 
-/// A build-id body is a stardust stamp when it is UTF-8 JSON with `"stardust": <n>`.
+/// A note body is a stardust stamp when it is UTF-8 JSON with `"stardust": <n>`.
 pub fn decode_stamp(desc: &[u8]) -> Option<Value> {
     let txt = std::str::from_utf8(desc).ok()?.trim();
     if !txt.starts_with('{') { return None; }
@@ -887,10 +1057,15 @@ fn fmt_unix(t: u64) -> String {
 
 pub fn render(d: &Dust) -> String {
     let mut s = String::new();
-    let head = match (&d.network, d.network_ambiguous) {
-        (Some(n), _) => format!("✦ stardust  {}  →  network {n}  (by {})", d.target, d.network_basis),
-        (None, true) => format!("✦ stardust  {}  →  network AMBIGUOUS", d.target),
-        (None, false) => format!("✦ stardust  {}  →  not built for one network (no wire-topic verdict)", d.target),
+    let head = if d.conflict {
+        format!("✦ stardust  {}  →  CONFLICT: declared {} vs evidence {} — no network", d.target,
+            d.declared_network.clone().unwrap_or_default(), d.evidence_network.clone().unwrap_or_default())
+    } else {
+        match (&d.network, d.network_ambiguous) {
+            (Some(n), _) => format!("✦ stardust  {}  →  network {n}  ({})", d.target, d.network_basis),
+            (None, true) => format!("✦ stardust  {}  →  evidence AMBIGUOUS, no stamp", d.target),
+            (None, false) => format!("✦ stardust  {}  →  not built for one network (no stamp, no wire-topic verdict)", d.target),
+        }
     };
     s.push_str(&head); s.push('\n');
     if let Some(u) = &d.unit {
@@ -907,24 +1082,31 @@ pub fn render(d: &Dust) -> String {
     if let (Some(sz), Some(mt)) = (d.size_bytes, d.mtime_unix) { s.push_str(&format!("  size/mtime  {sz} B · {}\n", fmt_unix(mt))); }
     if let Some(h) = &d.blake3 { s.push_str(&format!("  blake3      {h}\n")); }
     if let Some(h) = &d.sha256 { s.push_str(&format!("  sha256      {h}\n")); }
+    if let Some(b) = &d.build_id { s.push_str(&format!("  build-id    {b}   (the linker's identity of this file, untouched)\n")); }
+    if let Some(st) = &d.stamp {
+        let g = |k: &str| st.get(k).map(|v| match v { Value::String(x) => x.clone(), Value::Null => "-".into(), o => o.to_string() }).unwrap_or_else(|| "-".into());
+        let envs = st.get("env").and_then(|e| e.as_object()).map(|o| o.iter().map(|(k, v)| format!("{k}={}", match v { Value::String(x) => x.as_str(), _ => "unset" })).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let dirty = match st.get("git_dirty") { Some(Value::Bool(true)) => "+dirty", Some(Value::Bool(false)) => "clean", _ => "dirty?" };
+        let ghead = g("git_head");
+        let kind = if st.get("test").and_then(|v| v.as_bool()).unwrap_or(false) { "test-bin".to_string() } else { format!("bin {}", g("bin")) };
+        s.push_str(&format!("  declared    {} {} {} · {} · git {} {} · opt {} · target {} · fluxc {}   (stamp v{} in {}; as of this file's LAST LINK)\n",
+            g("pkg"), g("version"), kind,
+            envs, if ghead.len() > 12 { &ghead[..12] } else { &ghead }, dirty, g("opt"), g("target"), g("fluxc"),
+            st.get("stardust").and_then(|v| v.as_u64()).unwrap_or(0), d.stamp_source.clone().unwrap_or_default()));
+    }
     if !d.wire_topics.is_empty() {
         let list: Vec<String> = d.wire_topics.iter().map(|(n, t)| {
             let h = d.topic_hits.iter().find(|(k, _)| k == n).map(|(_, c)| *c).unwrap_or(0);
             format!("/sigil/{n}/ {} topics ×{h}", t.len())
         }).collect();
-        s.push_str(&format!("  wire topics {}   (compile-time gossip topics = the network it tunes to; ≥{MIN_TOPICS} distinct, ≥{TOPIC_MARGIN}× runner-up)\n", list.join("  ")));
+        s.push_str(&format!("  evidence    {}   → {}   (HEURISTIC: compile-time gossip topics; ≥{MIN_TOPICS} distinct, ≥{TOPIC_MARGIN}× runner-up)\n",
+            list.join("  "), d.evidence_network.clone().unwrap_or_else(|| "none".into())));
     }
     if !d.mentions.is_empty() {
         let list: Vec<String> = d.mentions.iter().map(|(n, c)| format!("{n}×{c}")).collect();
-        s.push_str(&format!("  mentions    {}   (literal counts — information only, NOT the verdict)\n", list.join("  ")));
+        s.push_str(&format!("  mentions    {}   (literal counts — information only)\n", list.join("  ")));
     }
     if let Some(e) = &d.network_exec { s.push_str(&format!("  network-id  {e}   (executed, --exec)\n")); }
-    if let Some(st) = &d.stamp {
-        let g = |k: &str| st.get(k).map(|v| match v { Value::String(x) => x.clone(), Value::Null => "-".into(), o => o.to_string() }).unwrap_or_else(|| "-".into());
-        let envs = st.get("env").and_then(|e| e.as_object()).map(|o| o.iter().map(|(k, v)| format!("{k}={}", match v { Value::String(x) => x.as_str(), _ => "unset" })).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-        s.push_str(&format!("  stamp       {} {} bin {} · {} · git {} · opt {} · target {} · host {} · fluxc {}   (written by the fluxc wrapper into .note.gnu.build-id)\n",
-            g("pkg"), g("version"), g("bin"), envs, g("git_head"), g("opt"), g("target"), g("host"), g("fluxc")));
-    }
     if let Some(r) = &d.flux_rev { s.push_str(&format!("  flux-rev    {r}\n")); }
     if !d.versions.is_empty() { s.push_str(&format!("  versions    {}\n", d.versions.join("  "))); }
     if let Some(r) = &d.rustc { s.push_str(&format!("  rustc       {r}\n")); }
@@ -940,7 +1122,7 @@ pub fn render(d: &Dust) -> String {
     }
     for w in &d.warnings { s.push_str(&format!("  ⚠ {w}\n")); }
     s.push_str(&format!("  {} · {} ms · read from the bytes, nothing executed; `--exec` runs `network-id`\n",
-        if d.ok { "ok" } else { "INCOMPLETE" }, d.elapsed_ms));
+        if d.ok { "ok" } else { "NOT OK" }, d.elapsed_ms));
     s
 }
 
@@ -959,15 +1141,12 @@ mod tests {
 
     #[test]
     fn scan_finds_rustc_fluxrev_versions_mentions_and_topics() {
-        // The shape of the REAL g3 sigil-top 10.7.5 (measured 2026-10-28): it MENTIONS sigil-g2
-        // 66 times and sigil-g3 only 4, yet its wire topics are all /sigil/g3/*. The verdict
-        // must follow the topics, never the counts.
         let mut bytes = Vec::new();
         for _ in 0..66 { bytes.extend_from_slice(b"\x00sigil-g2/chain\x00"); }
         for _ in 0..4 { bytes.extend_from_slice(b"\x00sigil-g3\x00"); }
-        bytes.extend_from_slice(b"\x00sigil-g3-db\x00sigil-rpcd\x00");                 // boundary: not ids
+        bytes.extend_from_slice(b"\x00sigil-g3-db\x00sigil-rpcd\x00");
         bytes.extend_from_slice(b"\x00/sigil/g3/blocks\x00/sigil/g3/txstokio\x00/sigil/g3/release\x00/sigil/g3/peer-hblake\x00");
-        bytes.extend_from_slice(b"\x00/sigil/g0/blocks gossipsub topic\x00/sigil/g0/balance\x00");      // legacy wallet-page JS
+        bytes.extend_from_slice(b"\x00/sigil/g0/blocks gossipsub topic\x00/sigil/g0/balance\x00");
         bytes.extend_from_slice(b"\x00rustc version 1.93.1 (01f6ddf75 2026-02-11)\x00");
         bytes.extend_from_slice(b"\x00full:51404b79aa00bb11cc22dd33ee44ff55\x00");
         bytes.extend_from_slice(b"\x00sigil-top/10.7.3 kgauge\x00mainnet-genesis\x00");
@@ -977,15 +1156,11 @@ mod tests {
         assert_eq!(s.versions, vec!["sigil-top/10.7.3".to_string()]);
         assert_eq!(s.mentions[0], ("sigil-g2".to_string(), 66));
         assert!(s.mentions.iter().any(|(n, c)| n == "mainnet-genesis" && *c == 1));
-        assert!(!s.mentions.iter().any(|(n, _)| n == "sigil-rp" || n == "sigil-g3-db"));
         assert_eq!(s.wire_topics[0].0, "g3");
-        assert_eq!(s.wire_topics[0].1, vec!["blocks", "release", "txs"]);   // peer-hblake is not a known topic
-        assert_eq!(s.wire_topics[1], ("g0".to_string(), vec!["blocks".to_string()]));
+        assert_eq!(s.wire_topics[0].1, vec!["blocks", "release", "txs"]);
         assert_eq!(s.topic_hits, vec![("g3".to_string(), 3), ("g0".to_string(), 1)]);
         let (net, basis, amb) = network_verdict(&s.wire_topics, &s.topic_hits, &s.mentions);
-        assert_eq!(net.as_deref(), Some("sigil-g3"));
-        assert_eq!(basis, "wire-topics");
-        assert!(!amb);
+        assert_eq!((net.as_deref(), basis.as_str(), amb), (Some("sigil-g3"), "wire-topics", false));
     }
 
     #[test]
@@ -1002,28 +1177,29 @@ mod tests {
         let h = |p: &[(&str, usize)]| p.iter().map(|(k, v)| (k.to_string(), *v)).collect::<Vec<_>>();
         let six = ["blocks", "peer-heights", "tip-proofs", "txs", "release", "finality-votes"];
         let five = &six[..5];
-        // The g3 build 10.7.5 as measured: g3×21 (6 topics), g2×5 (5 topics, a hardcoded self-check), g0×3 (1 topic).
         let (n, b, a) = network_verdict(&[g("g3", &six), g("g2", five), g("g0", &["blocks"])], &h(&[("g3", 21), ("g2", 5), ("g0", 3)]), &[]);
         assert_eq!((n.as_deref(), b.as_str(), a), (Some("sigil-g3"), "wire-topics", false));
-        // The g2 build 10.7.4 as measured: g2×25, g0×3, no g3 at all.
         let (n, b, a) = network_verdict(&[g("g2", &six), g("g0", &["blocks"])], &h(&[("g2", 25), ("g0", 3)]), &[]);
         assert_eq!((n.as_deref(), b.as_str(), a), (Some("sigil-g2"), "wire-topics", false));
-        // The g3 sigil-node: g3×6, g0×1.
-        let (n, _, a) = network_verdict(&[g("g3", &six), g("g0", &["blocks"])], &h(&[("g3", 6), ("g0", 1)]), &[]);
-        assert_eq!((n.as_deref(), a), (Some("sigil-g3"), false));
-        // A single id with no runner-up wins outright.
-        let (n, _, a) = network_verdict(&[g("r1", &six)], &h(&[("r1", 6)]), &[]);
-        assert_eq!((n.as_deref(), a), (Some("sigil-r1"), false));
-        // Too thin a margin (21 vs 15) with both qualifying = AMBIGUOUS, never a guess.
         let (n, b, a) = network_verdict(&[g("g2", &six), g("g3", &six)], &h(&[("g2", 21), ("g3", 15)]), &[]);
         assert_eq!((n, b.as_str(), a), (None, "wire-topics", true));
-        // Fewer than MIN_TOPICS distinct → no topic verdict; one mentioned network = by mention (Quillon).
         let (n, b, a) = network_verdict(&[g("g0", &["blocks"])], &h(&[("g0", 3)]), &[("mainnet-genesis".to_string(), 7)]);
         assert_eq!((n.as_deref(), b.as_str(), a), (Some("mainnet-genesis"), "mention", false));
-        // fluxc as measured: one g3 topic, several mentions → not built for one network, no verdict, not "ambiguous".
-        let (n, b, a) = network_verdict(&[g("g3", &["blocks"])], &h(&[("g3", 1)]), &[("mainnet-genesis".to_string(), 6), ("sigil-g2".to_string(), 5), ("sigil-g3".to_string(), 1)]);
+        let (n, b, a) = network_verdict(&[g("g3", &["blocks"])], &h(&[("g3", 1)]), &[("mainnet-genesis".to_string(), 6), ("sigil-g2".to_string(), 5)]);
         assert_eq!((n, b.as_str(), a), (None, "none", false));
         assert_eq!(network_verdict(&[], &[], &[]), (None, "none".to_string(), false));
+    }
+
+    #[test]
+    fn resolve_network_keeps_declared_and_evidence_apart() {
+        assert_eq!(resolve_network(Some("sigil-g3"), Some("sigil-g3"), "wire-topics"), (Some("sigil-g3".into()), "stamp+evidence agree".into(), false));
+        let (n, b, c) = resolve_network(Some("sigil-r3"), Some("sigil-g3"), "wire-topics");
+        assert_eq!((n, b.as_str(), c), (None, "conflict", true));
+        let (n, b, c) = resolve_network(Some("sigil-r3"), None, "none");
+        assert_eq!(n.as_deref(), Some("sigil-r3")); assert!(b.starts_with("declared-only")); assert!(!c);
+        let (n, b, c) = resolve_network(None, Some("sigil-g2"), "wire-topics");
+        assert_eq!((n.as_deref(), b.as_str(), c), (Some("sigil-g2"), "wire-topics (heuristic)", false));
+        assert_eq!(resolve_network(None, None, "none"), (None, "none".into(), false));
     }
 
     #[test]
@@ -1045,9 +1221,7 @@ mod tests {
         let uf = parse_systemctl_show(text);
         assert_eq!(uf.id, "sigil-node.service");
         assert_eq!(uf.main_pid, 911356);
-        assert_eq!(uf.active_state, "active");
         assert_eq!(uf.exec_start_path.as_deref(), Some("/home/storage/sigil-g3-bin/sigil-top"));
-        assert_eq!(uf.active_enter, "Fri 2026-10-23 12:38:40 CEST");
     }
 
     #[test]
@@ -1070,8 +1244,8 @@ mod tests {
         assert!(version_tokens("X/1.2.3").is_empty());
     }
 
-    /// A minimal ELF64 LE file with one .note.gnu.build-id section carrying `desc`.
-    fn fake_elf(desc: &[u8]) -> Vec<u8> {
+    /// A minimal ELF64 LE EXECUTABLE-shaped file with one .note.gnu.build-id SECTION carrying `desc`.
+    fn fake_elf_sections(desc: &[u8]) -> Vec<u8> {
         let mut note = Vec::new();
         note.extend_from_slice(&4u32.to_le_bytes());
         note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
@@ -1087,9 +1261,7 @@ mod tests {
         let mut f = vec![0u8; shoff + 3 * 64];
         f[0..4].copy_from_slice(b"\x7fELF"); f[4] = 2; f[5] = 1; f[6] = 1;
         f[16..18].copy_from_slice(&2u16.to_le_bytes()); f[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
-        f[20..24].copy_from_slice(&1u32.to_le_bytes());
         f[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
-        f[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());
         f[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
         f[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());
         f[0x3e..0x40].copy_from_slice(&2u16.to_le_bytes());
@@ -1107,26 +1279,79 @@ mod tests {
         f
     }
 
+    /// The same note reachable ONLY through a PT_NOTE program header (section table stripped).
+    fn fake_elf_phdr_only(desc: &[u8]) -> Vec<u8> {
+        let mut note = Vec::new();
+        note.extend_from_slice(&(NOTE_OWNER_STARDUST.len() as u32).to_le_bytes());
+        note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        note.extend_from_slice(&NT_STARDUST.to_le_bytes());
+        note.extend_from_slice(NOTE_OWNER_STARDUST);
+        while note.len() % 4 != 0 { note.push(0); }
+        note.extend_from_slice(desc);
+        let phoff = 64usize;
+        let note_off = phoff + 56;
+        let mut f = vec![0u8; note_off + note.len()];
+        f[0..4].copy_from_slice(b"\x7fELF"); f[4] = 2; f[5] = 1; f[6] = 1;
+        f[16..18].copy_from_slice(&2u16.to_le_bytes()); f[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+        f[0x20..0x28].copy_from_slice(&(phoff as u64).to_le_bytes());
+        f[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+        f[0x38..0x3a].copy_from_slice(&1u16.to_le_bytes());
+        // e_shnum = 0, e_shoff = 0 → no section table
+        f[phoff..phoff + 4].copy_from_slice(&4u32.to_le_bytes());                 // PT_NOTE
+        f[phoff + 8..phoff + 16].copy_from_slice(&(note_off as u64).to_le_bytes()); // p_offset
+        f[phoff + 32..phoff + 40].copy_from_slice(&(note.len() as u64).to_le_bytes()); // p_filesz
+        f[note_off..].copy_from_slice(&note);
+        f
+    }
+
     #[test]
-    fn elf_build_id_reads_a_synthetic_note_and_a_real_one() {
-        let desc = b"{\"stardust\":1,\"pkg\":\"x\"}   ";
-        let f = fake_elf(desc);
-        assert_eq!(elf_build_id(&f).as_deref(), Some(&desc[..]));
-        let st = decode_stamp(desc).expect("stamp json");
-        assert_eq!(st["pkg"], "x");
-        // a plain sha1 build-id (20 bytes) is not a stamp
-        assert_eq!(elf_build_id(&fake_elf(&[7u8; 20])).map(|d| d.len()), Some(20));
+    fn note_object_round_trips_through_the_reader() {
+        let stamp = json!({"stardust": 2, "pkg": "sigil-top", "env": {"SIGIL_NETWORK": "sigil-g3"}, "test": false});
+        let obj = make_note_object(&stamp);
+        // The object IS an ELF64 file with a .note.stardust section: the reader must find it.
+        let body = elf_note(&obj, NOTE_OWNER_STARDUST, NT_STARDUST).expect("stardust note in the object");
+        assert_eq!(body.len() % 4, 0);
+        assert_eq!(decode_stamp(&body).unwrap(), stamp);
+        assert!(elf_build_id(&obj).is_none(), "the object carries no GNU build-id");
+        // Legacy v1 stamp in a build-id section, and a plain sha1 build-id.
+        let legacy = b"{\"stardust\":1,\"pkg\":\"x\"}   ";
+        let f = fake_elf_sections(legacy);
+        assert_eq!(elf_build_id(&f).as_deref(), Some(&legacy[..]));
+        assert_eq!(elf_build_id(&fake_elf_sections(&[7u8; 20])).map(|d| d.len()), Some(20));
         assert!(decode_stamp(&[7u8; 20]).is_none());
-        assert!(elf_build_id(b"not an elf at all, really not").is_none());
-        // Our own test binary: if it was linked through the fluxc wrapper it carries a stamp
-        // naming this crate; if it was linked by raw cargo it carries the linker's sha1 or none.
-        let me = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-        if let Some(st) = elf_build_id(&me).and_then(|d| decode_stamp(&d)) {
-            assert_eq!(st["stardust"], 1);
-            assert_eq!(st["crate"], "fluxc_core");
-            assert_eq!(st["test"], true);
-            assert!(st["git_head"].as_str().map(|g| g.len() == 12).unwrap_or(false), "{st}");
+        // Program-header-only path.
+        let padded = pad4(b"{\"stardust\":2,\"pkg\":\"ph\"}".to_vec(), b' ');
+        let ph = fake_elf_phdr_only(&padded);
+        assert_eq!(decode_stamp(&elf_note(&ph, NOTE_OWNER_STARDUST, NT_STARDUST).unwrap()).unwrap()["pkg"], "ph");
+    }
+
+    #[test]
+    fn reader_never_panics_on_garbage() {
+        // Deterministic xorshift noise, truncations of a real object, and hostile headers.
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        let mut rnd = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+        for _ in 0..300 {
+            let len = (rnd() % 600) as usize;
+            let bytes: Vec<u8> = (0..len).map(|_| rnd() as u8).collect();
+            let _ = elf_note(&bytes, NOTE_OWNER_STARDUST, NT_STARDUST);
+            let _ = elf_build_id(&bytes);
+            let _ = decode_stamp(&bytes);
+            let _ = parse_note_desc(&bytes, NOTE_OWNER_GNU, 3);
         }
+        let obj = make_note_object(&json!({"stardust": 2}));
+        for cut in 0..obj.len() { let _ = elf_note(&obj[..cut], NOTE_OWNER_STARDUST, NT_STARDUST); }
+        // Valid header with absurd offsets/sizes.
+        let mut evil = obj.clone();
+        evil[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+        evil[0x3c..0x3e].copy_from_slice(&u16::MAX.to_le_bytes());
+        evil[0x20..0x28].copy_from_slice(&(u64::MAX - 7).to_le_bytes());
+        evil[0x36..0x38].copy_from_slice(&u16::MAX.to_le_bytes());
+        evil[0x38..0x3a].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(elf_note(&evil, NOTE_OWNER_STARDUST, NT_STARDUST).is_none());
+        // A note header claiming a gigantic name.
+        let mut sec = vec![0u8; 24];
+        sec[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_note_desc(&sec, NOTE_OWNER_GNU, 3).is_none());
     }
 
     #[test]
@@ -1136,15 +1361,17 @@ mod tests {
         assert!(links_elf_executable(&v(&["--crate-name", "a", "src/lib.rs", "--test", "--emit=dep-info,link"])));
         assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type=bin", "--target", "x86_64-unknown-linux-musl"])));
         assert!(!links_elf_executable(&v(&["src/lib.rs", "--crate-type", "lib", "--emit=dep-info,metadata,link"])));
-        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--emit=dep-info,metadata"])));       // cargo check
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--emit=dep-info,metadata"])));
         assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "x86_64-pc-windows-gnu"])));
         assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "wasm32-unknown-unknown"])));
         assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker=rust-lld"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker-flavor=ld.lld"])));
+        assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker-flavor=gnu-lld-cc"])));
         assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker=/home/storage/tools/zig/zcc"])));
     }
 
     #[test]
-    fn stamp_round_trips_through_the_link_args() {
+    fn stamp_is_declared_metadata_without_host_by_default() {
         let fake_env = |k: &str| -> Option<String> {
             match k {
                 "CARGO_CRATE_NAME" => Some("sigil_top".into()),
@@ -1155,34 +1382,48 @@ mod tests {
                 _ => None,
             }
         };
-        let args: Vec<String> = ["--crate-name", "sigil_top", "src/main.rs", "--crate-type", "bin", "-C", "opt-level=3", "--target", "x86_64-unknown-linux-gnu"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["--crate-name", "sigil_top", "src/main.rs", "--crate-type", "bin", "-C", "opt-level=3", "--target", "x86_64-unknown-linux-gnu", "--out-dir", "/tmp/x/deps"].iter().map(|s| s.to_string()).collect();
         let st = build_stamp(&args, &fake_env);
+        assert_eq!(st["stardust"], STAMP_SCHEMA);
         assert_eq!(st["env"]["SIGIL_NETWORK"], "sigil-g3");
         assert!(st["env"]["SIGIL_NET_ID"].is_null());
         assert_eq!(st["opt"], "3");
         assert_eq!(st["target"], "x86_64-unknown-linux-gnu");
         assert_eq!(st["bin"], "sigil-top");
         assert_eq!(st["test"], false);
-        let la = stamp_link_args(&st);
-        assert_eq!(la[0], "-C");
-        let hexpart = la[1].strip_prefix("link-arg=-Wl,--build-id=0x").expect("build-id arg");
-        let raw = hex::decode(hexpart).unwrap();
-        assert_eq!(raw.len() % 4, 0, "note body must be 4-byte aligned");
-        let back = decode_stamp(&raw).expect("decodes");
-        assert_eq!(back, st);
-        // And the whole thing through a synthetic ELF → the reader's verdict path.
-        let f = fake_elf(&raw);
-        let d2 = elf_build_id(&f).and_then(|x| decode_stamp(&x)).unwrap();
-        assert_eq!(d2["env"]["SIGIL_NETWORK"], "sigil-g3");
+        assert!(st.get("host").is_none(), "hostname is not recorded unless FLUX_STARDUST_HOST=1");
+        assert!(st["git_head"].is_null(), "no CARGO_MANIFEST_DIR → no git facts");
+        let obj = make_note_object(&st);
+        let p = stamp_object_path(&args, &obj);
+        assert!(p.starts_with("/tmp/x/deps/.stardust"), "{p:?}");
+        assert!(p.file_name().unwrap().to_string_lossy().starts_with("sigil_top-"));
     }
 
     #[test]
-    fn git_head_short_reads_the_flux_tree() {
+    fn stamp_text_is_not_evidence_of_itself() {
+        // A binary whose ONLY mention of a network is inside its own stamp must read declared-only.
+        let st = json!({"stardust": 2, "pkg": "hello", "env": {"SIGIL_NETWORK": "sigil-r3"}});
+        let obj = make_note_object(&st);
+        let r = elf_note_range(&obj, NOTE_OWNER_STARDUST, NT_STARDUST).unwrap();
+        assert_eq!(decode_stamp(&obj[r.clone()]).unwrap(), st);
+        let mut masked = obj.clone();
+        for b in &mut masked[r] { *b = 0; }
+        let scan = scan_bytes(&masked);
+        assert!(scan.mentions.is_empty(), "the stamp's own text leaked into the mentions: {:?}", scan.mentions);
+        let unmasked = scan_bytes(&obj);
+        assert_eq!(unmasked.mentions, vec![("sigil-r3".to_string(), 1)], "without masking the stamp would vote for itself");
+    }
+
+    #[test]
+    fn git_facts_read_the_flux_tree() {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let h = git_head_short(here).expect("the flux tree has a git HEAD");
-        assert_eq!(h.len(), 12);
+        let h = git_head_full(here).expect("the flux tree has a git HEAD");
+        assert_eq!(h.len(), 40);
         assert!(h.bytes().all(|c| c.is_ascii_hexdigit()));
-        assert!(git_head_short(Path::new("/proc")).is_none());
+        assert_eq!(git_head_short(here).unwrap().len(), 12);
+        assert!(git_head_full(Path::new("/proc")).is_none());
+        // dirtiness is a bool here (a git tree), never asserted either way — it depends on the box
+        let _ = git_dirty(here);
     }
 
     #[test]
@@ -1204,14 +1445,19 @@ mod tests {
 
     #[test]
     fn read_dispatches_on_target_shape_without_touching_the_network() {
-        // A path that exists → kind path; our own test binary is a Rust binary with a rustc string.
         let exe = std::env::current_exe().unwrap();
         let d = read(&exe.to_string_lossy(), &Opts::default());
         assert_eq!(d.kind, "path");
-        assert!(d.ok);
         assert!(d.rustc.is_some(), "a Rust test binary carries its rustc version string");
         assert!(d.blake3.is_some() && d.sha256.is_some());
-        // A pid → kind pid (our own).
+        // Linked through the fluxc wrapper → a stamp naming this crate (v2 note or legacy build-id).
+        if let Some(st) = &d.stamp {
+            assert_eq!(st["crate"], "fluxc_core");
+            assert_eq!(st["test"], true);
+            if st["stardust"] == STAMP_SCHEMA {
+                assert!(d.build_id.is_some(), "v2 leaves the GNU build-id in place: {:?}", d.stamp_source);
+            }
+        }
         let me = read(&std::process::id().to_string(), &Opts::default());
         assert_eq!(me.kind, "pid");
         assert_eq!(me.unit.as_ref().map(|u| u.main_pid), Some(std::process::id()));

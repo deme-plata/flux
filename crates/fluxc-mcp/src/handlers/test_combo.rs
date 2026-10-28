@@ -168,6 +168,22 @@ fn flux_combo(args: &Value) -> String {
     let pkg = package.to_string();
     let pkg2 = pkg.clone();
 
+    // The guard (fluxc-core::magic), the same one every CLI build and the combo engine run: below
+    // the memory/root floor nothing compiles, and the refusal is a structured result, not an exit.
+    if fluxc_core::magic::mode() != "off" {
+        let g = fluxc_core::magic::guard(release);
+        if g.verdict == "refuse" {
+            webhook::auto_dispatch("combo_complete", serde_json::json!({
+                "package": pkg, "verdict": "REFUSED", "guard": serde_json::to_value(&g).unwrap_or_default()
+            }));
+            let mut rows = vec![" GUARD     🛑 REFUSED — nothing compiled".to_string()];
+            for r in &g.refuse_reasons { rows.push(format!(" ✗ {r}")); }
+            for r in &g.warn_reasons { rows.push(format!(" ⚠ {r}")); }
+            rows.push(" OVERRIDE  FLUX_GUARD=warn (say so to the operator) · FLUX_GUARD_MEM_GB=<n>".to_string());
+            return format!("⚡⚡⚡  F L U X   C O M B O  ⚡⚡⚡\n{}", dashboard(&format!("{} · REFUSED by guard", pkg), &rows));
+        }
+    }
+
     // FIP-0003 unit gate: when the package's test binaries hash identically to
     // the set that already passed, the prior green is provably still valid —
     // report the reuse instead of re-running. Fail-open by construction: any

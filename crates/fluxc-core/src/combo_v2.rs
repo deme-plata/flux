@@ -134,6 +134,37 @@ pub fn first_error(stderr: &str) -> Option<Value> {
 /// cache + mold from .cargo/config.toml apply) run in parallel with in-process predict.
 /// Never spawns two cargo's. Caller (or this) owns overlap. Returns rich ComboResult.
 pub fn run_combo(package: &str, release: bool) -> ComboResult {
+    run_combo_with(package, release, &[])
+}
+
+/// A REFUSED result: the guard said no, cargo was never spawned. Structured, never a process exit
+/// (this engine runs inside long-lived MCP servers) — the CLI maps it to exit 3.
+pub fn refused_result(package: &str, g: &crate::magic::Guard) -> ComboResult {
+    ComboResult {
+        package: package.to_string(),
+        verdict: "REFUSED".into(),
+        next_action: "free_memory_or_FLUX_GUARD=warn".into(),
+        warm: false, total_ms: 0, cmd_ms: 0, predict_ms: 0, compile_ok: false,
+        tests_passed: 0, tests_failed: 0, suites_seen: 0,
+        first_error: Some(json!({"code": "GUARD", "message": g.refuse_reasons.join("; "), "file": "", "line": 0, "col": 0,
+            "snippet": crate::magic::guard_line(g)})),
+        prediction: json!({}),
+        timing_breakdown_ms: None,
+        speculation: json!({"guard": serde_json::to_value(g).unwrap_or(Value::Null)}),
+        dominant_phase: None,
+    }
+}
+
+/// The combo engine with an optional LAUNCHER prefix (e.g. `systemd-run --scope … --`) in front
+/// of cargo — how `fluxc magic` contains a build. The guard runs first for EVERY caller
+/// (MCP supersonic, CLI combo, magic): below the floor nothing is spawned (FLUX_GUARD=0 disables).
+pub fn run_combo_with(package: &str, release: bool, launcher: &[String]) -> ComboResult {
+    if crate::magic::mode() != "off" {
+        let g = crate::magic::guard(release);
+        if g.verdict == "refuse" {
+            return refused_result(package, &g);
+        }
+    }
     let start = Instant::now();
     let pkg = package.to_string();
 
@@ -173,7 +204,14 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     // Matches the proven fast GREEN primitive exactly. Wrapper + mold + cache active via envs.
     // cargo test already typechecks; parallel predict overlaps.
     let cmd_start = Instant::now();
-    let mut cmd = std::process::Command::new("cargo");
+    let mut cmd = if let Some((first, rest)) = launcher.split_first() {
+        let mut c = std::process::Command::new(first);
+        c.args(rest);
+        c.arg("cargo");
+        c
+    } else {
+        std::process::Command::new("cargo")
+    };
     // Anchor cargo in the workspace the exe-walk found. Without this the MCP server's
     // cwd (often /home/storage/claude-code) leaked in and every supersonic read a false
     // RED "could not find Cargo.toml" (measured 2026-10-27; flux_combo had the same line

@@ -987,19 +987,22 @@ fn cmd_magic(args: &[String], config: &fluxc_core::BuildConfig) {
     let mut release = config.release;
     let mut dust = true;
     let mut want_json = false;
+    let mut contain: Option<bool> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--release" => release = true,
             "--no-dust" => dust = false,
             "--json" => want_json = true,
+            "--contain" => contain = Some(true),
+            "--no-contain" => contain = Some(false),
             "-p" | "--package" => { i += 1; if let Some(p) = args.get(i) { package = p.clone(); } }
             a if a.starts_with('-') => { eprintln!("magic: unknown flag {a}"); std::process::exit(2); }
             a => package = a.to_string(),
         }
         i += 1;
     }
-    let r = fluxc_core::magic::cast(&package, release, dust);
+    let r = fluxc_core::magic::cast(&package, release, dust, contain);
     if want_json {
         println!("{}", serde_json::to_string_pretty(&fluxc_core::magic::to_json(&r)).unwrap_or_default());
     } else {
@@ -1009,6 +1012,7 @@ fn cmd_magic(args: &[String], config: &fluxc_core::BuildConfig) {
         "GREEN" => {}
         "REFUSED" => std::process::exit(3),
         "RESTARTED" => std::process::exit(4),
+        "UNVERIFIED" => std::process::exit(5),
         _ => std::process::exit(1),
     }
 }

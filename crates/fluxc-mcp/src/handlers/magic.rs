@@ -14,13 +14,14 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDef {
             name: "flux_magic",
-            description: "✨ MAGIC — the guarded build, one word. Pre-flight the box (refuses when MemAvailable < 12 GB, or < 20 GB for release; refuses when root disk < 2 GB; warns on IO pressure > 20 %, swap nearly full, load > 2× cpus — every threshold is a measured incident that restarted a production node), snapshot q-api-server + sigil-node (MainPID + ActiveEnterTimestamp), run the wrapper-cached `cargo test -p <package>` ∥ predictor with the cargo child marked as the kernel's FIRST OOM victim (oom_score_adj 1000), snapshot again and put RESTARTED in the first line if either unit moved, read the stardust off the built binary (network id, flux-rev), fire `magic_complete`. Env: FLUX_GUARD=warn|0, FLUX_GUARD_MEM_GB, FLUX_GUARD_UNITS, FLUX_GUARD_OOM=0. Use instead of flux_combo whenever the box also runs production.",
+            description: "✨ MAGIC — the guarded build, one word. Pre-flight the box (refuses when MemAvailable < 12 GB, or < 20 GB for release; refuses when root disk < 2 GB; warns on IO pressure > 20 %, swap nearly full, load > 2× cpus — every threshold is a measured incident that restarted a production node), snapshot q-api-server + sigil-node (MainPID + ActiveEnterTimestamp), run the wrapper-cached `cargo test -p <package>` ∥ predictor with the cargo child marked as the kernel's FIRST OOM victim (oom_score_adj 1000), snapshot again and put RESTARTED in the first line if either unit moved, read the stardust off the built binary (network id, flux-rev), fire `magic_complete`. Receipt = MainPID + InvocationID + ActiveEnter of q-api-server + sigil-node before/after (RESTARTED first line if moved; UNVERIFIED if it could not be collected); health probes of both nodes' status URLs before/after; admission control across concurrent guarded builds; a failed measurement refuses instead of reading healthy. Env: FLUX_GUARD=warn|0, FLUX_GUARD_MEM_GB, FLUX_GUARD_UNITS, FLUX_GUARD_PROBES, FLUX_GUARD_OOM=0, FLUX_GUARD_CGROUP=1. Use instead of flux_combo whenever the box also runs production.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "package": {"type": "string", "description": "Crate to build+test (default fluxc-util)"},
                     "release": {"type": "boolean", "description": "Release build (floor 20 GB instead of 12)"},
-                    "dust": {"type": "boolean", "description": "Read stardust off target/<profile>/<package> if this run built it (default true)"},
+                    "dust": {"type": "boolean", "description": "Read stardust off the test executables cargo reports for this package (default true)"},
+                    "contain": {"type": "boolean", "description": "Run the build inside a transient systemd scope with MemoryMax/MemoryHigh (= available − floor), OOMPolicy=kill (whole build) and a 150 MB/s IO cap on the target dir's device. Default: FLUX_GUARD_CGROUP=1 (off until the kill path has been exercised on a disposable host); needs root + systemd-run"},
                     "json": {"type": "boolean", "description": "Raw JSON only"}
                 }
             }),
@@ -33,8 +34,9 @@ fn flux_magic(args: &Value) -> String {
     let package = args.get("package").and_then(|v| v.as_str()).unwrap_or("fluxc-util").to_string();
     let release = args.get("release").and_then(|v| v.as_bool()).unwrap_or(false);
     let dust = args.get("dust").and_then(|v| v.as_bool()).unwrap_or(true);
+    let contain = args.get("contain").and_then(|v| v.as_bool());
     // cast() fires `magic_complete` itself through the wired hooks sink — do not fire twice here.
-    let r = magic::cast(&package, release, dust);
+    let r = magic::cast(&package, release, dust, contain);
     let data = magic::to_json(&r);
     if args.get("json").and_then(|v| v.as_bool()).unwrap_or(false) {
         return serde_json::to_string_pretty(&data).unwrap_or_default();

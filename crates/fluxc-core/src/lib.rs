@@ -1487,11 +1487,12 @@ pub fn run_tests_multi(packages: &[String], extra: &[String]) {
     if packages.len() <= 1 {
         return run_tests(packages.first().map(String::as_str), extra);
     }
+    let release = extra.iter().any(|a| a == "--release" || a == "-r");
+    if magic::preflight_cli(release).is_some() { process::exit(3); }
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(build_test_args_multi(packages, extra));
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
-    let release = extra.iter().any(|a| a == "--release" || a == "-r");
     let label = packages.join("+");
     let mut pi = pulse_begin(&mut cmd);
     let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
@@ -1513,11 +1514,12 @@ pub fn build_test_args(package: Option<&str>, extra: &[String]) -> Vec<String> {
 }
 
 pub fn run_tests(package: Option<&str>, extra: &[String]) {
+    let release = extra.iter().any(|a| a == "--release" || a == "-r");
+    if magic::preflight_cli(release).is_some() { process::exit(3); }
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(build_test_args(package, extra));
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
-    let release = extra.iter().any(|a| a == "--release" || a == "-r");
     let mut pi = pulse_begin(&mut cmd);
     let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
     pulse_end(&pi, "test", package, release, status.success());

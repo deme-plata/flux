@@ -8,6 +8,8 @@ pub mod tdg;
 pub mod pulse;
 pub mod tdg_sched;
 pub mod combo_v2;
+pub mod stardust;
+pub mod magic;
 pub mod warm_bin_cache;
 pub mod ai_debug;
 pub use ::flux_net; // P1: extracted to its own flux-net crate; re-export keeps fluxc_core::flux_net::* stable
@@ -398,6 +400,12 @@ pub fn apply_wrapper_env(cmd: &mut Command) {
 }
 
 pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
+    // The guard: no build on a box below the memory floor (12 GB; 20 GB for --release),
+    // or with the 40 GB root partition nearly full. CLI only — this fn already exits the
+    // process on a failed build, so it is never the MCP server. FLUX_GUARD=warn|0 bypasses.
+    if magic::preflight_cli(config.release).is_some() {
+        process::exit(3);
+    }
     quarantine_poisoned_probe_cache();
     let mut cmd = Command::new("cargo");
     cmd.arg(cargo_cmd);
@@ -454,6 +462,11 @@ pub fn pulse_status(cmd: &mut Command, pi: &mut PulseInvocation) -> std::io::Res
 }
 
 pub fn pulse_begin(cmd: &mut Command) -> PulseInvocation {
+    // Every cargo fluxc spawns (all five sites route through here) becomes the kernel's
+    // FIRST OOM victim — a build must never take a production node down with it
+    // (10-04, 10-17: global OOM → Quillon restarted; 10-22: -1000 inherited from sshd
+    // livelocked the box). FLUX_GUARD_OOM=0 opts out. See magic.rs.
+    magic::mark_oom_victim(cmd);
     let inv = env::var("FLUX_INVOCATION_ID").ok().filter(|s| !s.is_empty())
         .unwrap_or_else(pulse::new_invocation_id);
     cmd.env("FLUX_INVOCATION_ID", &inv);
@@ -1547,6 +1560,10 @@ pub fn print_usage() {
     println!("  fluxc dev             Start dev servers (Vite HMR + fluxc watch)");
     println!("  fluxc watch           Watch all files, auto-rebuild");
     println!("  fluxc clean           Clear all caches");
+    println!("  fluxc magic [-p CRATE] [--release]  Guarded build: mem/disk/io pre-flight, OOM-victim");
+    println!("                        marking, production-unit receipt, combo, dust, webhook");
+    println!("  fluxc stardust TARGET [--exec] [--target TRIPLE] [--json]");
+    println!("                        What IS this binary? path | systemd unit | pid | manifest URL");
     println!("  fluxc tdg [N]         Task-dependency graph report (FIP-0003 tracer)");
     println!("  fluxc tdg baseline    Record crate source keys (the reference point)");
     println!("  fluxc tdg plan        Incremental plan: dirty crates + dependency cone");

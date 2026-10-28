@@ -904,6 +904,8 @@ fn main() {
             fluxc_core::run_self_update(force);
         }
         Some("pulse") => cmd_pulse(&subcommand_args[1..]),
+        Some("stardust") => cmd_stardust(&subcommand_args[1..]),
+        Some("magic") => cmd_magic(&subcommand_args[1..], &config),
         Some("tdg") => {
             match subcommand_args.get(1).map(|s| s.as_str()) {
                 Some("baseline") => {
@@ -941,6 +943,70 @@ fn main() {
 ///   fluxc pulse blast <crate> [--workspace DIR] [--check] [--opt N] [--json]
 ///   fluxc pulse deps [--workspace DIR] [--rev REV] [--json]
 ///   fluxc pulse cost <crate>[@ver] [--features a,b] [--workspace DIR]   BEFORE adding a dep
+/// `fluxc stardust TARGET [--exec] [--target TRIPLE] [--json]` — what IS this binary?
+fn cmd_stardust(args: &[String]) {
+    let mut target = String::new();
+    let mut opts = fluxc_core::stardust::Opts { exec: false, triple: "linux-x64".into() };
+    let mut want_json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--exec" => opts.exec = true,
+            "--json" => want_json = true,
+            "--target" | "--triple" => { i += 1; if let Some(t) = args.get(i) { opts.triple = t.clone(); } }
+            a if a.starts_with('-') => { eprintln!("stardust: unknown flag {a}"); std::process::exit(2); }
+            a => target = a.to_string(),
+        }
+        i += 1;
+    }
+    if target.is_empty() {
+        eprintln!("usage: fluxc stardust <path | systemd unit | pid | manifest URL> [--exec] [--target linux-x64] [--json]");
+        eprintln!("  e.g. fluxc stardust sigil-node · fluxc stardust /home/storage/sigil-g3-bin/sigil-top · fluxc stardust https://sigilgraph.org/downloads/sigil-top-latest.json");
+        std::process::exit(2);
+    }
+    let d = fluxc_core::stardust::read(&target, &opts);
+    let data = fluxc_core::stardust::to_json(&d);
+    fluxc_util::hooks::dispatch_webhook_blocking("stardust", data.clone());
+    if want_json {
+        println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+    } else {
+        print!("{}", fluxc_core::stardust::render(&d));
+    }
+    if !d.ok { std::process::exit(1); }
+}
+
+/// `fluxc magic [-p CRATE] [--release] [--no-dust] [--json]` — the guarded build.
+fn cmd_magic(args: &[String], config: &fluxc_core::BuildConfig) {
+    let mut package = config.package.clone().unwrap_or_else(|| "fluxc-util".to_string());
+    let mut release = config.release;
+    let mut dust = true;
+    let mut want_json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--release" => release = true,
+            "--no-dust" => dust = false,
+            "--json" => want_json = true,
+            "-p" | "--package" => { i += 1; if let Some(p) = args.get(i) { package = p.clone(); } }
+            a if a.starts_with('-') => { eprintln!("magic: unknown flag {a}"); std::process::exit(2); }
+            a => package = a.to_string(),
+        }
+        i += 1;
+    }
+    let r = fluxc_core::magic::cast(&package, release, dust);
+    if want_json {
+        println!("{}", serde_json::to_string_pretty(&fluxc_core::magic::to_json(&r)).unwrap_or_default());
+    } else {
+        print!("{}", fluxc_core::magic::render(&r));
+    }
+    match r.verdict.as_str() {
+        "GREEN" => {}
+        "REFUSED" => std::process::exit(3),
+        "RESTARTED" => std::process::exit(4),
+        _ => std::process::exit(1),
+    }
+}
+
 fn cmd_pulse(args: &[String]) {
     use fluxc_core::pulse;
     let json = args.iter().any(|a| a == "--json");

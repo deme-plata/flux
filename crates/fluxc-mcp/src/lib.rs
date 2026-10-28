@@ -24,6 +24,8 @@ fn build_registry() -> ToolRegistry {
     handlers::test_combo::register(&mut registry);
     handlers::supersonic::register(&mut registry);
     handlers::pulse::register(&mut registry);
+    handlers::stardust::register(&mut registry);
+    handlers::magic::register(&mut registry);
     handlers::stats::register(&mut registry);
     handlers::predict::register(&mut registry);
     handlers::webhook::register(&mut registry);

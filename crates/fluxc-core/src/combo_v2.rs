@@ -174,6 +174,11 @@ pub fn run_combo(package: &str, release: bool) -> ComboResult {
     // cargo test already typechecks; parallel predict overlaps.
     let cmd_start = Instant::now();
     let mut cmd = std::process::Command::new("cargo");
+    // Anchor cargo in the workspace the exe-walk found. Without this the MCP server's
+    // cwd (often /home/storage/claude-code) leaked in and every supersonic read a false
+    // RED "could not find Cargo.toml" (measured 2026-10-27; flux_combo had the same line
+    // since d151480b, this path never did).
+    cmd.current_dir(&ws_root);
     if likely_red {
         cmd.arg("check");
     } else {

@@ -289,6 +289,7 @@ pub fn play_day(
                 treasury_uqug: b.bank.balance(TREASURY),
                 utilization_index: b.auditorium.wisdom_index(),
                 vault_fill_ratio: b.vault.fill_ratio(),
+                daily_payroll_uqug: b.workforce.workers.iter().map(|w| w.wage_uqug).sum(),
             };
             let decisions = b.cortex.tick(&senses);
             // ── ACTUATORS: the decisions now DO something ──────────────────────

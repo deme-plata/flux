@@ -39,7 +39,19 @@ pub struct SubsystemSenses {
     /// `VAULT_HIGH_WATER` the cortex asks for `RelieveVault` instead of letting the
     /// vault silently refuse every intake.
     pub vault_fill_ratio: f64,
+    /// What one day of wages costs (uQUG). The treasury's low-water mark is a number of
+    /// these days (`TREASURY_RESERVE_DAYS`), not a fixed amount. 0 = unknown (old data).
+    #[serde(default)]
+    pub daily_payroll_uqug: u128,
 }
+
+/// Days of payroll the treasury keeps in reserve before the cortex bills custody revenue.
+/// The fixed 100,000 uQUG floor it replaces sat BELOW one day of wages (104,001), so over
+/// 256 years the treasury sawtoothed down to ~1 day's wages ~22× a year and 246 single wage
+/// payments bounced (chronos fixed-256y-20261001). A 30-day reserve never comes close.
+pub const TREASURY_RESERVE_DAYS: u128 = 30;
+/// The old floor, kept as the minimum when the wage bill is unknown.
+pub const TREASURY_FLOOR_UQUG: u128 = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CortexDecision {
@@ -92,7 +104,8 @@ impl BuildingCortex {
         if !senses.vault_witnessed {
             decisions.push(CortexDecision::FreezeVaultAndAudit);
         }
-        if senses.payroll_failures > 0 || senses.treasury_uqug < 100_000 {
+        let low_water = senses.daily_payroll_uqug.saturating_mul(TREASURY_RESERVE_DAYS).max(TREASURY_FLOOR_UQUG);
+        if senses.payroll_failures > 0 || senses.treasury_uqug < low_water {
             decisions.push(CortexDecision::RefillTreasury);
         }
         if !aud_ok {
@@ -148,7 +161,21 @@ mod tests {
             treasury_uqug: 5_000_000,
             utilization_index: 0.8,
             vault_fill_ratio: 0.2,
+            daily_payroll_uqug: 104_001,
         }
+    }
+
+    #[test]
+    fn the_reserve_is_counted_in_days_of_wages_not_a_fixed_floor() {
+        let wf = Workforce::quillon_default(2, 1);
+        let mut cortex = BuildingCortex::new(&wf);
+        // Two days of wages left: above the old 100k floor (which stayed silent here and let
+        // wages bounce), below the 30-day reserve — the cortex must ask for a refill now.
+        let low = SubsystemSenses { treasury_uqug: 2 * 104_001, ..healthy() };
+        assert!(cortex.tick(&low).contains(&CortexDecision::RefillTreasury));
+        // Unknown wage bill (old data): the old floor still applies, nothing stricter.
+        let unknown = SubsystemSenses { treasury_uqug: 150_000, daily_payroll_uqug: 0, ..healthy() };
+        assert!(!cortex.tick(&unknown).contains(&CortexDecision::RefillTreasury));
     }
 
     #[test]

@@ -30,6 +30,13 @@ pub const TICKS_PER_DAY: u64 = 86_400;
 /// intake is +3 and one settlement is −1 (net +2), so a single relief buys ~256
 /// days of headroom — enough that the vault never lives permanently at the cap.
 const RELIEVE_BARS: usize = 512;
+/// Hour of the daily custody bill: after the 10:00 intake and 14:00 settlement, before 17:00 payroll.
+const BILLING_HOUR: u64 = 16;
+/// Treasury above this many days of wages is swept into [`SURPLUS_FUND`] after payroll: the
+/// treasury stays an operating reserve and the profit stays visible in its own account.
+pub const SURPLUS_SWEEP_DAYS: u128 = 90;
+/// The account that receives the swept surplus.
+pub const SURPLUS_FUND: &str = "tower-surplus-fund";
 
 const H: u64 = 3_600;
 
@@ -95,13 +102,14 @@ pub struct DayOutcome {
     /// Settlement withdrawals that found no bar (the intake it belonged to
     /// was refused).
     pub withdraw_refused: u32,
-    /// Custody revenue the RefillTreasury ACTUATOR accrued into the treasury today
-    /// (uQUG). The cortex has always DECIDED `RefillTreasury`; until this field
-    /// existed nothing acted on it — the drain to insolvency was a decision with no
-    /// hand attached.
+    /// Custody revenue credited to the treasury today (uQUG): the 16:00 daily bill, or an
+    /// earlier bill the RefillTreasury actuator brought forward on a low-treasury hour —
+    /// never both (one bill per day).
     pub treasury_refilled_uqug: u128,
-    /// Times the RefillTreasury actuator fired today (≤1 — billed once per day).
+    /// Times the RefillTreasury actuator fired today (≤1). The 16:00 daily bill is not counted.
     pub refill_actions: u32,
+    /// Treasury above `SURPLUS_SWEEP_DAYS` of wages moved to the surplus fund after payroll (uQUG).
+    pub surplus_swept_uqug: u128,
     /// Bars the RelieveVault actuator shipped off-site today to reclaim capacity.
     pub bars_offloaded: u32,
     /// Times the RelieveVault actuator fired today (≤1).
@@ -253,11 +261,30 @@ pub fn play_day(
             b.auditorium.hold_due_talks(tick, |_| attendance);
         }
 
+        // 16:00 daily custody bill (2026-11-01): every bar under storage is billed once a day.
+        // Before this, fees were collected only on the days a low treasury made the cortex bill,
+        // and every unbilled day's fees were simply never earned.
+        if t == BILLING_HOUR * H && !refilled_today && b.vault.bar_count() > 0 {
+            out.treasury_refilled_uqug += b.bank.accrue_custody_revenue(b.vault.bar_count());
+            refilled_today = true;
+        }
+
         // 17:00 payroll; afterwards robots stake their EARNED service history.
         if t == 17 * H {
             let report = b.bank.run_payroll(&b.workforce);
             out.payroll_paid = report.paid_workers;
             out.payroll_failed = report.failures;
+            // Surplus sweep: keep at most SURPLUS_SWEEP_DAYS of wages in the operating treasury —
+            // but only once the tower pays its own way (today's custody revenue covers today's
+            // wages). Before that, money above the cap is the opening reserve the ramp needs, not
+            // profit: sweeping it bounced a wage on day 134 in the first test of this rule.
+            let wages: u128 = b.workforce.workers.iter().map(|w| w.wage_uqug).sum();
+            let cap = wages * SURPLUS_SWEEP_DAYS;
+            let bal = b.bank.balance(TREASURY);
+            let self_sustaining = out.treasury_refilled_uqug >= wages;
+            if self_sustaining && bal > cap && b.bank.pay(TREASURY, SURPLUS_FUND, bal - cap, "surplus sweep").is_ok() {
+                out.surplus_swept_uqug += bal - cap;
+            }
             for w in b.workforce.workers.clone() {
                 let done = tasks_done.get(&w.id).copied().unwrap_or(0);
                 b.workforce.record_service_collateral(&w.id, done);

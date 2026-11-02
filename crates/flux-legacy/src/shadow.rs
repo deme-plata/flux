@@ -4,9 +4,14 @@
 //! fix, RPC timeout, storage encoding) can pass build+tests and STILL alter the chain's computed
 //! state — a silent fork. The only safe gate is **equivalence under real blocks**: run the patched
 //! node in shadow (consume the same live mainnet blocks, produce NOTHING) and compare the committed
-//! state to the canonical node, height by height. Quillon commits FOUR roots per block
-//! (wallet / dex / events / contract); shadow compares all four and reports the FIRST divergence —
-//! the exact height and which root drifted — so a logic bug is caught before it can fork mainnet.
+//! state to the canonical node, height by height. This compare takes FOUR roots per height
+//! (wallet / dex / events / contract) — SIGIL's design — and reports the FIRST divergence.
+//!
+//! ⚠ CORRECTED 2026-11-02: an earlier version of this doc said Quillon commits these four roots per
+//! block. It does NOT: a Quillon header carries ONE `state_root` (`balance_root_v1`, native QUG only,
+//! shadow-checked), and no route serves four roots, so `read_snapshots` has nothing to read on Quillon
+//! today. The working equal-height compare for Quillon is `quillon_roots` (`flux-legacy shadow A B`),
+//! which builds SIGIL-style roots off the node from `/api/v1/sync/full-state`.
 //!
 //! Pure comparison core (unit-tested); the live reader polls a node's per-height state-root endpoint.
 

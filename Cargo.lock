@@ -4267,6 +4267,7 @@ dependencies = [
 name = "flux-legacy"
 version = "0.41.0"
 dependencies = [
+ "blake3",
  "flux-context",
  "flux-refactor",
  "fluxc-core",

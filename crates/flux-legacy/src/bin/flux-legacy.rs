@@ -358,6 +358,31 @@ fn main() {
                 println!("{}", flux_legacy::money::render_text(&r, args.iter().any(|a| a == "--all")));
             }
         }
+        // SHADOW — SIGIL-style roots of two nodes at EQUAL height, every differing account named (read-only)
+        //   flux-legacy shadow <node-a-url> <node-b-url> [--tries 20] [--top 15] [--json]
+        "shadow" => {
+            let b = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            if b.is_empty() || b.starts_with("--") {
+                eprintln!("usage: flux-legacy shadow <node-a-url> <node-b-url> [--tries 20] [--top 15] [--json]");
+                std::process::exit(2);
+            }
+            let n = |f: &str, d: usize| arg_val(&args, f).and_then(|v| v.parse().ok()).unwrap_or(d);
+            match flux_legacy::quillon_roots::shadow(target, b, n("--tries", 20), n("--top", 15)) {
+                Ok(r) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                    } else {
+                        println!("{}", flux_legacy::quillon_roots::render(&r));
+                    }
+                    let all = r.sections.iter().filter(|s| s.section != "dex_counters").all(|s| s.agree);
+                    std::process::exit(if all { 0 } else { 1 });
+                }
+                Err(e) => {
+                    eprintln!("flux-legacy shadow: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
         // REFEREE — live: supply growth vs the headers' minted sum, sliding window (read-only)
         //   flux-legacy referee <node-url> [--blocks URL] [--every 60] [--window 10] [--tolerance 0.05]
         //                       [--min-blocks 50] [--rounds 0] [--log FILE.jsonl] [--json]

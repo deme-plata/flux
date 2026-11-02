@@ -21,6 +21,8 @@ flux-context = { path = "../flux-context" }
 # ask.rs — send the 1M corpus to DeepSeek v4's long-context API. rustls (self-contained TLS) so the
 # dogfood build needs no system libssl.
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# quillon_roots.rs — SIGIL-style section roots (the hash SIGIL's header uses); already built for the workspace.
+blake3 = { workspace = true }
 
 [[bin]]
 name = "flux-legacy"

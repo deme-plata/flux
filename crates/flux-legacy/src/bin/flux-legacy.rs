@@ -361,6 +361,7 @@ fn main() {
         // REFEREE — live: supply growth vs the headers' minted sum, sliding window (read-only)
         //   flux-legacy referee <node-url> [--blocks URL] [--every 60] [--window 10] [--tolerance 0.05]
         //                       [--min-blocks 50] [--rounds 0] [--log FILE.jsonl] [--json]
+        //                       [--pools]   also count QUG in DEX pools → tells a DEX move from created money
         "referee" => {
             use flux_legacy::referee::{render_line, run, RefereeConfig};
             let num = |f: &str, d: f64| arg_val(&args, f).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
@@ -372,6 +373,7 @@ fn main() {
                 tolerance: num("--tolerance", 0.05),
                 min_blocks: num("--min-blocks", 50.0) as u64,
                 rounds: num("--rounds", 0.0) as usize,
+                pools: args.iter().any(|a| a == "--pools"),
             };
             let log = arg_val(&args, "--log");
             let res = run(&cfg, |j| {

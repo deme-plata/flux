@@ -54,7 +54,11 @@ impl Default for MoneyConfig {
                 "claim_block_credit".into(),
                 "get_processed_block_flag".into(),
             ],
-            write_calls: ["put", "put_cf", "put_sync", "put_cf_opt", "merge", "merge_cf"]
+            // write_batch*: Quillon's KV trait (kv.rs) writes a Vec of (cf, key, value) in one call —
+            // the DEX reconciler, swap debit/credit and LP paths write balances ONLY that way, and
+            // were invisible to this ward until 2026-11-02.
+            write_calls: ["put", "put_cf", "put_sync", "put_cf_opt", "merge", "merge_cf",
+                          "write_batch", "write_batch_cf", "write_batch_bulk", "write_batch_turbo"]
                 .iter().map(|s| s.to_string()).collect(),
             max_defs_per_name: 6,
         }
@@ -828,6 +832,21 @@ mod tests {
         assert_eq!(sinks, vec!["credit"]);
         let roots: Vec<(&str, bool)> = r.roots.iter().map(|x| (x.name.as_str(), x.guarded)).collect();
         assert_eq!(roots, vec![("turbo", false)]);
+    }
+
+    #[test]
+    fn a_batch_write_of_the_key_is_a_sink() {
+        // the exact shape of Quillon's apply_dex_qug_adjustments (q-storage lib.rs, v10.11.114f):
+        // the key is formatted inline and written with the KV trait's write_batch, from a 5-s loop
+        let src = "fn apply_dex(&self) { let k = format!(\"wallet_balance_{}\", w);\n\
+                   let batch = vec![(CF, k.as_bytes().to_vec(), v)]; self.hot_db.write_batch(batch).await; }\n\
+                   fn reconciler_loop(s: S) { loop { s.apply_dex(); } }\n\
+                   fn read_only(&self) { let k = format!(\"wallet_balance_{}\", w); self.db.get(k); }";
+        let r = scan_sources(&[("q/src/lib.rs", src)], &MoneyConfig::default());
+        let sinks: Vec<&str> = r.sinks.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(sinks, vec!["apply_dex"], "write_batch of the key must count as a write");
+        let roots: Vec<(&str, bool)> = r.roots.iter().map(|x| (x.name.as_str(), x.guarded)).collect();
+        assert_eq!(roots, vec![("reconciler_loop", false)]);
     }
 
     #[test]

@@ -20,7 +20,16 @@
 //!                a zero balance is no leaf (absent ≡ 0, as in SIGIL).
 //! - `dex`      — each pool's SIGIL fields: token0, token1, reserve0, reserve1, lp_token_supply,
 //!                decimals. `created_at` / `provider` are bookkeeping, not state, and are left out.
-//! - `contract` — each contract as canonical JSON (object keys sorted).
+//! - `contract` — each contract's SHARED fields only (canonical JSON): address, type, deployer,
+//!                deployment params, name, symbol, deployed_at — what every node can know, because it
+//!                is what Quillon's state-sync summary (`ContractSyncEntry`) carries. Built-ins
+//!                (`deployment_tx` "genesis-…") leave out `deployed_at`: every node re-registers them
+//!                at boot with `deployed_at = now` (measured 2026-11-02: Epsilon 10-29 04:45:43 UTC,
+//!                Stockholm 10-31 01:59:15 UTC, each ~20–50 s after its own start).
+//! - `contract_local` — the remaining fields (description, features, deployment_tx, call counters,
+//!                verified, …), which each node fills in for itself when it writes the record.
+//!                Reported, not a root: a follower that learned a contract by state sync can never
+//!                have them (2026-11-02: 52 of 55 records on Stockholm).
 //! - `dex_counters` — Quillon's off-chain `dex_qug_credited/debited`. Reported, but node-local BY
 //!                DESIGN today: a follower never sees a swap, so it never has these. Not a "root".
 //! Not available: an event-log root (Quillon keeps no per-block event log).
@@ -104,6 +113,42 @@ fn is_zero(s: &str) -> bool {
     s.chars().all(|c| c == '0')
 }
 
+/// Top-level contract fields every node can know (the `ContractSyncEntry` set, Quillon 10.11.114).
+const SHARED_CONTRACT_FIELDS: [&str; 5] = ["address", "contract_type", "deployer", "deployment_params", "deployed_at"];
+/// `metadata` fields every node can know.
+const SHARED_METADATA_FIELDS: [&str; 2] = ["name", "symbol"];
+
+/// Split one `DeployedSmartContract` record into (shared fields, node-local fields), both canonical
+/// JSON. A built-in (`deployment_tx` "genesis-…") keeps `deployed_at` on the local side, because each
+/// node stamps it with its own boot time. A missing symbol and an empty one are the same: the sync
+/// summary's `symbol` is a plain String and cannot say "none".
+pub fn split_contract(c: &Value) -> (String, String) {
+    let Some(rec) = c.as_object() else { return (canonical(c), "{}".into()) };
+    let builtin = rec.get("deployment_tx").and_then(Value::as_str).is_some_and(|t| t.starts_with("genesis-"));
+    let mut shared = serde_json::Map::new();
+    let mut local = serde_json::Map::new();
+    for (k, v) in rec {
+        if k == "metadata" {
+            let mut md_local = serde_json::Map::new();
+            for (mk, mv) in v.as_object().into_iter().flatten() {
+                if SHARED_METADATA_FIELDS.contains(&mk.as_str()) {
+                    let mv = if mk == "symbol" && mv.is_null() { Value::String(String::new()) } else { mv.clone() };
+                    shared.insert(format!("metadata.{mk}"), mv);
+                } else {
+                    md_local.insert(mk.clone(), mv.clone());
+                }
+            }
+            local.insert(k.clone(), Value::Object(md_local));
+        } else if SHARED_CONTRACT_FIELDS.contains(&k.as_str()) && !(builtin && k == "deployed_at") {
+            shared.insert(k.clone(), v.clone());
+        } else {
+            local.insert(k.clone(), v.clone());
+        }
+    }
+    shared.entry("metadata.symbol").or_insert(Value::String(String::new()));
+    (canonical(&Value::Object(shared)), canonical(&Value::Object(local)))
+}
+
 /// Build the sections from a full-state export (`{"data": {...}}` or the bare object).
 pub fn sections(export: &Value) -> Result<State, String> {
     let d = export.get("data").unwrap_or(export);
@@ -137,8 +182,11 @@ pub fn sections(export: &Value) -> Result<State, String> {
     }
 
     let mut contract = Entries::new();
+    let mut contract_local = Entries::new();
     for (id, c) in obj("contracts").into_iter().flatten() {
-        contract.insert(id.clone(), canonical(c));
+        let (shared, local) = split_contract(c);
+        contract.insert(id.clone(), shared);
+        contract_local.insert(id.clone(), local);
     }
 
     let mut counters = Entries::new();
@@ -156,6 +204,7 @@ pub fn sections(export: &Value) -> Result<State, String> {
     sections.insert("wallet", wallet);
     sections.insert("dex", dex);
     sections.insert("contract", contract);
+    sections.insert("contract_local", contract_local);
     sections.insert("dex_counters", counters);
     Ok(State { height, version, sections })
 }
@@ -273,7 +322,11 @@ pub fn render(r: &ShadowReport) -> String {
         r.height, r.node_a, r.version_a, r.node_b, r.version_b, r.tries, if r.tries == 1 { "y" } else { "ies" }
     );
     for x in &r.sections {
-        let note = if x.section == "dex_counters" { "  (node-local by design: the DEX is off chain)" } else { "" };
+        let note = match x.section.as_str() {
+            "dex_counters" => "  (node-local by design: the DEX is off chain)",
+            "contract_local" => "  (fields each node fills in itself: not shared state)",
+            _ => "",
+        };
         s.push_str(&format!(
             "{} {:<13} A {:>6} · B {:>6} entries · {} differ · net B−A {:+.6}{}\n      root A {}…  B {}…\n",
             if x.agree { "✅" } else { "🔴" }, x.section, x.entries_a, x.entries_b, x.differing,
@@ -343,6 +396,54 @@ mod tests {
         assert_eq!(reread_side(24_435_536, 24_435_535), Some('b'), "B (follower) behind → re-read B, keep A");
         assert_eq!(reread_side(10, 11), Some('a'));
         assert_eq!(reread_side(7, 7), None, "equal height → compare now");
+    }
+
+    /// The two shapes measured on 2026-11-02: Epsilon's original record and the copy Stockholm rebuilt
+    /// from the state-sync summary (`merge_p2p_response`).
+    fn deployed(desc: &str, tx: &str, ty: &str, at: u64, symbol: Value, feats: Value) -> Value {
+        json!({"address": [2, 172], "contract_type": ty, "deployer": [239, 202], "deployed_at": at,
+               "deployment_params": {"name": "DOGE2", "decimals": 24}, "deployment_tx": tx, "verified": false,
+               "contract_state": {"active": true, "paused": false, "total_calls": 0, "last_interaction": at,
+                                  "storage_root": [0, 0]},
+               "metadata": {"name": "DOGE2", "symbol": symbol, "description": desc, "features": feats,
+                            "governance_enabled": false, "upgrade_history": []}})
+    }
+
+    #[test]
+    fn a_contract_copied_by_state_sync_agrees_on_the_shared_fields() {
+        let epsilon = deployed("AdvancedToken contract deployed via Q-NarwhalKnight VM", "0x3434", "AdvancedToken",
+                               1775227792, json!("DOGE2"), json!({"burnable": true}));
+        let stockholm = deployed("Synced via P2P state sync from ca6e7eea636d90fe", "02ace984", "AdvancedToken",
+                                 1775227792, json!("DOGE2"), json!({}));
+        let (se, le) = split_contract(&epsilon);
+        let (ss, ls) = split_contract(&stockholm);
+        assert_eq!(se, ss, "same contract, copied with its local fields re-invented: shared fields agree");
+        assert_ne!(le, ls, "the re-invented fields are still visible on the local side");
+        // A symbol the original has as null and the copy as "" is the same "no symbol".
+        let a = deployed("x", "t", "MultisigWallet", 1, Value::Null, json!({}));
+        let b = deployed("y", "u", "MultisigWallet", 1, json!(""), json!({}));
+        assert_eq!(split_contract(&a).0, split_contract(&b).0);
+    }
+
+    #[test]
+    fn a_relabelled_type_or_a_moved_deploy_time_is_a_real_difference() {
+        let orig = deployed("d", "0x1", "MultisigWallet", 1748575832, Value::Null, json!({}));
+        let copy = deployed("d", "0x1", "SecureToken", 1748575832, json!(""), json!({}));
+        assert_ne!(split_contract(&orig).0, split_contract(&copy).0, "MultisigWallet → SecureToken is not cosmetic");
+        let later = deployed("d", "0x1", "MultisigWallet", 1748575833, Value::Null, json!({}));
+        assert_ne!(split_contract(&orig).0, split_contract(&later).0, "a user contract's deploy time is shared");
+    }
+
+    #[test]
+    fn a_built_in_stamped_at_each_boot_agrees_except_on_its_local_timestamp() {
+        let eps = deployed("Physical mining machine RWA token", "genesis-forge-rwa", "PhysicalGoodsToken",
+                           1793249143, json!("FORGE"), json!({"burnable": true}));
+        let sto = deployed("Physical mining machine RWA token", "genesis-forge-rwa", "PhysicalGoodsToken",
+                           1793411955, json!("FORGE"), json!({"burnable": true}));
+        let ((se, le), (ss, ls)) = (split_contract(&eps), split_contract(&sto));
+        assert_eq!(se, ss, "built-in: deployed_at is each node's boot time, not shared state");
+        assert_ne!(le, ls, "…and the boot-time difference is still reported on the local side");
+        assert!(le.contains("1793249143"));
     }
 
     #[test]

@@ -754,8 +754,38 @@ pub fn links_elf_executable(args: &[String]) -> bool {
     let elf = match &target {
         None => cfg!(target_os = "linux"),
         Some(t) => t.contains("-linux-"),
-    };
+    } && elf_machine(target.as_deref()).is_some();
     (is_bin || is_test) && emit_link && elf && flavor_ok
+}
+
+/// The rustc `--target` of a unit (`None` = the host).
+fn target_of(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--target" { return args.get(i + 1).cloned(); }
+        if let Some(v) = args[i].strip_prefix("--target=") { return Some(v.to_string()); }
+        i += 1;
+    }
+    None
+}
+
+/// The ELF `e_machine` the stamp object must carry for `target` (`None` = the host), or `None`
+/// when the writer does not stamp that architecture. Only the two the writer has been LINKED on:
+/// x86_64 (EM_X86_64 = 0x3e) and aarch64 (EM_AARCH64 = 0xb7) — both ELF64 little-endian with
+/// e_flags 0. 2026-11-03: the object was always EM_X86_64 ("the linker does not check it for a
+/// data-only object" — wrong for ld.lld), so the sigil-top 10.7.6 arm64 leg (zig cc → ld.lld) died
+/// with "….stardust/sigil_top-….o is incompatible with aarch64linux". A stamp must never fail a
+/// build, so 32-bit, big-endian and ABI-flagged targets (riscv) are simply not stamped.
+pub fn elf_machine(target: Option<&str>) -> Option<u16> {
+    let arch = match target {
+        Some(t) => t.split('-').next().unwrap_or(""),
+        None => std::env::consts::ARCH,
+    };
+    match arch {
+        "x86_64" => Some(0x3e),
+        "aarch64" => Some(0xb7),
+        _ => None,
+    }
 }
 
 /// Git facts of the repository containing `start`, read from `.git` directly (no subprocess for
@@ -871,11 +901,16 @@ pub fn build_stamp(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Val
 
 fn pad4(mut v: Vec<u8>, with: u8) -> Vec<u8> { while v.len() % 4 != 0 { v.push(with); } v }
 
-/// A minimal ELF64 little-endian RELOCATABLE object (x86-64 machine id; the linker does not
-/// check it for a data-only object) carrying ONE allocated SHT_NOTE section `.note.stardust`
-/// whose body is `stamp` (JSON, space-padded to 4 bytes). Three section headers: null,
-/// `.note.stardust`, `.shstrtab`. No symbols, no relocations.
+/// [`make_note_object_for`] with the x86-64 machine id.
 pub fn make_note_object(stamp: &Value) -> Vec<u8> {
+    make_note_object_for(stamp, 0x3e)
+}
+
+/// A minimal ELF64 little-endian RELOCATABLE object for `machine` (see [`elf_machine`] — ld.lld
+/// refuses an object whose e_machine differs from the link target) carrying ONE allocated SHT_NOTE
+/// section `.note.stardust` whose body is `stamp` (JSON, space-padded to 4 bytes). Three section
+/// headers: null, `.note.stardust`, `.shstrtab`. No symbols, no relocations.
+pub fn make_note_object_for(stamp: &Value, machine: u16) -> Vec<u8> {
     let desc = pad4(stamp.to_string().into_bytes(), b' ');
     let mut note = Vec::new();
     note.extend_from_slice(&(NOTE_OWNER_STARDUST.len() as u32).to_le_bytes());
@@ -892,7 +927,7 @@ pub fn make_note_object(stamp: &Value) -> Vec<u8> {
     let mut f = vec![0u8; shoff + 3 * 64];
     f[0..4].copy_from_slice(b"\x7fELF"); f[4] = 2; f[5] = 1; f[6] = 1;
     f[16..18].copy_from_slice(&1u16.to_le_bytes());        // ET_REL
-    f[18..20].copy_from_slice(&0x3eu16.to_le_bytes());     // EM_X86_64
+    f[18..20].copy_from_slice(&machine.to_le_bytes());     // e_machine (EM_X86_64 / EM_AARCH64)
     f[20..24].copy_from_slice(&1u32.to_le_bytes());
     f[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
     f[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());   // e_ehsize
@@ -935,8 +970,9 @@ pub fn link_stamp_args(args: &[String]) -> Option<Vec<String>> {
         return None;
     }
     if !links_elf_executable(args) { return None; }
+    let machine = elf_machine(target_of(args).as_deref())?;
     let stamp = build_stamp(args, &|k| std::env::var(k).ok());
-    let obj = make_note_object(&stamp);
+    let obj = make_note_object_for(&stamp, machine);
     let path = stamp_object_path(args, &obj);
     if std::fs::read(&path).map(|cur| cur == obj).unwrap_or(false) {
         return Some(vec!["-C".into(), format!("link-arg={}", path.display())]);
@@ -1368,6 +1404,29 @@ mod tests {
         assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker-flavor=ld.lld"])));
         assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker-flavor=gnu-lld-cc"])));
         assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "-C", "linker=/home/storage/tools/zig/zcc"])));
+        // 2026-11-03: arm64 Linux is stamped (with its own machine id); targets never linked are not.
+        assert!(links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "aarch64-unknown-linux-musl", "-C", "linker=/home/storage/tools/zig/zcc-aarch64-musl"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "armv7-unknown-linux-gnueabihf"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "riscv64gc-unknown-linux-gnu"])));
+        assert!(!links_elf_executable(&v(&["src/main.rs", "--crate-type", "bin", "--target", "i686-unknown-linux-gnu"])));
+    }
+
+    /// The stamp object carries the TARGET's machine id: ld.lld refused the EM_X86_64 object in the
+    /// sigil-top 10.7.6 arm64 link ("incompatible with aarch64linux", 2026-11-03).
+    #[test]
+    fn stamp_object_carries_the_target_machine() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(elf_machine(Some("aarch64-unknown-linux-musl")), Some(0xb7));
+        assert_eq!(elf_machine(Some("x86_64-unknown-linux-gnu")), Some(0x3e));
+        assert_eq!(elf_machine(Some("armv7-unknown-linux-gnueabihf")), None);
+        assert_eq!(target_of(&v(&["a.rs", "--target", "aarch64-unknown-linux-musl"])).as_deref(), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(target_of(&v(&["a.rs", "--target=x86_64-unknown-linux-musl"])).as_deref(), Some("x86_64-unknown-linux-musl"));
+        assert_eq!(target_of(&v(&["a.rs"])), None);
+        let stamp = json!({"stardust": 2, "pkg": "sigil-top"});
+        let arm = make_note_object_for(&stamp, 0xb7);
+        assert_eq!(u16le(&arm, 18), Some(0xb7), "e_machine = EM_AARCH64");
+        assert_eq!(decode_stamp(&elf_note(&arm, NOTE_OWNER_STARDUST, NT_STARDUST).unwrap()).unwrap(), stamp);
+        assert_eq!(u16le(&make_note_object(&stamp), 18), Some(0x3e), "the default stays EM_X86_64");
     }
 
     #[test]

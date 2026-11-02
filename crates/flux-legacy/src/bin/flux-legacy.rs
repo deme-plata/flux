@@ -341,6 +341,54 @@ fn main() {
                 stability::Verdict::StableForNow => 0,
             });
         }
+        // MONEY WARD — who writes the balance store, and which entry points skip the paid-once mark
+        //   flux-legacy money <root> [--key K] [--guard a,b] [--all] [--json]
+        "money" => {
+            let mut cfg = flux_legacy::money::MoneyConfig::default();
+            if let Some(k) = arg_val(&args, "--key") {
+                cfg.key = k;
+            }
+            if let Some(g) = arg_val(&args, "--guard") {
+                cfg.guard_tokens = g.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
+            let r = flux_legacy::money::scan(target, &cfg);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+            } else {
+                println!("{}", flux_legacy::money::render_text(&r, args.iter().any(|a| a == "--all")));
+            }
+        }
+        // REFEREE — live: supply growth vs the headers' minted sum, sliding window (read-only)
+        //   flux-legacy referee <node-url> [--blocks URL] [--every 60] [--window 10] [--tolerance 0.05]
+        //                       [--min-blocks 50] [--rounds 0] [--log FILE.jsonl] [--json]
+        "referee" => {
+            use flux_legacy::referee::{render_line, run, RefereeConfig};
+            let num = |f: &str, d: f64| arg_val(&args, f).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+            let cfg = RefereeConfig {
+                node: target.to_string(),
+                blocks_node: arg_val(&args, "--blocks").unwrap_or_else(|| target.to_string()),
+                every: std::time::Duration::from_secs_f64(num("--every", 60.0)),
+                window: num("--window", 10.0) as usize,
+                tolerance: num("--tolerance", 0.05),
+                min_blocks: num("--min-blocks", 50.0) as u64,
+                rounds: num("--rounds", 0.0) as usize,
+            };
+            let log = arg_val(&args, "--log");
+            let res = run(&cfg, |j| {
+                let line = serde_json::to_string(j).unwrap_or_default();
+                if json { println!("{line}"); } else { println!("{}", render_line(j)); }
+                if let Some(p) = &log {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+            });
+            if let Err(e) = res {
+                eprintln!("flux-legacy referee: {e}");
+                std::process::exit(2);
+            }
+        }
         // P6 LAND — split a god-file, precheck, and (with --confirm) branch+commit+push to the hub
         "sync" => {
             let repo = target;

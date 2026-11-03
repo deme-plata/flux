@@ -2,7 +2,7 @@
 # Pure std, no external deps → fast, portable, copy-pasteable templates.
 # Build with fluxc (never raw cargo): `cd templates/money && fluxc build`.
 [workspace]
-members = ["flux-money-kit", "flux-gateway", "flux-launchpad", "flux-estate", "flux-bank", "flux-bridge", "flux-money-flow"]
+members = ["flux-money-kit", "flux-gateway", "flux-launchpad", "flux-estate", "flux-bank", "flux-bridge", "flux-money-flow", "flux-commerce"]
 resolver = "2"
 
 [workspace.package]

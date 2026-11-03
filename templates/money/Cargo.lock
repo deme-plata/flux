@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-commerce"
+version = "0.1.0"
+dependencies = [
+ "flux-money-kit",
+]
+
+[[package]]
 name = "flux-estate"
 version = "0.1.0"
 dependencies = [

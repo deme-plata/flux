@@ -226,14 +226,38 @@ fn handle_diagnose(_req: &Request, _stats: &LiveStats) -> Response {
     Response::ok_json(&diag)
 }
 
+/// How many of the newest files of each kind a reader opens. The readers keep 20 to 50 events, and nothing
+/// removes webhook files: parsing all 16,612 every 2 s hit the service's 512 MB cap (Epsilon, 2026-11-04).
+const MAX_EVENT_FILES_READ: usize = 300;
+
+/// The newest `limit` files for each prefix, oldest first. Decides from directory metadata, opens no file.
+fn newest_event_files(dir: &std::path::Path, prefixes: &[&str], limit: usize) -> Vec<std::path::PathBuf> {
+    let mut by_prefix: Vec<Vec<(std::time::SystemTime, std::path::PathBuf)>> = vec![Vec::new(); prefixes.len()];
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(i) = prefixes.iter().position(|p| name.starts_with(p)) else { continue };
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
+        by_prefix[i].push((modified, entry.path()));
+    }
+    let mut out = Vec::new();
+    for mut files in by_prefix {
+        files.sort();
+        let skip = files.len().saturating_sub(limit);
+        out.extend(files.into_iter().skip(skip));
+    }
+    out.sort();
+    out.into_iter().map(|(_, path)| path).collect()
+}
+
 fn handle_feed(_req: &Request, _stats: &LiveStats) -> Response {
     let events_dir = std::path::PathBuf::from("/tmp/flux-events");
     let mut items: Vec<serde_json::Value> = Vec::new();
     if events_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&events_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with("feed_")) {
+        {
+            for path in newest_event_files(&events_dir, &["feed_"], MAX_EVENT_FILES_READ) {
+                {
                     if let Ok(data) = std::fs::read_to_string(&path) {
                         if let Ok(evt) = serde_json::from_str::<serde_json::Value>(&data) {
                             items.push(evt);
@@ -400,9 +424,8 @@ fn build_garden_snapshot(stats: &LiveStats, started_at_us: u64) -> String {
     let events_dir = std::path::PathBuf::from("/tmp/flux-events");
     let mut events: Vec<serde_json::Value> = Vec::new();
     if events_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&events_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
+        {
+            for path in newest_event_files(&events_dir, &["webhook_", "feed_"], MAX_EVENT_FILES_READ) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name.starts_with("webhook_") {
                     // Webhook events arrive in {event, timestamp, data:{...}} shape.
@@ -1643,5 +1666,52 @@ mod tests {
         assert!(!json.contains("v0.9.9-beta1"), "hardcoded version is back: {json}");
         assert!(json.contains(r#""version":"v"#) || json.contains(r#""version":"unknown""#),
             "version field missing or malformed: {json}");
+    }
+}
+
+#[cfg(test)]
+mod newest_event_tests {
+    use super::*;
+    fn event_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("flux-serve-test-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn event_file(dir: &std::path::Path, name: &str, age_secs: u64) {
+        let f = std::fs::File::create(dir.join(name)).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs)).unwrap();
+    }
+
+    fn names(paths: Vec<std::path::PathBuf>) -> Vec<String> {
+        paths.iter().map(|p| p.file_name().unwrap().to_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn only_the_newest_event_files_are_opened_oldest_first() {
+        let d = event_dir("newest");
+        for (name, age) in [("webhook_old", 500), ("webhook_mid", 300), ("webhook_new", 100), ("other.json", 1)] {
+            event_file(&d, name, age);
+        }
+        assert_eq!(names(newest_event_files(&d, &["webhook_"], 2)), vec!["webhook_mid", "webhook_new"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_flood_of_one_kind_cannot_crowd_out_the_other() {
+        let d = event_dir("kinds");
+        event_file(&d, "feed_old", 9_000);
+        for i in 0..5 {
+            event_file(&d, &format!("webhook_{i}"), 100 + i);
+        }
+        let got = names(newest_event_files(&d, &["webhook_", "feed_"], 2));
+        assert_eq!(got, vec!["feed_old", "webhook_1", "webhook_0"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_missing_event_dir_is_empty() {
+        assert!(newest_event_files(std::path::Path::new("/nonexistent/flux-events"), &["feed_"], 5).is_empty());
     }
 }

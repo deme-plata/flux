@@ -223,7 +223,9 @@ pub fn run_cortex_summary(json: bool) {
         println!("⚡ Cortex Summary");
         println!("  Iterations: {} | Actions: {} generated / {} applied",
             summary.total_iterations, summary.total_actions_generated, summary.total_actions_applied);
-        println!("  Cumulative perf gain: {:.2}%", summary.cumulative_perf_gain_pct);
+        println!("  Fold: {} per-site actions seen → {} creases kept ({:.1}× fewer; a crease = one suggestion in one crate, every site kept)",
+            summary.actions_unfolded_total, summary.total_actions_generated, summary.fold_ratio);
+        println!("  Cumulative perf gain: {:.2}% (simulated — VALIDATE is estimate × accuracy, not a measurement)", summary.cumulative_perf_gain_pct);
         println!("  Prediction accuracy: {:.1}% | Accurate predictions: {}",
             summary.prediction_accuracy * 100.0, summary.accurate_predictions);
         if let Some((crate_name, score)) = &summary.top_crate {

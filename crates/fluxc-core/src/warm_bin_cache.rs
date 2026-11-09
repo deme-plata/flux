@@ -21,15 +21,26 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Cache root: `$FLUX_WARM_CACHE` or `~/.fluxc/warm_bins`.
+/// Cache root: `$FLUX_WARM_CACHE`, else `$FLUX_CACHE_DIR/warm_bins`, else `~/.flux/cache/warm_bins`.
+///
+/// It used to default to `~/.fluxc/warm_bins`. On Epsilon that is the 40 GB ROOT partition
+/// (the one that has hit 0 bytes free three times), and one tarball of the `fluxc` crate's
+/// artifacts is 1.48 GB — measured 2026-10-28, root went 3.8 → 2.4 GB free in one morning of
+/// combos. The flux cache (`~/.flux/cache`) was moved to the big array for exactly this
+/// reason, so the warm bins now live beside it.
 pub fn cache_dir() -> PathBuf {
     if let Ok(p) = std::env::var("FLUX_WARM_CACHE") {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
         }
     }
+    if let Ok(p) = std::env::var("FLUX_CACHE_DIR") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p).join("warm_bins");
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home).join(".fluxc").join("warm_bins")
+    PathBuf::from(home).join(".flux").join("cache").join("warm_bins")
 }
 
 /// The cargo target dir cargo will actually use: `$CARGO_TARGET_DIR` else `<ws>/target`.

@@ -75,6 +75,15 @@ pub mod control;
 pub mod render;
 /// PROTOTYPE 2 actuator: split a god-file into cohesive modules (dry-run patch + staging).
 pub mod split;
+/// MONEY WARD: who writes the balance store? sinks → writers → entry points, each guarded or not
+/// by the per-block "already paid" mark (born from the 2026-10-30 Quillon double payment).
+pub mod money;
+/// REFEREE (live): does a node's supply grow by exactly what its block headers mint? Δsupply /
+/// Σ total_coinbase_reward over a sliding window — SIGIL's "disagree → stop" rule, read-only.
+pub mod referee;
+/// SHADOW over SIGIL-style roots (2026-11-02): wallet (QUG + tokens) / dex / contract roots built OFF
+/// the node from /api/v1/sync/full-state, two nodes compared at EQUAL height, every differing account named.
+pub mod quillon_roots;
 
 use serde::{Deserialize, Serialize};
 

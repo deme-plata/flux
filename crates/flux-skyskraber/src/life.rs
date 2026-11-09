@@ -165,6 +165,11 @@ pub struct DayRecord {
     pub refill_actions: u32,
     pub bars_offloaded: u32,
     pub relieve_actions: u32,
+    /// Moved from the treasury to the surplus fund today, and the fund's balance at day end.
+    #[serde(default)]
+    pub surplus_swept_uqug: u128,
+    #[serde(default)]
+    pub surplus_fund_uqug: u128,
     pub state_commitment: String,
     /// `sim::DayReport::report_hash` for this day.
     pub day_hash: String,
@@ -212,6 +217,9 @@ pub struct Manifest {
     /// Whole-life actuator totals.
     pub total_treasury_refilled_uqug: u128,
     pub total_bars_offloaded: u64,
+    /// Whole-life total moved into the surplus fund.
+    #[serde(default)]
+    pub total_surplus_swept_uqug: u128,
     pub total_payroll_failures: u64,
     pub total_vault_refusals: u64,
     pub chain_breaks: u64,
@@ -369,6 +377,7 @@ pub fn run_life(cfg: &LifeConfig, mut progress: impl FnMut(&YearRecord)) -> std:
         first_relieve_action_day: None,
         total_treasury_refilled_uqug: 0,
         total_bars_offloaded: 0,
+        total_surplus_swept_uqug: 0,
         total_payroll_failures: 0,
         total_vault_refusals: 0,
         chain_breaks: 0,
@@ -462,6 +471,7 @@ pub fn run_life(cfg: &LifeConfig, mut progress: impl FnMut(&YearRecord)) -> std:
         manifest.total_vault_refusals += out.vault_refused as u64;
         manifest.total_treasury_refilled_uqug += out.treasury_refilled_uqug;
         manifest.total_bars_offloaded += out.bars_offloaded as u64;
+        manifest.total_surplus_swept_uqug += out.surplus_swept_uqug;
 
         let rec = DayRecord {
             day,
@@ -490,6 +500,8 @@ pub fn run_life(cfg: &LifeConfig, mut progress: impl FnMut(&YearRecord)) -> std:
             refill_actions: out.refill_actions,
             bars_offloaded: out.bars_offloaded,
             relieve_actions: out.relieve_actions,
+            surplus_swept_uqug: out.surplus_swept_uqug,
+            surplus_fund_uqug: b.bank.balance(crate::sim::SURPLUS_FUND),
             state_commitment: report.state_commitment.clone(),
             day_hash: report.report_hash.clone(),
             head: hex::encode(head),
@@ -692,6 +704,33 @@ mod tests {
         let years = fs::read_to_string(dir.join("years.jsonl")).unwrap();
         let last: YearRecord = serde_json::from_str(years.lines().last().unwrap()).unwrap();
         assert!(last.treasury_uqug > 0, "recovered: treasury {} > 0 at year end", last.treasury_uqug);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fees_are_billed_every_day_and_the_surplus_leaves_the_treasury() {
+        // 2026-11-01: custody is billed once EVERY day (16:00), and treasury above
+        // SURPLUS_SWEEP_DAYS of wages moves to the surplus fund after payroll.
+        let dir = scratch("dailyfees");
+        let _ = fs::remove_dir_all(&dir);
+        let mut c = cfg(&dir, 1, false);
+        c.endowment_uqug = 10_000_000; // ~192 days of wages: the ramp needs it, so nothing may be swept until fees cover wages
+        let m = run_life(&c, |_| {}).unwrap();
+        assert!(m.total_surplus_swept_uqug > 0, "surplus was swept once the fees covered the wages");
+        let tower = crate::Building::quillon_default().expect("blueprint must validate");
+        let wages: u128 = tower.workforce.workers.iter().map(|w| w.wage_uqug).sum();
+        let cap = wages * crate::sim::SURPLUS_SWEEP_DAYS;
+        let days = fs::read_to_string(dir.join("days.jsonl")).unwrap();
+        for line in days.lines() {
+            let d: DayRecord = serde_json::from_str(line).unwrap();
+            assert!(d.treasury_refilled_uqug > 0, "day {}: custody not billed", d.day);
+            if d.treasury_refilled_uqug >= wages {
+                assert!(d.treasury_uqug <= cap, "day {}: self-sustaining, yet treasury {} above the {}-day cap", d.day, d.treasury_uqug, crate::sim::SURPLUS_SWEEP_DAYS);
+            }
+            assert_eq!(d.payroll_failed, 0, "day {}: a wage bounced", d.day);
+        }
+        let last: DayRecord = serde_json::from_str(days.lines().last().unwrap()).unwrap();
+        assert!(last.surplus_fund_uqug >= m.total_surplus_swept_uqug, "the fund holds what was swept");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -334,3 +334,5 @@ pub mod webcam;
 pub mod swarm_compile;
 pub mod supersonic;
 pub mod pulse;
+pub mod stardust;
+pub mod magic;

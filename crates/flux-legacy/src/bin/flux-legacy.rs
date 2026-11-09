@@ -341,6 +341,81 @@ fn main() {
                 stability::Verdict::StableForNow => 0,
             });
         }
+        // MONEY WARD — who writes the balance store, and which entry points skip the paid-once mark
+        //   flux-legacy money <root> [--key K] [--guard a,b] [--all] [--json]
+        "money" => {
+            let mut cfg = flux_legacy::money::MoneyConfig::default();
+            if let Some(k) = arg_val(&args, "--key") {
+                cfg.key = k;
+            }
+            if let Some(g) = arg_val(&args, "--guard") {
+                cfg.guard_tokens = g.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
+            let r = flux_legacy::money::scan(target, &cfg);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+            } else {
+                println!("{}", flux_legacy::money::render_text(&r, args.iter().any(|a| a == "--all")));
+            }
+        }
+        // SHADOW — SIGIL-style roots of two nodes at EQUAL height, every differing account named (read-only)
+        //   flux-legacy shadow <node-a-url> <node-b-url> [--tries 20] [--top 15] [--json]
+        "shadow" => {
+            let b = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            if b.is_empty() || b.starts_with("--") {
+                eprintln!("usage: flux-legacy shadow <node-a-url> <node-b-url> [--tries 20] [--top 15] [--json]");
+                std::process::exit(2);
+            }
+            let n = |f: &str, d: usize| arg_val(&args, f).and_then(|v| v.parse().ok()).unwrap_or(d);
+            match flux_legacy::quillon_roots::shadow(target, b, n("--tries", 20), n("--top", 15)) {
+                Ok(r) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                    } else {
+                        println!("{}", flux_legacy::quillon_roots::render(&r));
+                    }
+                    let all = r.sections.iter().filter(|s| s.section != "dex_counters").all(|s| s.agree);
+                    std::process::exit(if all { 0 } else { 1 });
+                }
+                Err(e) => {
+                    eprintln!("flux-legacy shadow: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // REFEREE — live: supply growth vs the headers' minted sum, sliding window (read-only)
+        //   flux-legacy referee <node-url> [--blocks URL] [--every 60] [--window 10] [--tolerance 0.05]
+        //                       [--min-blocks 50] [--rounds 0] [--log FILE.jsonl] [--json]
+        //                       [--pools]   also count QUG in DEX pools → tells a DEX move from created money
+        "referee" => {
+            use flux_legacy::referee::{render_line, run, RefereeConfig};
+            let num = |f: &str, d: f64| arg_val(&args, f).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+            let cfg = RefereeConfig {
+                node: target.to_string(),
+                blocks_node: arg_val(&args, "--blocks").unwrap_or_else(|| target.to_string()),
+                every: std::time::Duration::from_secs_f64(num("--every", 60.0)),
+                window: num("--window", 10.0) as usize,
+                tolerance: num("--tolerance", 0.05),
+                min_blocks: num("--min-blocks", 50.0) as u64,
+                rounds: num("--rounds", 0.0) as usize,
+                pools: args.iter().any(|a| a == "--pools"),
+            };
+            let log = arg_val(&args, "--log");
+            let res = run(&cfg, |j| {
+                let line = serde_json::to_string(j).unwrap_or_default();
+                if json { println!("{line}"); } else { println!("{}", render_line(j)); }
+                if let Some(p) = &log {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+            });
+            if let Err(e) = res {
+                eprintln!("flux-legacy referee: {e}");
+                std::process::exit(2);
+            }
+        }
         // P6 LAND — split a god-file, precheck, and (with --confirm) branch+commit+push to the hub
         "sync" => {
             let repo = target;

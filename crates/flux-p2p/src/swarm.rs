@@ -120,6 +120,26 @@ pub struct FluxBehaviour {
     pub ping: ping::Behaviour,
     /// Point-to-point backfill (CBOR-coded, opaque Vec<u8> payloads).
     pub request_response: request_response::Behaviour<BackfillCodec>,
+    /// 2026-10-24: caps on connections (there were none — one machine could open unlimited connections). Generous
+    /// defaults, each overridable: FLUX_P2P_MAX_PER_PEER (4), FLUX_P2P_MAX_ESTABLISHED (300), FLUX_P2P_MAX_INCOMING (200),
+    /// FLUX_P2P_MAX_PENDING_IN (64).
+    pub limits: libp2p::connection_limits::Behaviour,
+}
+
+/// The connection caps (see `FluxBehaviour::limits`).
+pub fn connection_limits_from_env() -> libp2p::connection_limits::ConnectionLimits {
+    let get = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(d);
+    libp2p::connection_limits::ConnectionLimits::default()
+        .with_max_established_per_peer(Some(get("FLUX_P2P_MAX_PER_PEER", 4)))
+        .with_max_established(Some(get("FLUX_P2P_MAX_ESTABLISHED", 300)))
+        .with_max_established_incoming(Some(get("FLUX_P2P_MAX_INCOMING", 200)))
+        .with_max_pending_incoming(Some(get("FLUX_P2P_MAX_PENDING_IN", 64)))
+}
+
+impl From<void::Void> for FluxBehaviourEvent {
+    fn from(v: void::Void) -> Self {
+        void::unreachable(v)
+    }
 }
 
 #[derive(Debug)]
@@ -601,6 +621,7 @@ impl FluxSwarmManager {
 
         // Assemble behaviour
         let behaviour = FluxBehaviour {
+            limits: libp2p::connection_limits::Behaviour::new(connection_limits_from_env()),
             gossipsub,
             kademlia,
             identify,

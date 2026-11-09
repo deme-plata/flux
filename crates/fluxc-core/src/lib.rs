@@ -8,6 +8,8 @@ pub mod tdg;
 pub mod pulse;
 pub mod tdg_sched;
 pub mod combo_v2;
+pub mod stardust;
+pub mod magic;
 pub mod warm_bin_cache;
 pub mod ai_debug;
 pub use ::flux_net; // P1: extracted to its own flux-net crate; re-export keeps fluxc_core::flux_net::* stable
@@ -47,6 +49,10 @@ pub struct BuildConfig {
     pub rust_only: bool,
     pub frontend_only: bool,
     pub package: Option<String>,
+    /// Every `-p`/`--package` given, in order. `package` keeps the FIRST for callers that take
+    /// one; `fluxc test -p A -p B` used to run only one of them (the last `-p` overwrote,
+    /// measured 2026-10-19: a green that proved nothing).
+    pub packages: Vec<String>,
     pub no_cargo: bool,
     pub async_build: bool,
     pub distributed: bool,
@@ -55,10 +61,19 @@ pub struct BuildConfig {
     pub provenance: bool,
 }
 
+impl BuildConfig {
+    /// The packages a cargo command should select: every `-p` given, else the single
+    /// `package` (set programmatically), else none (= the whole workspace).
+    pub fn selected_packages(&self) -> Vec<String> {
+        if !self.packages.is_empty() { return self.packages.clone(); }
+        self.package.iter().cloned().collect()
+    }
+}
+
 impl Default for BuildConfig {
     fn default() -> Self {
         BuildConfig {
-            release: false, rust_only: false, frontend_only: false, package: None,
+            release: false, rust_only: false, frontend_only: false, package: None, packages: Vec::new(),
             no_cargo: false, async_build: false, distributed: false, warm: false,
             provenance: false,
         }
@@ -398,6 +413,12 @@ pub fn apply_wrapper_env(cmd: &mut Command) {
 }
 
 pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
+    // The guard: no build on a box below the memory floor (12 GB; 20 GB for --release),
+    // or with the 40 GB root partition nearly full. CLI only — this fn already exits the
+    // process on a failed build, so it is never the MCP server. FLUX_GUARD=warn|0 bypasses.
+    if magic::preflight_cli(config.release).is_some() {
+        process::exit(3);
+    }
     quarantine_poisoned_probe_cache();
     let mut cmd = Command::new("cargo");
     cmd.arg(cargo_cmd);
@@ -406,8 +427,8 @@ pub fn run_cargo(cargo_cmd: &str, config: &BuildConfig, extra_args: &[String]) {
         cmd.arg("--release");
     }
 
-    if let Some(ref pkg) = config.package {
-        cmd.args(["--package", pkg]);
+    for pkg in config.selected_packages() {
+        cmd.args(["--package", &pkg]);
     }
 
     for a in extra_args { cmd.arg(a); }
@@ -454,6 +475,11 @@ pub fn pulse_status(cmd: &mut Command, pi: &mut PulseInvocation) -> std::io::Res
 }
 
 pub fn pulse_begin(cmd: &mut Command) -> PulseInvocation {
+    // Every cargo fluxc spawns (all five sites route through here) becomes the kernel's
+    // FIRST OOM victim — a build must never take a production node down with it
+    // (10-04, 10-17: global OOM → Quillon restarted; 10-22: -1000 inherited from sshd
+    // livelocked the box). FLUX_GUARD_OOM=0 opts out. See magic.rs.
+    magic::mark_oom_victim(cmd);
     let inv = env::var("FLUX_INVOCATION_ID").ok().filter(|s| !s.is_empty())
         .unwrap_or_else(pulse::new_invocation_id);
     cmd.env("FLUX_INVOCATION_ID", &inv);
@@ -804,7 +830,7 @@ pub fn wrapper_mode(args: &[String]) {
     // to just the call site.
 
     let rustc_path = if args.len() > 1 { &args[1] } else { "rustc" };
-    let rustc_args: Vec<String> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
+    let mut rustc_args: Vec<String> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
 
     // PROBE PASS-THROUGH (fix: combo failed in fresh CARGO_TARGET_DIR).
     // Cargo invokes the wrapper for NON-compilation probes to learn the toolchain:
@@ -851,6 +877,15 @@ pub fn wrapper_mode(args: &[String]) {
                 process::exit(1);
             }
         }
+    }
+
+    // ✦ stardust writer: a unit that links an ELF executable (bin or --test, Linux target,
+    // gcc-flavour linker) gets the build's facts stamped into its .note.gnu.build-id —
+    // crate, version, SIGIL_NETWORK as INVOKED, git head, opt, target, host. Appended BEFORE
+    // the cache key is computed, so a different stamp is a different unit. Probes returned
+    // above and never see it. FLUX_STARDUST=0 turns it off. See stardust.rs (the writer).
+    if let Some(extra) = stardust::link_stamp_args(&rustc_args) {
+        rustc_args.extend(extra);
     }
 
     // Locate the source file rustc was invoked on (positional .rs argument).
@@ -1436,6 +1471,38 @@ pub fn run_binary(package: &str, release: bool) {
 /// filters). Nothing may be dropped here — the old run_tests silently
 /// discarded everything after the package, so `-- --ignored <filter>`
 /// reported "1 ignored" and never ran the requested test.
+/// `cargo test -p A -p B …` — every selected package, not just one.
+pub fn build_test_args_multi(packages: &[String], extra: &[String]) -> Vec<String> {
+    let mut v = vec!["test".to_string()];
+    for p in packages {
+        v.push("-p".to_string());
+        v.push(p.clone());
+    }
+    v.extend(extra.iter().cloned());
+    v
+}
+
+/// `fluxc test` for several packages in ONE cargo invocation (cargo accepts repeated -p).
+pub fn run_tests_multi(packages: &[String], extra: &[String]) {
+    if packages.len() <= 1 {
+        return run_tests(packages.first().map(String::as_str), extra);
+    }
+    let release = extra.iter().any(|a| a == "--release" || a == "-r");
+    if magic::preflight_cli(release).is_some() { process::exit(3); }
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(build_test_args_multi(packages, extra));
+    apply_wrapper_env(&mut cmd);
+    cmd.stdin(Stdio::null());
+    let label = packages.join("+");
+    let mut pi = pulse_begin(&mut cmd);
+    let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
+    pulse_end(&pi, "test", Some(&label), release, status.success());
+    if !status.success() {
+        eprintln!("Some tests failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+}
+
 pub fn build_test_args(package: Option<&str>, extra: &[String]) -> Vec<String> {
     let mut v = vec!["test".to_string()];
     if let Some(pkg) = package {
@@ -1447,11 +1514,12 @@ pub fn build_test_args(package: Option<&str>, extra: &[String]) -> Vec<String> {
 }
 
 pub fn run_tests(package: Option<&str>, extra: &[String]) {
+    let release = extra.iter().any(|a| a == "--release" || a == "-r");
+    if magic::preflight_cli(release).is_some() { process::exit(3); }
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(build_test_args(package, extra));
     apply_wrapper_env(&mut cmd);
     cmd.stdin(Stdio::null());
-    let release = extra.iter().any(|a| a == "--release" || a == "-r");
     let mut pi = pulse_begin(&mut cmd);
     let status = pulse_status(&mut cmd, &mut pi).unwrap_or(std::process::ExitStatus::default());
     pulse_end(&pi, "test", package, release, status.success());
@@ -1547,6 +1615,10 @@ pub fn print_usage() {
     println!("  fluxc dev             Start dev servers (Vite HMR + fluxc watch)");
     println!("  fluxc watch           Watch all files, auto-rebuild");
     println!("  fluxc clean           Clear all caches");
+    println!("  fluxc magic [-p CRATE] [--release]  Guarded build: mem/disk/io pre-flight, OOM-victim");
+    println!("                        marking, production-unit receipt, combo, dust, webhook");
+    println!("  fluxc stardust TARGET [--exec] [--target TRIPLE] [--json]");
+    println!("                        What IS this binary? path | systemd unit | pid | manifest URL");
     println!("  fluxc tdg [N]         Task-dependency graph report (FIP-0003 tracer)");
     println!("  fluxc tdg baseline    Record crate source keys (the reference point)");
     println!("  fluxc tdg plan        Incremental plan: dirty crates + dependency cone");
@@ -1731,7 +1803,9 @@ pub fn parse_args(raw: &[String]) -> (BuildConfig, Vec<String>) {
             "--provenance" => { config.provenance = true; i += 1; }
             "--package" | "-p" => {
                 if i + 1 < raw.len() {
-                    config.package = Some(raw[i + 1].clone());
+                    let p = raw[i + 1].clone();
+                    if config.package.is_none() { config.package = Some(p.clone()); }
+                    config.packages.push(p);
                     i += 2;
                 } else {
                     eprintln!("error: --package requires a value");
@@ -1885,6 +1959,20 @@ mod tests {
         let (config, rest) = parse_args(&raw);
         assert_eq!(config.package.as_deref(), Some("flux-p2p"));
         assert_eq!(rest, vec!["test"]);
+    }
+
+    #[test]
+    fn every_package_flag_is_kept() {
+        let raw: Vec<String> = ["test", "-p", "a", "-p", "b", "--release"].iter().map(|s| s.to_string()).collect();
+        let (cfg, rest) = parse_args(&raw);
+        assert_eq!(cfg.packages, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(cfg.package.as_deref(), Some("a"));
+        assert_eq!(cfg.selected_packages(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(rest.first().map(String::as_str), Some("test"));
+        assert_eq!(build_test_args_multi(&cfg.packages, &[]), vec!["test", "-p", "a", "-p", "b"]);
+        let one = BuildConfig { package: Some("x".into()), ..Default::default() };
+        assert_eq!(one.selected_packages(), vec!["x".to_string()]);
+        assert!(BuildConfig::default().selected_packages().is_empty());
     }
 
     #[test]

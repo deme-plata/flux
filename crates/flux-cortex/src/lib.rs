@@ -4,6 +4,9 @@
 // Cortex loop with AI-aware phases: Diagnose, Generate, Verify, Deploy.
 
 pub mod ai_cortex;
+// v3: the fold (fold.rs) — per-line findings are creased into one action per
+// (crate, dimension, suggestion); every site is kept, the figure saturates.
+pub mod fold;
 //
 // Closes the loop between architect, predict, and optimize.
 // flux-cortex is the "brain" that turns Flux from a passive analysis
@@ -13,6 +16,7 @@ pub mod ai_cortex;
 //   1. ARCHITECT  — scan workspace, compute 6-dimension blueprint
 //   2. PREDICT    — forecast build time, cache rate, test pass probability
 //   3. OPTIMIZE   — generate ranked optimization actions
+//      FOLD       — crease per-line actions into one per crease; every site kept
 //   4. APPLY      — execute the best actions (SIMD, io_uring, cache-line)
 //   5. VALIDATE   — measure actual build/runtime impact
 //   6. LEARN      — feed results back into prediction model
@@ -22,7 +26,7 @@ pub mod ai_cortex;
 // reported, predict only forecasted, and optimize only suggested. Cortex
 // makes them act, measure, and learn.
 
-use flux_architect::{self, OptimizationDimension, OptimizationFinding, OptimizationPlan};
+use flux_architect::{self, OptimizationDimension};
 use flux_graph::WorkspaceGraph;
 use flux_optimize::{self, OptimizationPreset};
 use serde::{Deserialize, Serialize};
@@ -86,6 +90,24 @@ pub struct CortexAction {
     pub created_at_secs: u64,
     /// Timestamp when action was applied
     pub applied_at_secs: Option<u64>,
+    /// How many source sites this action stands for (1 = a single site).
+    #[serde(default = "one")]
+    pub occurrences: usize,
+    /// Every source site folded into this action, in order (`fold::unfold_action`).
+    #[serde(default)]
+    pub sites: Vec<fold::Site>,
+    /// The single-site estimate; `estimated_impact_pct` is the folded
+    /// (saturating) figure once `occurrences > 1`.
+    #[serde(default)]
+    pub per_site_impact_pct: f64,
+}
+
+fn one() -> usize {
+    1
+}
+
+fn one_f64() -> f64 {
+    1.0
 }
 
 /// Results from a full Cortex Loop iteration.
@@ -119,6 +141,12 @@ pub struct CortexLoopResult {
     pub loop_duration_ms: u64,
     /// Timestamp
     pub timestamp_secs: u64,
+    /// Actions this loop would have generated before the fold (one per site).
+    #[serde(default)]
+    pub actions_unfolded: usize,
+    /// `actions_unfolded ÷ actions_generated` — how much smaller the sheet got.
+    #[serde(default = "one_f64")]
+    pub fold_ratio: f64,
 }
 
 /// Persistent Cortex state across iterations.
@@ -138,6 +166,9 @@ pub struct CortexState {
     pub cumulative_perf_gain_pct: f64,
     /// Number of actions applied total
     pub total_actions_applied: u64,
+    /// Unfolded (per-site) actions seen across all loops, before folding.
+    #[serde(default)]
+    pub actions_unfolded_total: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -148,15 +179,28 @@ pub struct CortexState {
 pub struct Cortex {
     pub state: CortexState,
     ws: WorkspaceGraph,
+    /// Write `~/.flux/cortex_state.json` after each loop. Only `with_persistence`
+    /// turns this on. A `Cortex::new` (unit tests, flux-p2p, flux-aqua,
+    /// swarm_compile) starts from an EMPTY state, so letting it save — as every
+    /// loop did until 2026-11-09 — overwrote the shared file with one loop's worth
+    /// of some other workspace every time one of them ran.
+    persist: bool,
 }
 
 impl Cortex {
-    /// Create a new Cortex engine for a workspace.
+    /// Create a new Cortex engine for a workspace. In-memory only: it neither
+    /// reads nor writes the shared state file (see `with_persistence`).
     pub fn new(ws: WorkspaceGraph) -> Self {
         Self {
             state: CortexState::default(),
             ws,
+            persist: false,
         }
+    }
+
+    /// Whether this engine writes the shared state file after each loop.
+    pub fn persists(&self) -> bool {
+        self.persist
     }
 
     /// Create a Cortex engine that restores cumulative state from disk.
@@ -167,6 +211,7 @@ impl Cortex {
     /// `AiCortex::load_agent_state`.
     pub fn with_persistence(ws: WorkspaceGraph) -> Self {
         let mut cortex = Self::new(ws);
+        cortex.persist = true;
         cortex.load_state();
         cortex
     }
@@ -186,6 +231,17 @@ impl Cortex {
         if let Ok(json) = std::fs::read_to_string(&path) {
             if let Ok(persisted) = serde_json::from_str::<CortexState>(&json) {
                 self.state = persisted;
+            }
+        }
+        // A state file written before the fold existed holds one action per
+        // source line (500 on disk = 88 distinct sentences, 2026-11-09). Fold it
+        // on the way in, so history and summary count creases, not copies.
+        let unfolded = self.state.action_history.len();
+        if unfolded > 0 {
+            let history = std::mem::take(&mut self.state.action_history);
+            self.state.action_history = fold::fold_actions(history);
+            if self.state.actions_unfolded_total < unfolded as u64 {
+                self.state.actions_unfolded_total = unfolded as u64;
             }
         }
     }
@@ -224,53 +280,49 @@ impl Cortex {
         let arch_score_before = arch_plan.total_estimated_gain_pct / 100.0;
         let findings_count = arch_plan.findings.len();
 
-        // ── Phase 2: PREDICT ──
-        // Use architect findings + historical accuracy to predict which
-        // optimizations will have the highest real-world impact.
-        let mut actions: Vec<CortexAction> = Vec::new();
+        // ── Phase 2: PREDICT (on the folded sheet) ──
+        // The architect speaks per source line. Fold its findings first, so one
+        // action stands for every site of one suggestion in one crate (fold.rs),
+        // then use historical accuracy to weight which creases matter most.
+        let folded = flux_architect::fold_findings(&arch_plan.findings);
+        let mut actions: Vec<CortexAction> = Vec::with_capacity(folded.len());
         let now = now_secs();
-        let mut action_id = self.state.action_history.len() as u64;
+        let id_base = self.state.action_history.len() as u64;
+        let mut action_id = id_base;
 
-        for finding in &arch_plan.findings {
+        for g in &folded {
             // Boost confidence for crates that have historically benefited
             let hist_boost = self
                 .state
                 .crate_scores
-                .get(&finding.crate_name)
+                .get(&g.crate_name)
                 .copied()
                 .unwrap_or(0.5);
 
-            let adjusted_confidence = (finding.confidence * 0.7 + hist_boost * 0.3).min(1.0);
+            let adjusted_confidence = (g.confidence * 0.7 + hist_boost * 0.3).min(1.0);
 
             let action = CortexAction {
                 id: action_id,
                 source_phase: CortexPhase::Predict,
-                crate_name: finding.crate_name.clone(),
-                dimension: finding.dimension.name().to_string(),
-                description: finding.suggestion.clone(),
-                estimated_impact_pct: finding.estimated_impact_pct,
+                crate_name: g.crate_name.clone(),
+                dimension: g.dimension.name().to_string(),
+                description: g.suggestion.clone(),
+                estimated_impact_pct: g.folded_impact_pct,
                 confidence: adjusted_confidence,
-                effort: self.classify_effort(&finding.dimension, finding.estimated_impact_pct),
+                // Effort follows the folded figure: 400 sites are more work than one.
+                effort: self.classify_effort(&g.dimension, g.folded_impact_pct),
                 applied: false,
                 actual_impact_pct: None,
                 prediction_accurate: None,
                 created_at_secs: now,
                 applied_at_secs: None,
+                occurrences: g.occurrences,
+                sites: g.sites.iter().map(fold::Site::from).collect(),
+                per_site_impact_pct: g.per_site_impact_pct,
             };
             action_id += 1;
             actions.push(action);
         }
-
-        // Sort actions by (estimated_impact × confidence) descending
-        actions.sort_by(|a, b| {
-            let score_a = a.estimated_impact_pct * a.confidence;
-            let score_b = b.estimated_impact_pct * b.confidence;
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let actions_generated = actions.len();
 
         // ── Phase 3: OPTIMIZE ──
         // Use flux-optimize to get SIMD/io_uring/cache-line recommendations
@@ -295,6 +347,10 @@ impl Cortex {
                 prediction_accurate: None,
                 created_at_secs: now,
                 applied_at_secs: None,
+                occurrences: 1,
+                sites: Vec::new(),
+                // 0.0 = "single site, read my estimate" — fold_actions fills it in.
+                per_site_impact_pct: 0.0,
             };
             action_id += 1;
             actions.push(a);
@@ -318,6 +374,10 @@ impl Cortex {
                 prediction_accurate: None,
                 created_at_secs: now,
                 applied_at_secs: None,
+                occurrences: 1,
+                sites: Vec::new(),
+                // 0.0 = "single site, read my estimate" — fold_actions fills it in.
+                per_site_impact_pct: 0.0,
             };
             action_id += 1;
             actions.push(a);
@@ -345,12 +405,31 @@ impl Cortex {
                 prediction_accurate: None,
                 created_at_secs: now,
                 applied_at_secs: None,
+                occurrences: 1,
+                sites: Vec::new(),
+                // 0.0 = "single site, read my estimate" — fold_actions fills it in.
+                per_site_impact_pct: 0.0,
             };
             action_id += 1;
             actions.push(a);
         }
 
-        // Re-sort after enrichment
+        // ── FOLD ──
+        // The optimize hints are one per function/struct already; fold once more
+        // so any duplicate crease (same crate, dimension, sentence) is one action,
+        // and count what the sheet looked like before.
+        let actions_unfolded = findings_count
+            + opt_report.simd_opportunities.len()
+            + opt_report.iouring_opportunities.len()
+            + opt_report.cache_line_fixes.len();
+        let mut actions = fold::fold_actions(actions);
+        for (k, a) in actions.iter_mut().enumerate() {
+            a.id = id_base + k as u64;
+        }
+        let actions_generated = actions.len();
+        let fold_ratio = fold::fold_ratio(actions_unfolded, actions_generated);
+
+        // Sort by (estimated_impact × confidence) descending
         actions.sort_by(|a, b| {
             let score_a = a.estimated_impact_pct * a.confidence;
             let score_b = b.estimated_impact_pct * b.confidence;
@@ -360,20 +439,22 @@ impl Cortex {
         });
 
         // ── Phase 4: APPLY ──
-        // Apply top-N actions (auto-apply low-effort + high-confidence)
+        // Auto-apply the five best ELIGIBLE actions (confidence > 0.7, effort
+        // low/medium). Before the fold this looked only at the top five positions;
+        // with folds ranked first, those are the big "high effort" Vectorization
+        // creases, and nothing was ever applied (measured 0/544, 2026-11-09).
         let mut applied_count = 0;
         let mut estimated_total_gain = 0.0;
-        let top_n = actions.len().min(5); // Top 5 actions per loop
 
-        for i in 0..top_n {
-            let a = &mut actions[i];
-            // Auto-apply if confidence > 0.7 and effort is low/medium
-            if a.confidence > 0.7 && (a.effort == "low" || a.effort == "medium") {
-                a.applied = true;
-                a.applied_at_secs = Some(now);
-                applied_count += 1;
-                estimated_total_gain += a.estimated_impact_pct;
-            }
+        for a in actions
+            .iter_mut()
+            .filter(|a| a.confidence > 0.7 && (a.effort == "low" || a.effort == "medium"))
+            .take(5)
+        {
+            a.applied = true;
+            a.applied_at_secs = Some(now);
+            applied_count += 1;
+            estimated_total_gain += a.estimated_impact_pct;
         }
 
         // Call flux-optimize apply for the preset (applies hot-swappable configs)
@@ -469,6 +550,8 @@ impl Cortex {
             learning_improvement,
             loop_duration_ms: loop_start.elapsed().as_millis() as u64,
             timestamp_secs: now,
+            actions_unfolded,
+            fold_ratio,
         };
 
         // Persist state
@@ -476,9 +559,13 @@ impl Cortex {
         self.state.loop_history.push(result.clone());
         self.state.cumulative_perf_gain_pct += actual_total_gain;
         self.state.total_actions_applied += applied_count as u64;
+        self.state.actions_unfolded_total += actions_unfolded as u64;
 
-        // Persist to disk so cumulative state survives across MCP tool calls.
-        self.save_state();
+        // Persist to disk so cumulative state survives across MCP tool calls —
+        // only for an engine that also LOADED that state (`with_persistence`).
+        if self.persist {
+            self.save_state();
+        }
 
         result
     }
@@ -532,6 +619,8 @@ impl Cortex {
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(k, v)| (k.clone(), *v)),
             learning_plateau: self.is_plateaued(),
+            actions_unfolded_total: self.state.actions_unfolded_total,
+            fold_ratio: fold::fold_ratio(self.state.actions_unfolded_total as usize, total_actions),
         }
     }
 
@@ -594,6 +683,12 @@ pub struct CortexSummary {
     pub accurate_predictions: u64,
     pub top_crate: Option<(String, f64)>,
     pub learning_plateau: bool,
+    /// Per-site actions seen before folding, across all loops.
+    #[serde(default)]
+    pub actions_unfolded_total: u64,
+    /// `actions_unfolded_total ÷ total_actions_generated`.
+    #[serde(default = "one_f64")]
+    pub fold_ratio: f64,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -746,5 +841,134 @@ mod tests {
             ctx.state.prediction_accuracy_history.push(0.95);
         }
         assert!(ctx.is_plateaued());
+    }
+
+    #[test]
+    fn test_cortex_new_does_not_persist() {
+        // Every one of these tests runs loops; none of them may touch the shared
+        // ~/.flux/cortex_state.json. Only `with_persistence` does.
+        assert!(!Cortex::new(mock_workspace()).persists());
+    }
+
+    /// A real (throw-away) workspace: 40 identical heap-allocation lines in one
+    /// crate. Unfolded, the architect reports 40 findings; the cortex must turn
+    /// them into ONE action that keeps all 40 sites and a saturating figure.
+    #[test]
+    fn test_cortex_folds_per_line_findings_into_one_action_per_crease() {
+        let root = std::env::temp_dir().join(format!("flux-cortex-fold-{}", std::process::id()));
+        let crate_dir = root.join("crates").join("foldy");
+        let src = crate_dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let body: String = (0..40)
+            .map(|i| format!("fn f{i}() {{ let v: Vec<u8> = Vec::new(); drop(v); }}\n"))
+            .collect();
+        std::fs::write(src.join("lib.rs"), body).unwrap();
+        let ws = WorkspaceGraph {
+            root: root.clone(),
+            crates: vec![CrateInfo {
+                name: "foldy".into(),
+                path: crate_dir,
+                dependencies: vec![],
+                edition: "2021".into(),
+                crate_type: CrateType::Lib,
+                features: vec![],
+            }],
+            batches: vec![vec![0]],
+        };
+
+        let mut ctx = Cortex::new(ws);
+        let result = ctx.run_loop(OptimizationPreset::MaxPerf);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.findings_count, 40, "the architect still sees every line");
+        assert!(result.actions_unfolded >= 40);
+        assert!(result.actions_generated < result.actions_unfolded);
+        assert!(result.fold_ratio > 2.0, "fold ratio {}", result.fold_ratio);
+
+        let arena = ctx
+            .state
+            .action_history
+            .iter()
+            .find(|a| a.crate_name == "foldy" && a.dimension == "Memory" && a.occurrences == 40)
+            .expect("one Memory action standing for all 40 sites");
+        assert_eq!(arena.sites.len(), 40);
+        assert_eq!(fold::unfold_action(arena).len(), 40);
+        assert_eq!(arena.sites[0].line, 1);
+        assert_eq!(arena.sites[39].line, 40);
+        assert_eq!(arena.per_site_impact_pct, 12.0);
+        assert!((arena.estimated_impact_pct - flux_architect::folded_impact(12.0, 40)).abs() < 1e-9);
+        // Far below the old linear sum (40 × 12 = 480 %).
+        assert!(arena.estimated_impact_pct < 60.0);
+        // No unfolded copies survived into history.
+        let copies = ctx
+            .state
+            .action_history
+            .iter()
+            .filter(|a| a.crate_name == "foldy" && a.dimension == "Memory" && a.description == arena.description)
+            .count();
+        assert_eq!(copies, 1);
+    }
+
+    /// Measurement harness, not an assertion. When `FLUX_CORTEX_MEASURE_WS` names
+    /// a workspace, run ONE loop on it in memory (no state file is read or
+    /// written) and write the unfolded/folded counts as JSON to
+    /// `FLUX_CORTEX_MEASURE_OUT`. With the variable unset this is a no-op, so it
+    /// costs an ordinary test run nothing.
+    #[test]
+    fn measure_live_workspace_when_asked() {
+        let Ok(ws_root) = std::env::var("FLUX_CORTEX_MEASURE_WS") else { return };
+        let out = std::env::var("FLUX_CORTEX_MEASURE_OUT").unwrap_or_else(|_| "/dev/stdout".into());
+        let root = PathBuf::from(ws_root);
+        let members = flux_graph::workspace::discover_members(&root).expect("workspace discovery");
+        let crates: Vec<CrateInfo> = members
+            .iter()
+            .filter_map(|p| {
+                Some(CrateInfo {
+                    name: p.file_name()?.to_string_lossy().to_string(),
+                    path: p.clone(),
+                    dependencies: vec![],
+                    edition: "2021".into(),
+                    crate_type: CrateType::Lib,
+                    features: vec![],
+                })
+            })
+            .collect();
+        let ws = WorkspaceGraph { root, crates, batches: vec![] };
+
+        let mut ctx = Cortex::new(ws);
+        let r = ctx.run_loop(OptimizationPreset::MaxPerf);
+
+        let top: Vec<serde_json::Value> = r
+            .top_actions
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "crate": a.crate_name, "dimension": a.dimension, "occurrences": a.occurrences,
+                    "per_site_impact_pct": a.per_site_impact_pct, "folded_impact_pct": a.estimated_impact_pct,
+                    "description": a.description,
+                })
+            })
+            .collect();
+        let largest = ctx
+            .state
+            .action_history
+            .iter()
+            .max_by_key(|a| a.occurrences)
+            .map(|a| serde_json::json!({"crate": a.crate_name, "occurrences": a.occurrences, "description": a.description}));
+        let distinct_crates: std::collections::HashSet<&str> =
+            ctx.state.action_history.iter().map(|a| a.crate_name.as_str()).collect();
+        let report = serde_json::json!({
+            "findings_count": r.findings_count,
+            "actions_unfolded": r.actions_unfolded,
+            "actions_generated": r.actions_generated,
+            "fold_ratio": r.fold_ratio,
+            "actions_applied": r.actions_applied,
+            "estimated_total_gain_pct_of_applied": r.estimated_total_gain_pct,
+            "distinct_crates_with_actions": distinct_crates.len(),
+            "largest_fold": largest,
+            "top_actions": top,
+            "loop_ms": r.loop_duration_ms,
+        });
+        std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("write measurement");
     }
 }

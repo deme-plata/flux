@@ -132,9 +132,11 @@ pub fn run_cortex_loop(preset: &str, iterations: usize, json: bool) {
             println!("⚡ Cortex — {} continuous loops complete", results.len());
             for r in &results {
                 println!(
-                    "  Loop {}: {} actions generated, {} applied, {:.2}% gain, {:.0}% learning",
+                    "  Loop {}: {} → {} actions (folded {:.1}×), {} applied, {:.2}% gain, {:.0}% learning",
                     r.iteration,
+                    r.actions_unfolded,
                     r.actions_generated,
+                    r.fold_ratio,
                     r.actions_applied,
                     r.actual_total_gain_pct.unwrap_or(0.0),
                     r.learning_improvement * 100.0
@@ -152,6 +154,8 @@ pub fn run_cortex_loop(preset: &str, iterations: usize, json: bool) {
             println!("  Architecture score: {:.1}%", result.arch_score_before * 100.0);
             println!("  Findings: {} | Actions generated: {} | Applied: {}",
                 result.findings_count, result.actions_generated, result.actions_applied);
+            println!("  Fold: {} per-site actions → {} creases ({:.1}× fewer; every site kept, see --json sites)",
+                result.actions_unfolded, result.actions_generated, result.fold_ratio);
             println!("  Est. gain: {:.2}% | Actual gain: {:.2}%",
                 result.estimated_total_gain_pct,
                 result.actual_total_gain_pct.unwrap_or(0.0));
@@ -159,9 +163,15 @@ pub fn run_cortex_loop(preset: &str, iterations: usize, json: bool) {
             if !result.top_actions.is_empty() {
                 println!("  Top actions:");
                 for a in &result.top_actions {
+                    let sites = if a.occurrences > 1 {
+                        format!(" ×{} sites, {:.1}% each", a.occurrences, a.per_site_impact_pct)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "    • [{}] {} ({:.1}% impact, {:.0}% conf, {})",
-                        a.dimension, a.description, a.estimated_impact_pct, a.confidence * 100.0, a.effort
+                        "    • [{}] {} — {} ({:.1}% impact{}, {:.0}% conf, {})",
+                        a.dimension, a.crate_name, a.description, a.estimated_impact_pct, sites,
+                        a.confidence * 100.0, a.effort
                     );
                 }
             }

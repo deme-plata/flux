@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 // ── Data Types ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OptimizationDimension {
     Vectorization,
     Memory,
@@ -66,6 +66,118 @@ pub struct OptimizationPlan {
     pub total_estimated_gain_pct: f64,
     pub memory_savings_mb: f64,
     pub dimensions_covered: Vec<String>,
+}
+
+// ── Folding: the crease that keeps every site and shrinks the sheet ──
+//
+// The detectors below emit ONE finding per matching source line. On the flux
+// workspace that is 2,827 findings (measured 2026-11-09); of the 500 actions the
+// cortex kept on disk, 487 were the same sentence. A fold groups the findings
+// that share (crate, dimension, suggestion) into one `FoldedFinding` that keeps
+// every site (file, line) — nothing is cut away, the sheet just gets smaller —
+// and gives the group ONE impact figure that saturates instead of summing: the
+// 400th `Vec::new()` in a crate is not another 12 % of speed.
+// `unfold` opens a fold back into per-site findings; fold(unfold(g)) == g.
+
+/// One place in the source where a folded finding was observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingSite {
+    pub file: String,
+    pub line: usize,
+    pub summary: String,
+}
+
+/// Many identical per-line findings creased into one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoldedFinding {
+    pub dimension: OptimizationDimension,
+    pub crate_name: String,
+    /// The shared suggestion — the crease line every site lies on.
+    pub suggestion: String,
+    /// How many sites were folded in (≥ 1).
+    pub occurrences: usize,
+    /// Every site, in the order the unfolded findings had them.
+    pub sites: Vec<FindingSite>,
+    /// The largest single-site estimate in the group.
+    pub per_site_impact_pct: f64,
+    /// The group's estimate after `folded_impact` — saturating, not a sum.
+    pub folded_impact_pct: f64,
+    /// The largest confidence in the group.
+    pub confidence: f64,
+}
+
+/// Fold `n` identical per-site estimates into one figure: `p × (1 + ln n)`.
+/// n = 1 gives `p` unchanged; 487 sites give 7.2 × p, not 487 × p. This is a
+/// chosen diminishing-returns law and, like every figure the detectors emit,
+/// an estimate — not a measurement.
+pub fn folded_impact(per_site_pct: f64, occurrences: usize) -> f64 {
+    if occurrences == 0 {
+        return 0.0;
+    }
+    per_site_pct * (1.0 + (occurrences as f64).ln())
+}
+
+/// Group findings by (crate, dimension, suggestion). Groups keep the order in
+/// which they were first seen, then sort by folded impact, largest first.
+pub fn fold_findings(findings: &[OptimizationFinding]) -> Vec<FoldedFinding> {
+    let mut index: HashMap<(String, OptimizationDimension, String), usize> = HashMap::new();
+    let mut folded: Vec<FoldedFinding> = Vec::new();
+
+    for f in findings {
+        let key = (f.crate_name.clone(), f.dimension.clone(), f.suggestion.clone());
+        let site = FindingSite { file: f.file.clone(), line: f.line, summary: f.summary.clone() };
+        match index.get(&key) {
+            Some(&i) => {
+                let g = &mut folded[i];
+                g.occurrences += 1;
+                g.sites.push(site);
+                g.per_site_impact_pct = g.per_site_impact_pct.max(f.estimated_impact_pct);
+                g.confidence = g.confidence.max(f.confidence);
+            }
+            None => {
+                index.insert(key, folded.len());
+                folded.push(FoldedFinding {
+                    dimension: f.dimension.clone(),
+                    crate_name: f.crate_name.clone(),
+                    suggestion: f.suggestion.clone(),
+                    occurrences: 1,
+                    sites: vec![site],
+                    per_site_impact_pct: f.estimated_impact_pct,
+                    folded_impact_pct: f.estimated_impact_pct,
+                    confidence: f.confidence,
+                });
+            }
+        }
+    }
+
+    for g in &mut folded {
+        g.folded_impact_pct = folded_impact(g.per_site_impact_pct, g.occurrences);
+    }
+    folded.sort_by(|a, b| {
+        b.folded_impact_pct
+            .partial_cmp(&a.folded_impact_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    folded
+}
+
+/// Open a fold back up: one finding per site, for whoever wants to act on them.
+pub fn unfold(g: &FoldedFinding) -> Vec<OptimizationFinding> {
+    g.sites
+        .iter()
+        .map(|s| OptimizationFinding {
+            rank: 0,
+            dimension: g.dimension.clone(),
+            estimated_impact_pct: g.per_site_impact_pct,
+            crate_name: g.crate_name.clone(),
+            file: s.file.clone(),
+            line: s.line,
+            summary: s.summary.clone(),
+            suggestion: g.suggestion.clone(),
+            confidence: g.confidence,
+            evidence: vec![format!("unfolded from a fold of {} sites", g.occurrences)],
+        })
+        .collect()
 }
 
 // ── Core Engine ──
@@ -435,5 +547,81 @@ mod tests {
         let (crate_name, file) = split_key("flux-cache/src/lib.rs");
         assert_eq!(crate_name, "flux-cache");
         assert_eq!(file, "src/lib.rs");
+    }
+
+    // ── Folding ──
+
+    fn finding(crate_name: &str, dim: OptimizationDimension, suggestion: &str, impact: f64, line: usize) -> OptimizationFinding {
+        OptimizationFinding {
+            rank: 0,
+            dimension: dim,
+            estimated_impact_pct: impact,
+            crate_name: crate_name.into(),
+            file: "lib.rs".into(),
+            line,
+            summary: format!("site {}", line),
+            suggestion: suggestion.into(),
+            confidence: 0.5,
+            evidence: vec![],
+        }
+    }
+
+    #[test]
+    fn fold_groups_identical_findings_and_keeps_every_site() {
+        let mut raw = Vec::new();
+        for line in 1..=40 {
+            raw.push(finding("flux-db", OptimizationDimension::Memory, "arena", 12.0, line));
+        }
+        raw.push(finding("flux-db", OptimizationDimension::Memory, "pool", 8.0, 99));
+        raw.push(finding("flux-zk", OptimizationDimension::Memory, "arena", 12.0, 7));
+
+        let folded = fold_findings(&raw);
+        assert_eq!(folded.len(), 3, "three creases: (db,arena) (db,pool) (zk,arena)");
+        let big = folded.iter().find(|g| g.crate_name == "flux-db" && g.suggestion == "arena").unwrap();
+        assert_eq!(big.occurrences, 40);
+        assert_eq!(big.sites.len(), 40);
+        assert_eq!(big.sites[0].line, 1);
+        assert_eq!(big.sites[39].line, 40);
+        assert_eq!(big.per_site_impact_pct, 12.0);
+        // Saturating, not a sum: 12 × (1 + ln 40) ≈ 56.3, far below 480.
+        assert!((big.folded_impact_pct - folded_impact(12.0, 40)).abs() < 1e-9);
+        assert!(big.folded_impact_pct < 60.0 && big.folded_impact_pct > 50.0);
+        // The biggest fold ranks first.
+        assert_eq!(folded[0].occurrences, 40);
+        // Every site of the input is in exactly one fold.
+        let kept: usize = folded.iter().map(|g| g.sites.len()).sum();
+        assert_eq!(kept, raw.len());
+    }
+
+    #[test]
+    fn folded_impact_is_identity_for_one_site_and_monotone_saturating() {
+        assert_eq!(folded_impact(12.0, 1), 12.0);
+        assert_eq!(folded_impact(12.0, 0), 0.0);
+        let mut prev = 0.0;
+        for n in 1..1000usize {
+            let v = folded_impact(12.0, n);
+            assert!(v > prev, "monotone");
+            assert!(v < 12.0 * n as f64 || n == 1, "below the linear sum");
+            prev = v;
+        }
+        assert!(folded_impact(12.0, 487) < 90.0, "487 bumpalo hints ≈ 86 %, not 5,844 %");
+    }
+
+    #[test]
+    fn fold_then_unfold_loses_nothing_and_folding_twice_changes_nothing() {
+        let raw: Vec<OptimizationFinding> =
+            (1..=25).map(|l| finding("flux-rev", OptimizationDimension::Cache, "align", 15.0, l)).collect();
+        let folded = fold_findings(&raw);
+        assert_eq!(folded.len(), 1);
+        let opened = unfold(&folded[0]);
+        assert_eq!(opened.len(), raw.len());
+        let lines_in: Vec<usize> = raw.iter().map(|f| f.line).collect();
+        let lines_out: Vec<usize> = opened.iter().map(|f| f.line).collect();
+        assert_eq!(lines_in, lines_out, "unfold returns every site in order");
+        let refolded = fold_findings(&opened);
+        assert_eq!(refolded.len(), 1);
+        assert_eq!(refolded[0].occurrences, folded[0].occurrences);
+        assert_eq!(refolded[0].sites, folded[0].sites);
+        assert!((refolded[0].folded_impact_pct - folded[0].folded_impact_pct).abs() < 1e-9);
     }
 }

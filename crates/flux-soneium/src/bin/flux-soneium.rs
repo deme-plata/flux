@@ -1,6 +1,6 @@
-//! flux-soneium CLI — SIGIL on Soneium (chain 1868), Alchemy-first RPC.
+//! flux-soneium CLI — SIGIL on Soneium (chain 1868) and Base (chain 8453), Alchemy-first RPC.
 //!
-//!   flux-soneium check   [--net mainnet|minato] [--router 0x…]            verify RPC, routers, wallet, ETH/USD
+//!   flux-soneium check   [--net mainnet|minato|base|base-sepolia] [--router 0x…]   verify RPC, routers, wallet, ETH/USD
 //!   flux-soneium plan    [--quote weth|usdc] [--seed N] [--seed-supply N] [--price P]   funding plan (no tx)
 //!   flux-soneium deploy  [--operator 0x…] [--seed-supply N] [--yes]        deploy SigilBridgeWrappedG3
 //!   flux-soneium pool    [--quote weth|usdc] [--seed N] [--price P] [--to 0x…] [--yes]   seed the V2 pool
@@ -54,7 +54,7 @@ impl Args {
 
 fn net_of(a: &Args) -> Result<Network> {
     let n = a.s("net").unwrap_or("mainnet");
-    Network::by_name(n).with_context(|| format!("unknown network {n} (mainnet|minato)"))
+    Network::by_name(n).with_context(|| format!("unknown network {n} (mainnet|minato|base|base-sepolia)"))
 }
 
 #[tokio::main]

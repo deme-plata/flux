@@ -5,6 +5,11 @@
 //! `BurnedTo` topic) on **Soneium** — Sony's OP-Stack L2, chain id 1868 — and seeds a
 //! Uniswap-V2-style pool there, so SIGIL can be bought on two chains instead of one.
 //!
+//! 2026-11-09: the network table gained **Base** (8453) and **Base Sepolia** (84532) —
+//! Coinbase's OP-Stack L2, the same predeploys and the same Uniswap V2 router ABI, so
+//! `check`/`plan`/`deploy`/`pool` run there with `--net base` (see [`chain::Network::base`]).
+//! The crate name is now narrower than what it does; renaming it is an operator decision.
+//!
 //! # What is measured vs assumed
 //! * Chain ids, WETH predeploy, USDC.e, USDT, ASTR, Permit2: from docs.soneium.org, and
 //!   re-checked live by [`rpc::connect`] (`eth_chainId`) and [`dex::verify_router`].
@@ -36,7 +41,7 @@ pub mod relay;
 pub mod rpc;
 pub mod wsigil;
 
-pub use chain::{Network, MAINNET_CHAIN_ID, MINATO_CHAIN_ID};
+pub use chain::{Network, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, MAINNET_CHAIN_ID, MINATO_CHAIN_ID};
 pub use dex::{pick_router, verify_router, RouterVerdict};
 pub use plan::FundingPlan;
 pub use pool::{SeedPlan, Quote};

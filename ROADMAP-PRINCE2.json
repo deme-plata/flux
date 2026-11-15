@@ -168,7 +168,7 @@
       "benefit": "Nobody quotes the wrong K: the SIGIL gauge named a dead chain (sigil-g2) and judged g3 against g2's block rate; the Quillon wallet tool printed a 0–100 mining score as 'the K-parameter'",
       "justified_on": "2026-11-15",
       "done_check": "fluxc test -p fluxc-mcp --lib sigil_kgauge (2 new tests) — live once fluxc is reinstalled and the MCP restarted",
-      "status": "active",
+      "status": "done",
       "tolerances": null,
       "notes": []
     },
@@ -246,6 +246,10 @@
     {
       "on": "2026-11-15",
       "text": "flux-rev's 'full:' is a REVISION id (genesis stamp + author + time): genesis on the same commit gave 3 different ids, one tree id c4e25e8a… — record the tree id; the 4c7d0341 and v0.42.0 'recompute' notes name the revision id"
+    },
+    {
+      "on": "2026-11-15",
+      "text": "fluxc 0.43.0 installed 17:31 (shared target/debug/fluxc rebuilt); a fresh fluxc MCP reports network sigil-g3, target 8.0, deviation 0.0 (was sigil-g2 / 0.83 / 9.7x)"
     }
   ],
   "log": [
@@ -269,6 +273,7 @@
     "stage next opened",
     "item manifest-rev added to next",
     "item rev-attest added to next",
-    "item rev-tree added to next"
+    "item rev-tree added to next",
+    "2026-11-15 k-labels done"
   ]
 }

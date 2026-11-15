@@ -193,6 +193,17 @@
       "status": "planned",
       "tolerances": null,
       "notes": []
+    },
+    {
+      "id": "rev-tree",
+      "title": "flux-rev prints the content TREE id (genesis/snapshot), not only the revision id",
+      "stage": "next",
+      "benefit": "A release stamp must be recomputable by anyone: the revision id carries a genesis stamp + time and differs every run (3 runs on one commit: 3 ids, 1 tree)",
+      "justified_on": "2026-11-15",
+      "done_check": "flux-rev genesis <export> | grep tree:   # same on every run",
+      "status": "planned",
+      "tolerances": null,
+      "notes": []
     }
   ],
   "exceptions": [
@@ -231,6 +242,10 @@
     {
       "on": "2026-11-15",
       "text": "The quillon-wallet MCP build/ is newer than its src/ (v2.21 swap checks exist only in build/index.js): never rebuild it from src/; patch build/ with exact anchors and mirror into src/"
+    },
+    {
+      "on": "2026-11-15",
+      "text": "flux-rev's 'full:' is a REVISION id (genesis stamp + author + time): genesis on the same commit gave 3 different ids, one tree id c4e25e8a… — record the tree id; the 4c7d0341 and v0.42.0 'recompute' notes name the revision id"
     }
   ],
   "log": [
@@ -253,6 +268,7 @@
     "2026-11-15 board decided #1 (k-labels): Continue — Viktor 2026-11-15: \"install the new fluxc so the mcp gets the fix\"",
     "stage next opened",
     "item manifest-rev added to next",
-    "item rev-attest added to next"
+    "item rev-attest added to next",
+    "item rev-tree added to next"
   ]
 }

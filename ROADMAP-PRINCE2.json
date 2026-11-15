@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "project": "flux",
+  "executive": "Viktor",
+  "tolerances": {
+    "max_hours": 8.0,
+    "min_free_mem_gb": 12.0,
+    "max_files": 20,
+    "max_money_qug": 0.0,
+    "production_allowed": false
+  },
+  "stages": [
+    {
+      "name": "standalone-compiler",
+      "goal": "FLUX-MASTER-OVERVIEW §8 (written 2026-06-24): grow fluxc toward a standalone compiler",
+      "status": "open",
+      "tolerances": null,
+      "closed_on": null
+    },
+    {
+      "name": "lane-2026-11",
+      "goal": "Lanes of November 2026 — each ends merged into v0.5.2-dev the same day",
+      "status": "open",
+      "tolerances": null,
+      "closed_on": null
+    },
+    {
+      "name": "next",
+      "goal": "Small next items found while releasing v0.43.0",
+      "status": "open",
+      "tolerances": null,
+      "closed_on": null
+    }
+  ],
+  "items": [
+    {
+      "id": "standalone-compiler-1",
+      "title": "Fix the Phase-1 build",
+      "stage": "standalone-compiler",
+      "benefit": "Gave the green baseline everything else needs.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "done",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-2",
+      "title": "Make the cache actually hit",
+      "stage": "standalone-compiler",
+      "benefit": "Live 0% hit / 66 s avg; the wrapper's headline value-add is non-functional `[repo]`.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-3",
+      "title": "Real signature inference from rlib metadata",
+      "stage": "standalone-compiler",
+      "benefit": "Cross-crate calls are unsound guesses, blocking non-trivial programs `[repo]`.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-4",
+      "title": "Backend type coverage beyond i64",
+      "stage": "standalone-compiler",
+      "benefit": "i64-only can't represent real programs.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-5",
+      "title": "Aggregate types: structs, enums, tuples",
+      "stage": "standalone-compiler",
+      "benefit": "Nothing realistic compiles without them.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-6",
+      "title": "Generics + trait dispatch (native path)",
+      "stage": "standalone-compiler",
+      "benefit": "Traits/generics are pervasive in the workspace.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-7",
+      "title": "Decide frontend posture — own it OR formalize rustc-as-frontend",
+      "stage": "standalone-compiler",
+      "benefit": "Load-bearing identity decision — the whitepaper's \"self-hosting\" claim is only honest under one of these. Route via a FIP (§12).",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-8",
+      "title": "Own/vendor the linker",
+      "stage": "standalone-compiler",
+      "benefit": "\"No own linker\" is a standalone gap `[repo]`.",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "standalone-compiler-9",
+      "title": "Self-host `fluxc` via Phase 3",
+      "stage": "standalone-compiler",
+      "benefit": "The whitepaper's central claim and the true test of standalone status — realistically last, gated on 3–7 (fluxc uses structs/enums/generics/traits heavily).",
+      "justified_on": "2026-06-24",
+      "done_check": "",
+      "status": "planned",
+      "tolerances": null,
+      "notes": [
+        "imported from FLUX-MASTER-OVERVIEW.md"
+      ]
+    },
+    {
+      "id": "prince2-board",
+      "title": "PRINCE2 board in flux-legacy (control::prince2 + flux-roadmap)",
+      "stage": "lane-2026-11",
+      "benefit": "The roadmap cannot go stale unseen again: every item states its benefit and is re-checked every 30 days; tolerances say when an agent must ask Viktor",
+      "justified_on": "2026-11-15",
+      "done_check": "flux-roadmap --board ROADMAP-PRINCE2.json show",
+      "status": "done",
+      "tolerances": null,
+      "notes": []
+    },
+    {
+      "id": "k-labels",
+      "title": "K-gauge labels honest: SIGIL gauge names the node's chain + g3's rate; Quillon k_parameter shows K_fix",
+      "stage": "lane-2026-11",
+      "benefit": "Nobody quotes the wrong K: the SIGIL gauge named a dead chain (sigil-g2) and judged g3 against g2's block rate; the Quillon wallet tool printed a 0–100 mining score as 'the K-parameter'",
+      "justified_on": "2026-11-15",
+      "done_check": "fluxc test -p fluxc-mcp --lib sigil_kgauge (2 new tests) — live once fluxc is reinstalled and the MCP restarted",
+      "status": "active",
+      "tolerances": null,
+      "notes": []
+    },
+    {
+      "id": "manifest-rev",
+      "title": "fluxc release fills flux_rev + source_tag in the signed manifest (both are hardcoded empty)",
+      "stage": "next",
+      "benefit": "An installer can tie the downloaded binary to the exact source tree, instead of trusting the release notes",
+      "justified_on": "2026-11-15",
+      "done_check": "jq -r .flux_rev fluxc-latest.json   # not empty",
+      "status": "planned",
+      "tolerances": null,
+      "notes": []
+    },
+    {
+      "id": "rev-attest",
+      "title": "Done board items become signed flux-rev roadmap attestations (release_ref = the tag)",
+      "stage": "next",
+      "benefit": "A done item can be checked by someone who does not trust the author: flux-rev roadmap hashes the code that implements it and signs it",
+      "justified_on": "2026-11-15",
+      "done_check": "flux-rev roadmap --verify <attestation>",
+      "status": "planned",
+      "tolerances": null,
+      "notes": []
+    }
+  ],
+  "exceptions": [
+    {
+      "seq": 1,
+      "item_id": "k-labels",
+      "raised_on": "2026-11-15",
+      "breaches": [
+        {
+          "tolerance": "production",
+          "limit": "no production touch",
+          "forecast": "touches production"
+        }
+      ],
+      "forecast": {
+        "hours": 2.0,
+        "min_free_mem_gb": 18.0,
+        "files": 3,
+        "money_qug": 0.0,
+        "touches_production": true
+      },
+      "decision": "continue",
+      "decision_note": "Viktor 2026-11-15: \"install the new fluxc so the mcp gets the fix\"",
+      "decided_on": "2026-11-15"
+    }
+  ],
+  "lessons": [
+    {
+      "on": "2026-11-15",
+      "text": "A clean checkout of the flux main line cannot load its workspace: crates/sigil-rpc-wasm depends on sigil-rpc, deleted 09-22; the 4-line exclude sits UNCOMMITTED in the shared tree's Cargo.toml"
+    },
+    {
+      "on": "2026-11-15",
+      "text": "A flux worktree must sit beside a 'sigil' link (ws/flux + ws/sigil): the SIGIL crates reach ../../../flux, so elsewhere cargo sees two flux-cache packages (lockfile collision)"
+    },
+    {
+      "on": "2026-11-15",
+      "text": "The quillon-wallet MCP build/ is newer than its src/ (v2.21 swap checks exist only in build/index.js): never rebuild it from src/; patch build/ with exact anchors and mirror into src/"
+    }
+  ],
+  "log": [
+    "stage standalone-compiler opened",
+    "item standalone-compiler-1 added to standalone-compiler",
+    "item standalone-compiler-2 added to standalone-compiler",
+    "item standalone-compiler-3 added to standalone-compiler",
+    "item standalone-compiler-4 added to standalone-compiler",
+    "item standalone-compiler-5 added to standalone-compiler",
+    "item standalone-compiler-6 added to standalone-compiler",
+    "item standalone-compiler-7 added to standalone-compiler",
+    "item standalone-compiler-8 added to standalone-compiler",
+    "item standalone-compiler-9 added to standalone-compiler",
+    "stage lane-2026-11 opened",
+    "item prince2-board added to lane-2026-11",
+    "item k-labels added to lane-2026-11",
+    "2026-11-15 check prince2-board: inside tolerance",
+    "2026-11-15 prince2-board done",
+    "2026-11-15 check k-labels: EXCEPTION #1 (production)",
+    "2026-11-15 board decided #1 (k-labels): Continue — Viktor 2026-11-15: \"install the new fluxc so the mcp gets the fix\"",
+    "stage next opened",
+    "item manifest-rev added to next",
+    "item rev-attest added to next"
+  ]
+}

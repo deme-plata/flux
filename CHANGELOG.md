@@ -1,5 +1,36 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.43.0 — The PRINCE2 release: a roadmap that says when it went stale (2026-11-15)
+
+The roadmap in `FLUX-MASTER-OVERVIEW.md` §8 was written on 2026-06-24 and never checked again. Five
+months later nobody could say which items still mattered, and the v0.42.0 release itself had never
+reached the main line: v0.5.2-dev still said 0.41.0 and a clean checkout could not even load its
+workspace. This release adds the part of PRINCE2 that would have caught both, and nothing heavier.
+
+- **`flux_legacy::control::prince2` + the `flux-roadmap` CLI** — PRINCE2 Agile control for a roadmap, on
+  top of the existing operator plan (`control.rs`):
+  - *manage by stages*: a stage closes at its gate, and `end-stage` refuses while an exception is undecided;
+  - *manage by exception*: tolerances per board, stage or item (defaults: 8 h, ≥ 12 GB free memory,
+    ≤ 20 files, and any money move or production touch asks the board). `check` turns a forecast that
+    breaks one into an exception report; `decide` only RECORDS the board's word;
+  - *continued business justification*: every item states its benefit and the day it was last checked;
+    the highlight report lists benefits not re-checked in 30 days, and an item without a benefit is refused;
+  - *product-based planning*: every item names its done-check (one command that proves it runs);
+  - `import-overview` puts an old roadmap table in front of the board, dated as written.
+  The first board is `ROADMAP-PRINCE2.json`: `flux-roadmap --board ROADMAP-PRINCE2.json show`.
+- **`flux_sigil_kgauge` names the chain the node names.** It said `sigil-g2` (hardcoded) and judged the
+  live g3 chain against g2's 0.83 blk/s, reporting a 9.7× block-rate deviation on a healthy chain. The
+  network now comes from `/v1/shielded/anchor`, and the target follows it (g3 = 8.0, re-derived
+  2026-11-15: 481 blocks / 60 s). Diagnostic only; K_C and K_fix are unchanged.
+- **The main line carries v0.42.0.** Its 5 commits (signed releases, SIGIL key 2 in `flux_release_check`,
+  the install guard, the `sigil-rpc-wasm` exclusion, the ledger stamp) are merged into v0.5.2-dev.
+
+Also first released here (on the main line since v0.42.0 branched): the cortex **fold** (one action per
+crease, every site kept; 2,863 → 544), `fluxc magic` + `stardust` (guarded builds, binary provenance,
+arm64 stamp fix), libp2p connection limits, flux-legacy `money`/`referee`/`shadow` wards and the health
+fix, `fluxc serve` reading only the newest event files, flux-soneium Base + Base Sepolia, flux-commerce,
+the skyskraber treasury rules, and the CODATA paper/song generators.
+
 ## v0.42.0 — Signed releases (2026-10-23)
 
 Until now a Flux release was trusted on TLS alone. `fluxc self-update` curl'ed `fluxc-musl-x64` straight

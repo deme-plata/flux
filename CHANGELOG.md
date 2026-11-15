@@ -1,5 +1,29 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.42.0 — Signed releases (2026-10-23)
+
+Until now a Flux release was trusted on TLS alone. `fluxc self-update` curl'ed `fluxc-musl-x64` straight
+into `~/.flux/bin/fluxc` with no check, and `auto-update` compared a sha256 from an UNSIGNED manifest served
+by the same machine — whoever could change the binary could change the hash beside it. That machine had
+third parties with root from July to September 2026, and the channels disagreed three ways (quillon.xyz
+0.28.0, fluxapp.xyz 0.36.0, the self-update file 0.40.0).
+
+- **Every release manifest is signed** (Ed25519, pinned key `e9b6aecec3531889a49d39e148663187b3bf728ec178429aa75c50580d20d78a`,
+  detached `<manifest>.sig`). `fluxc release` refuses a seed whose public key is not the pinned one, writes the
+  signature before the manifest, publishes identical bytes (versioned + stable `fluxc-musl-x64`) to both download
+  roots and re-verifies what landed. SIGIL products are refused: they have their own signed ceremony.
+- **`fluxc self-update` and `fluxc auto-update` install only what a verified manifest names** (hash + size), and
+  refuse to write through a symlink or over a cargo build output — on Epsilon `~/.flux/bin/fluxc` is a symlink to
+  the shared development build.
+- **`flux_release_check`** checks sigil-* manifests against SIGIL release key 2 (`.sig2`) and everything else
+  against the Flux key.
+- **`setup-flux.sh`** installs the prebuilt binary only after the signature (python3 `cryptography` or OpenSSL 3)
+  and the sha256 check out; otherwise it builds from source.
+- Measured: a local dry run (`dryrun-flux-release.sh`) 21/21 — publish + mirror, auto-update download + apply,
+  self-update, symlink and build-output refusals, tampered manifest, missing `.sig`, swapped binary.
+
+Also in this release: everything under "Unreleased on v0.5.2-dev" below.
+
 ## Unreleased on v0.5.2-dev — What SIGIL taught the compiler (2026-09-13)
 
 Two weeks of SIGIL work (g2 → shielded sends → 100 blk/s) used Flux for every build,

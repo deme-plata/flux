@@ -5,7 +5,7 @@
 //! Usage: `antimatter_gravity [OUT_DIR]` → prints the summary, writes
 //! `OUT_DIR/antimatter-gravity-codata-2022.tex`.
 
-use flux_science::antimatter_gravity::{self as ag, external as ext, Matter, Shape};
+use flux_science::antimatter_gravity::{self as ag, external as ext};
 use flux_science::electromagnetism::{CodataTable, NIST_2022_BLAKE3};
 use std::fmt::Write as _;
 
@@ -23,53 +23,17 @@ fn main() {
     let out_dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
     let t22 = CodataTable::nist_2022();
     let t18 = CodataTable::nist_2018();
-    let m = Matter::from_table(&t22);
-    let rows = t22.constants.len();
-    let anti = ag::antimatter_rows(&t22);
-
-    // ALPHA-g scale
-    let grad = ag::bias_gradient(&m, ext::ALPHA_G_LOCAL_G);
-    let mdiff = ag::mirror_difference(&m, ext::ALPHA_G_LOCAL_G, ext::ALPHA_G_PEAK_SEPARATION_M);
-    let efield = ag::equivalent_electric_field(&m, ext::ALPHA_G_LOCAL_G);
-    let bfield = ag::equivalent_magnetic_field(&m, ext::ALPHA_G_LOCAL_G, 10.0);
-    let step = ag::gravity_step_kelvin(&m, ext::ALPHA_G_LOCAL_G, ext::ALPHA_G_PEAK_SEPARATION_M);
-    let step_cm = ag::gravity_step_kelvin(&m, ext::ALPHA_G_LOCAL_G, 0.01);
-    let binding = m.hydrogen_binding_ev();
-    let binding_rel = (binding / m.mp_c2_ev - ext::BASE_BE_MP) / ext::BASE_BE_MP;
-
-    // Moments
-    let tm = ag::trapped_moments(&m, ext::ALPHA_G_BACKGROUND_FIELD_T, ext::NU_HF_HYDROGEN);
-    let c_high = m.mu_e_over_mu_b + m.mu_p_over_mu_b;
-
-    // Refit
-    let eff = ag::efficiency_2023();
-    let kappa = eff.ratio();
-    let lg = ag::fit_escape(Shape::Logistic, kappa);
-    let pb = ag::fit_escape(Shape::Probit, kappa);
-    let raw = ag::fit_escape(Shape::Logistic, 1.0);
-    let z0 = ag::stat_only_z(&lg, 0.0);
-    let zrep = ag::stat_only_z(&lg, 1.0);
-    let z0p = ag::stat_only_z(&pb, 0.0);
-    let zrepp = ag::stat_only_z(&pb, 1.0);
-    let eshift = ag::efficiency_shift(Shape::Logistic);
-    let need = ag::events_for(&lg, 0.01);
+    // Every number comes from the library's one summary, which fluxc's MCP tool serves too.
+    let ag::Summary {
+        matter: m, rows, anti, anti_2018: _,
+        grad, mdiff, efield, bfield, step, step_cm, binding, binding_rel,
+        tm, c_high,
+        eff, kappa, lg, pb, raw, z0, zrep, z0p, zrepp, eshift, need,
+        r22, r18, abs_bound, phi_sun, swing, naive_annual,
+        t_g, t_075, lgrav, e1, e2,
+    } = ag::summary(&t22, &t18);
     let (a_res, a_ss, a_sim) = ext::ALPHA_G_RESULT;
     let a_tot = a_ss.hypot(a_sim);
-
-    // BASE
-    let r22 = ag::hminus_ratio(&m);
-    let r18 = ag::hminus_ratio(&Matter::from_table(&t18));
-    let abs_bound = ag::clock_bound(ext::BASE_R_SIGMA, ext::BASE_SUPERCLUSTER_PHI_C2);
-    let phi_sun = ag::solar_potential_c2();
-    let swing = ag::annual_fractional_swing();
-    let naive_annual = ag::annual_naive_bound();
-
-    // GBAR
-    let t_g = ag::fall_time(0.2, m.g_n);
-    let t_075 = ag::fall_time(0.2, 0.75 * m.g_n);
-    let lgrav = ag::gravitational_length(&m, m.g_n);
-    let e1 = ag::quantum_state_hz(&m, m.g_n, 1);
-    let e2 = ag::quantum_state_hz(&m, m.g_n, 2);
 
     // ── terminal summary ────────────────────────────────────────────────────────────────
     println!("Antimatter and gravity, recomputed from CODATA {} ({rows} rows, BLAKE3 {}…)", t22.year, &NIST_2022_BLAKE3[..16]);

@@ -29,7 +29,7 @@
 //!   Nat. Commun. 16, 10106 (2025) — in ALPHA-g, 2024: accumulation rate up more than 20×.
 //! * CERN news, 27 May 2026: antihydrogen ground-state hyperfine splitting to 4 ppm (Nature).
 
-use crate::electromagnetism::{si2019, CodataTable};
+use crate::electromagnetism::{si2019, CodataTable, NIST_2022_BLAKE3};
 use si2019::{C, E, H};
 use std::f64::consts::PI;
 
@@ -510,9 +510,228 @@ pub fn quantum_state_hz(m: &Matter, g: f64, n: usize) -> f64 {
     m.hydrogen_mass() * g * gravitational_length(m, g) * ext::AIRY_ZEROS[n - 1] / H
 }
 
+// ── One summary, shared by the paper and by fluxc ────────────────────────────────────────
+
+/// Every number the `antimatter_gravity` paper prints, computed in one place. The paper
+/// binary destructures it and fluxc's `flux_science_antimatter_gravity` MCP tool serialises
+/// it, so the tool can never quote a number the paper does not.
+#[derive(Clone, Debug)]
+pub struct Summary {
+    pub matter: Matter,
+    pub rows: usize,
+    pub anti: usize,
+    pub anti_2018: usize,
+    pub grad: f64,
+    pub mdiff: f64,
+    pub efield: f64,
+    pub bfield: f64,
+    pub step: f64,
+    pub step_cm: f64,
+    pub binding: f64,
+    pub binding_rel: f64,
+    pub tm: TrappedMoments,
+    pub c_high: f64,
+    pub eff: Efficiency,
+    pub kappa: f64,
+    pub lg: EscapeFit,
+    pub pb: EscapeFit,
+    pub raw: EscapeFit,
+    pub z0: f64,
+    pub zrep: f64,
+    pub z0p: f64,
+    pub zrepp: f64,
+    pub eshift: f64,
+    pub need: f64,
+    pub r22: HMinusRatio,
+    pub r18: HMinusRatio,
+    pub abs_bound: f64,
+    pub phi_sun: f64,
+    pub swing: f64,
+    pub naive_annual: f64,
+    pub t_g: f64,
+    pub t_075: f64,
+    pub lgrav: f64,
+    pub e1: f64,
+    pub e2: f64,
+}
+
+/// Compute the paper's numbers from a 2022 and a 2018 listing (normally the embedded ones).
+pub fn summary(t22: &CodataTable, t18: &CodataTable) -> Summary {
+    let m = Matter::from_table(t22);
+    let binding = m.hydrogen_binding_ev();
+    let eff = efficiency_2023();
+    let kappa = eff.ratio();
+    let lg = fit_escape(Shape::Logistic, kappa);
+    let pb = fit_escape(Shape::Probit, kappa);
+    Summary {
+        rows: t22.constants.len(),
+        anti: antimatter_rows(t22),
+        anti_2018: antimatter_rows(t18),
+        grad: bias_gradient(&m, ext::ALPHA_G_LOCAL_G),
+        mdiff: mirror_difference(&m, ext::ALPHA_G_LOCAL_G, ext::ALPHA_G_PEAK_SEPARATION_M),
+        efield: equivalent_electric_field(&m, ext::ALPHA_G_LOCAL_G),
+        bfield: equivalent_magnetic_field(&m, ext::ALPHA_G_LOCAL_G, 10.0),
+        step: gravity_step_kelvin(&m, ext::ALPHA_G_LOCAL_G, ext::ALPHA_G_PEAK_SEPARATION_M),
+        step_cm: gravity_step_kelvin(&m, ext::ALPHA_G_LOCAL_G, 0.01),
+        binding,
+        binding_rel: (binding / m.mp_c2_ev - ext::BASE_BE_MP) / ext::BASE_BE_MP,
+        tm: trapped_moments(&m, ext::ALPHA_G_BACKGROUND_FIELD_T, ext::NU_HF_HYDROGEN),
+        c_high: m.mu_e_over_mu_b + m.mu_p_over_mu_b,
+        eff,
+        kappa,
+        raw: fit_escape(Shape::Logistic, 1.0),
+        z0: stat_only_z(&lg, 0.0),
+        zrep: stat_only_z(&lg, 1.0),
+        z0p: stat_only_z(&pb, 0.0),
+        zrepp: stat_only_z(&pb, 1.0),
+        eshift: efficiency_shift(Shape::Logistic),
+        need: events_for(&lg, 0.01),
+        lg,
+        pb,
+        r22: hminus_ratio(&m),
+        r18: hminus_ratio(&Matter::from_table(t18)),
+        abs_bound: clock_bound(ext::BASE_R_SIGMA, ext::BASE_SUPERCLUSTER_PHI_C2),
+        phi_sun: solar_potential_c2(),
+        swing: annual_fractional_swing(),
+        naive_annual: annual_naive_bound(),
+        t_g: fall_time(0.2, m.g_n),
+        t_075: fall_time(0.2, 0.75 * m.g_n),
+        lgrav: gravitational_length(&m, m.g_n),
+        e1: quantum_state_hz(&m, m.g_n, 1),
+        e2: quantum_state_hz(&m, m.g_n, 2),
+        matter: m,
+    }
+}
+
+impl Summary {
+    /// The summary as JSON for tools and agents: units live in the key names, and every
+    /// block carries the experiment's own printed value beside the recomputed one.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let fit = |f: &EscapeFit| {
+            json!({
+                "shape": format!("{:?}", f.shape),
+                "kappa": f.kappa,
+                "balance_g": f.balance,
+                "naive_acceleration_g": f.naive_acceleration(),
+                "balance_sigma_counting_g": f.balance_sigma,
+                "width_g": 1.0 / f.beta1,
+                "events": f.events,
+            })
+        };
+        let (a, a_ss, a_sim) = ext::ALPHA_G_RESULT;
+        json!({
+            "codata": {
+                "year": self.matter.year,
+                "rows": self.rows,
+                "antimatter_rows": self.anti,
+                "antimatter_rows_2018": self.anti_2018,
+                "table_blake3": NIST_2022_BLAKE3,
+                "note": "CODATA lists no antiparticle; every antimatter value is a matter row carried over by CPT symmetry",
+            },
+            "hydrogen": {
+                "binding_ev": self.binding,
+                "binding_vs_nist_asd_ppm": self.binding_rel * 1e6,
+                "mass_kg": self.matter.hydrogen_mass(),
+            },
+            "alpha_g_scale": {
+                "gradient_equal_to_g_t_per_m": self.grad,
+                "gradient_printed_t_per_m": 1.77e-3,
+                "field_difference_over_25_6_cm_t": self.mdiff,
+                "field_difference_printed_t": 4.53e-4,
+                "electric_field_equal_to_antiproton_weight_v_per_m": self.efield,
+                "magnetic_field_equal_to_weight_at_10_k_t": self.bfield,
+                "gravity_over_25_6_cm_mk": self.step * 1e3,
+                "gravity_per_cm_uk": self.step_cm * 1e6,
+                "ratio_to_1_mk_cooled_atoms": self.step / ext::ALPHA_COOLED_ENERGY_K,
+            },
+            "trapped_moments_at_1_t_mu_b": {
+                "x": self.tm.x,
+                "d": self.tm.d,
+                "c": self.tm.c,
+                "c_high_field_limit": self.c_high,
+                "mean": self.tm.mean(),
+                "spread": self.tm.spread(),
+            },
+            "alpha_g_refit": {
+                "kappa": self.kappa,
+                "kappa_rel_sigma": self.eff.ratio_rel_sigma(),
+                "logistic": fit(&self.lg),
+                "probit": fit(&self.pb),
+                "uncorrected_kappa_1": fit(&self.raw),
+                "counting_only_sigma": {
+                    "no_gravity": self.z0,
+                    "repulsion": self.zrep,
+                    "no_gravity_probit": self.z0p,
+                    "repulsion_probit": self.zrepp,
+                    "paper_with_systematics": "no gravity p = 2.9e-4 (about 3.4 sigma); repulsion p < 1e-15",
+                },
+                "efficiency_shift_g": self.eshift,
+                "paper_efficiency_item_g": ext::ALPHA_G_EFFICIENCY_ITEM,
+                "paper_finite_data_item_g": ext::ALPHA_G_STAT_ITEM,
+                "events_for_1_percent_by_counting": self.need,
+                "times_the_2023_sample": self.need / self.lg.events,
+                "paper_result_g": { "a": a, "stat_syst": a_ss, "simulation": a_sim, "total": a_ss.hypot(a_sim) },
+                "caveat": "refit uses the paper's bias LABELS, not its 3D simulation: a cross-check, not a new measurement",
+            },
+            "base": {
+                "two_me_mp_codata_2022": self.r22.two_me_mp,
+                "two_me_mp_base": ext::BASE_TWO_ME_MP,
+                "r_codata_2022": self.r22.r,
+                "r_base_printed": ext::BASE_R_THEO,
+                "r_difference_ppt": (self.r22.r - ext::BASE_R_THEO) * 1e12,
+                "r_moved_2018_to_2022_ppt": (self.r22.r - self.r18.r) * 1e12,
+                "absolute_bound": self.abs_bound,
+                "absolute_bound_printed": ext::BASE_BOUND_ABSOLUTE,
+                "solar_potential_over_c2_at_1_au": self.phi_sun,
+                "annual_swing": self.swing,
+                "naive_annual_bound": self.naive_annual,
+                "annual_bound_printed": ext::BASE_BOUND_DIFFERENTIAL,
+            },
+            "codata_big_g_rel_sigma": self.matter.big_g_rel_sigma,
+            "big_g_note": "G (CODATA's least precise constant) cancels in every test here",
+            "gbar": {
+                "fall_20_cm_ms_at_g": self.t_g * 1e3,
+                "fall_20_cm_ms_at_0_75_g": self.t_075 * 1e3,
+                "gravitational_length_um": self.lgrav * 1e6,
+                "e1_hz": self.e1,
+                "e2_minus_e1_hz": self.e2 - self.e1,
+            },
+            "paper": "https://quillon.xyz/downloads/flux-science-antimatter-gravity-codata-2022.pdf",
+            "regenerate": "fluxc build -p flux-science --bin antimatter_gravity, then target/debug/antimatter_gravity <OUT_DIR>",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_reproduces_the_published_paper() {
+        // The numbers printed in summary.txt beside the published PDF (b3 d1c0db6e…).
+        let s = summary(&CodataTable::nist_2022(), &CodataTable::nist_2018());
+        assert_eq!((s.rows, s.anti, s.anti_2018), (355, 0, 0));
+        assert!((s.grad - 1.7703e-3).abs() < 5e-8, "gradient {}", s.grad);
+        assert!((s.mdiff - 4.5319e-4).abs() < 5e-8, "mirror difference {}", s.mdiff);
+        assert!((s.lg.balance + 0.752).abs() < 5e-4, "logistic balance {}", s.lg.balance);
+        assert!((s.pb.balance + 0.741).abs() < 5e-4, "probit balance {}", s.pb.balance);
+        assert!((s.z0 - 11.9).abs() < 0.05 && (s.zrep - 23.2).abs() < 0.05, "z {} {}", s.z0, s.zrep);
+        assert!((s.need - 68_572.0).abs() < 1.0, "events for 1 % {}", s.need);
+        assert!((((s.r22.r - ext::BASE_R_THEO) * 1e12) + 0.043).abs() < 5e-4, "R {}", s.r22.r);
+        assert!((s.e1 - 340.0).abs() < 0.05 && (s.e2 - s.e1 - 254.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn summary_json_quotes_the_same_numbers() {
+        let s = summary(&CodataTable::nist_2022(), &CodataTable::nist_2018());
+        let j = s.to_json();
+        assert_eq!(j["alpha_g_refit"]["logistic"]["balance_g"].as_f64(), Some(s.lg.balance));
+        assert_eq!(j["alpha_g_scale"]["gradient_equal_to_g_t_per_m"].as_f64(), Some(s.grad));
+        assert_eq!(j["base"]["r_codata_2022"].as_f64(), Some(s.r22.r));
+        assert_eq!(j["codata"]["table_blake3"].as_str(), Some(NIST_2022_BLAKE3));
+        assert_eq!(j["codata"]["antimatter_rows"].as_u64(), Some(0));
+    }
 
     fn m22() -> Matter {
         Matter::codata_2022()

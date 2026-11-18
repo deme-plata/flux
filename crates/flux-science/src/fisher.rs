@@ -205,7 +205,9 @@ impl FusedEstimate {
 
 /// Fuse observations by Fisher information (inverse-variance weighting).
 ///
-///     θ̂ = Σ Iᵢ·E[valueᵢ now] / Σ Iᵢ        Var(θ̂) = 1 / Σ Iᵢ
+/// ```text
+/// θ̂ = Σ Iᵢ·E[valueᵢ now] / Σ Iᵢ        Var(θ̂) = 1 / Σ Iᵢ
+/// ```
 ///
 /// This is the minimum-variance unbiased combination for independent sources,
 /// and information is ADDITIVE — each extra source strictly increases precision.

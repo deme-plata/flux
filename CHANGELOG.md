@@ -1,5 +1,42 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.44.0 — The CODATA release: physics numbers you can recompute (2026-11-18)
+
+Until now the physical constants in Flux were typed in by hand, and nothing checked them against
+the source. This release embeds NIST's own CODATA tables, pins each one by its BLAKE3 hash, and
+rebuilds the results that matter from them, so every number a paper or an MCP reply quotes can be
+recomputed from bytes that cannot drift.
+
+- **`flux_science::electromagnetism`** — NIST's CODATA 2018 and 2022 listings embedded
+  (`include_str!`, pinned by `NIST_2018_BLAKE3` / `NIST_2022_BLAKE3`); the electromagnetic block rebuilt
+  from four inputs (α⁻¹, R∞, mₑ/mₚ, aₑ) through the exact definitions of the 2019 SI. 12 tests pin
+  what it found: every pure-power constant moved 2018 → 2022 by its integer power of α; the three α
+  inputs (Cs 2018, Rb 2020, g−2 2023) disagree at χ² = 31 on 2 degrees of freedom, and widening their
+  errors ×2.5 reproduces CODATA's 137.035999178(21); μ₀/(4π·10⁻⁷) − 1 goes from +3.6 σ (2018) to
+  −0.8 σ (2022); the aₑ shift needs the updated tenth-order QED term. Binaries `codata_em` (the
+  paper) and `codata_song_258` (refuses to write a lyric if a check fails).
+- **`flux_science::antimatter_gravity`** — ALPHA-g, BASE and GBAR recomputed from CODATA 2022's matter
+  constants (CODATA has no antiparticle rows; CPT carries the matter values over). A refit of ALPHA-g's
+  Table 1 gives a balance of −0.752 g ± 0.064 from counting alone, so the 2023 measurement is limited
+  by its systematics, not by the number of atoms. One `summary()` feeds both the paper and the MCP
+  tool, and the paper binary regenerates the published paper byte-identical. 14 tests + 3.
+- **Two new MCP tools, pure (no network, no files):** `flux_science_codata` — any CODATA row, the 2022
+  value beside the 2018 value and the shift in 2018 standard deviations, both table hashes in every
+  reply; it understands everyday names, NIST's abbreviations (mag., mom., gyromag.), symbols
+  (case-sensitive: G is Newton's constant, g is standard gravity) and 60 aliases (α, ħ, μ₀, g−2, …).
+  `flux_science_antimatter_gravity` — the paper's numbers, optionally one section.
+- **`constants.rs` is now checked against the table:** the 11 hand-typed constants must equal their
+  rows in the pinned NIST 2022 listing (10⁻¹⁴ relative). All 11 match.
+- **fluxc-core drops an unused dependency on flux-science** (0 references in its source), so editing
+  flux-science no longer recompiles fluxc-core (~15k lines) and the crates above it.
+- **`fluxc test -p flux-science` is green again** (65 passed, 0 failed): `fisher::fuse`'s formula was
+  indented four spaces in its doc comment, so rustdoc compiled it as a doctest and failed — red since
+  2026-07-28, shipped that way in v0.43.0. Fenced as text; no code change.
+
+Not in this release: the uncommitted work other lanes keep in the shared tree (flux-driver,
+flux-legacy, fluxc-mcp ops/swarm, flux-skyskraber and paper generators) — it is theirs to finish and
+commit.
+
 ## v0.43.0 — The PRINCE2 release: a roadmap that says when it went stale (2026-11-15)
 
 The roadmap in `FLUX-MASTER-OVERVIEW.md` §8 was written on 2026-06-24 and never checked again. Five

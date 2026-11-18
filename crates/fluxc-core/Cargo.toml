@@ -22,7 +22,6 @@ flux-frontend = { path = "../flux-frontend" }
 flux-architect = { path = "../flux-architect" }
 flux-cortex = { path = "../flux-cortex" }
 flux-self-heal = { path = "../flux-self-heal" }
-flux-science = { path = "../flux-science" }
 flux-backend = { path = "../flux-backend" }
 flux-rev = { path = "../flux-rev" }
 # Verifiable build receipt for distributed builds: content-addressed (BLAKE3),

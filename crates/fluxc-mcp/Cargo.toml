@@ -66,6 +66,8 @@ sigil-shield = { path = "../../../sigil/crates/sigil-shield" }
 flux-kgauge = { path = "../../../sigil/crates/flux-kgauge" }
 # Kristensen Time + the arXiv:2608.07938 Chinese-remainder clock (flux_sigil_wallet_clock).
 flux-clock = { path = "../flux-clock" }
+# CODATA lookups + the antimatter-gravity recomputation (flux_science_codata / _antimatter_gravity).
+flux-science = { path = "../flux-science" }
 # The Kristensen Realization Functional K_R — the engineering counterpart to the
 # K-gauge: which constraint is binding, and what would relieving it be worth.
 flux-realization = { path = "../../../sigil/crates/flux-realization" }

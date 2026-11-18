@@ -63,8 +63,30 @@ use fluxc_webhooks::webhook;
 pub const EVENT: &str = "sigil_kgauge";
 pub const GAUGE_VERSION: u32 = 2;
 const DEFAULT_SERIES: &str = "/home/storage/claude-code/k-parameter-paper/gauge-series/sigil-kgauge.jsonl";
-/// Steady-state SIGIL block rate used ONLY for the legacy diagnostic block-rate deviation.
-const TARGET_BPS: f64 = 0.83;
+/// Steady-state block rate of each SIGIL chain, used ONLY for the diagnostic block-rate deviation and the
+/// reference gauge's block-rate channel (never in K_C / K_fix). Re-derive whenever production changes:
+/// (settled height now − 60 s ago) / 60.
+/// sigil-g2: 50 blocks / 60 s = 0.83 (2026-08-28). sigil-g3: 481 blocks / 60 s = 8.01 (2026-11-15).
+/// Unknown chain → 0.0 = no target, so no deviation is invented.
+pub(crate) fn steady_bps_of(network: &str) -> f64 {
+    match network {
+        "sigil-g2" => 0.83,
+        "sigil-g3" => 8.0,
+        _ => 0.0,
+    }
+}
+
+/// Which chain the node says it is. `/v1/shielded/anchor` carries `network` since 2026-10-19 (g3);
+/// sigil-api documents an ABSENT field as sigil-g2. A failed read is "unknown", never a guess.
+pub(crate) fn network_from_anchor(anchor: Result<&Value, &str>) -> String {
+    match anchor {
+        Ok(v) => match v.get("network").and_then(|n| n.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => "sigil-g2".to_string(),
+        },
+        Err(_) => "unknown".to_string(),
+    }
+}
 /// Λ (commitment) denominator: κ·τ_confirm blocks, window-limited by construction.
 const COMMIT_BLOCKS: f64 = 18.0 * 100.0;
 /// `sigil_dagknight::BraidConfig::default().final_depth` — finality is depth, τ = depth / rate.
@@ -637,6 +659,9 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     std::thread::sleep(Duration::from_secs_f64(window_secs));
     let b = sample()?;
     let all_blocks = recent_blocks()?;
+    let anchor = get_json("/v1/shielded/anchor");
+    let network = network_from_anchor(anchor.as_ref().map_err(|e| e.as_str()));
+    let target_bps = steady_bps_of(&network);
     let tau = ((b.ts_ms.saturating_sub(a.ts_ms)) as f64 / 1000.0).max(window_secs * 0.5);
 
     // Blocks produced INSIDE the window; fall back to the recent set if the feed has none.
@@ -702,7 +727,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     let dh_v1 = rej_ratio + churn;
     let k_v1 = if tau > 0.0 { 2.0 * std::f64::consts::PI * (dh_v1 * ds).sqrt() / tau } else { 0.0 };
     let k_star_v1 = 2.0 * std::f64::consts::PI * (dh_v1 * tau * ds).sqrt();
-    let br_dev = (obs_bps - TARGET_BPS).abs() / TARGET_BPS;
+    let br_dev = if target_bps > 0.0 { (obs_bps - target_bps).abs() / target_bps } else { 0.0 };
     let lambda = 1.0 - (-(d_commit as f64) / COMMIT_BLOCKS).exp();
 
     // ── reference gauge: flux-kgauge Eq. 10/25 over the SAME observables ──
@@ -720,7 +745,8 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
     }).collect();
     let n_total = (b.peers + 2).max(8) as f64;
     let obs = Observables { previous: to_counter(&a), current: to_counter(&b), window_secs: tau, window: BlockWindow { blocks: facts }, network_size: NetworkSize::Estimated(n_total as u64), kappa: 0.0 };
-    let report = KGauge::new(GaugeConfig::sigil()).observe(&obs);
+    // 0.0 (unknown chain) switches the block-rate channel off inside flux-kgauge (base.rs: target > 0 guard).
+    let report = KGauge::new(GaugeConfig::sigil().with_target_block_rate(target_bps)).observe(&obs);
     let reference = json!({
         "definition": "flux-kgauge (Theoretical Minimum v4) Eq.10 base / Eq.25 enhanced — a STRESS score, low = healthy; not the same quantity as K_C",
         "k_base": report.base.k_base, "k_enhanced": report.k_enhanced,
@@ -739,7 +765,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
 
     Ok(json!({
         "ok": true, "event": EVENT, "version": GAUGE_VERSION, "ts_ms": b.ts_ms, "node": crate::handlers::sigil_wallet::rpc_base(),
-        "network": "sigil-g2",
+        "network": network,
         "K_C": c.k_c, "K_C_low": c.k_c_low, "K_C_high": c.k_c_high,
         "regime": regime_witnessed_c, "confidence": c.confidence,
         "regime_unwitnessed": c.regime,
@@ -797,7 +823,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
         "omega_observer_coverage": c.omega, "lambda_commitment": lambda,
         "window": { "blocks": blocks.len(), "window_only": window_only, "distinct_producers": distinct,
                     "tip_start": a.height, "tip_end": b.height, "blocks_added": d_commit,
-                    "block_rate_bps": obs_bps, "block_rate_dev_vs_target": br_dev, "target_bps_diagnostic": TARGET_BPS,
+                    "block_rate_bps": obs_bps, "block_rate_dev_vs_target": br_dev, "target_bps_diagnostic": target_bps,
                     "is_blue_false": blue_false, "merging_blocks": merging },
         "inputs": { "reject_ratio": rej_ratio, "rejects_delta": rej_delta, "rejects_lifetime": b.rejects(), "shares_accepted_delta": sub_delta,
                     "peers_start": a.peers, "peers_end": b.peers, "peer_churn": churn, "peer_heights_seen": b.peer_heights.len(), "state_root_verdicts": b.state_root_verdicts.len(),
@@ -812,7 +838,7 @@ pub(crate) fn measure(window_secs: f64) -> Result<Value, String> {
         "provenance": {
             "measured": measured,
             "unavailable": unavailable,
-            "diagnostic_only": ["peer churn", "noise rejects (stale_height/duplicate/no_tip)", "block-rate deviation vs 0.83/s"],
+            "diagnostic_only": ["peer churn", "noise rejects (stale_height/duplicate/no_tip)", "block-rate deviation vs the chain's steady rate (steady_bps_of)"],
             "note": if window_only { "blocks counted are exactly those produced inside the window" } else { "fewer than 2 blocks landed inside the window; Δs and DAG channels computed over the node's recent-block feed instead" },
             "node_side": "since 2026-09-07 sigil-node publishes tip_hash + wallet_state_root + finalized in its peer-heights heartbeat and records per-peer agreement verdicts under /v1/network/topology.peer_views; both channels light up as soon as one connected peer runs that node. sigil-top clients publish no heartbeat, so a node whose only peers are miners still reads them as unavailable.",
         },
@@ -900,7 +926,7 @@ fn flux_sigil_kgauge_series(args: &Value) -> String {
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(ToolDef {
         name: "flux_sigil_kgauge",
-        description: "MEASURE the Kristensen consensus gauge K_C live on SIGIL (sigil-g2): samples the node twice `window_secs` apart and returns K_C = 2π√(ΔH_c·(τ/τ₀)·[ε+(1−ε)·H_norm]) with a confidence band from observer coverage Ω. ΔH_c is STATE DISAGREEMENT over four weighted channels — tip divergence (DAG merge-parents), state-root mismatch (unavailable on sigil-api today, reported as such), finality divergence (peer heights, if published), semantic conflicts (red blocks + verify_mismatch rejects) — a lower bound; peer churn and stale_height/duplicate rejects are network DIAGNOSTICS and never enter ΔH_c. Also proposer structure (Δs bits, N_eff = 2^Δs, dominant share, staircase resolution), τ = measured finality time (512/block-rate), the legacy v1 K/K* (retained, NOT a Margolus–Levitin number), and the flux-kgauge crate's Eq.10/25 reference score. Appends to the series file and dispatches event `sigil_kgauge` to every registered webhook. Args: window_secs (10..600, default 60), webhook (default true), record (default true).",
+        description: "MEASURE the Kristensen consensus gauge K_C live on SIGIL (the chain the node names on /v1/shielded/anchor — sigil-g3 today): samples the node twice `window_secs` apart and returns K_C = 2π√(ΔH_c·(τ/τ₀)·[ε+(1−ε)·H_norm]) with a confidence band from observer coverage Ω. ΔH_c is STATE DISAGREEMENT over four weighted channels — tip divergence (DAG merge-parents), state-root mismatch (unavailable on sigil-api today, reported as such), finality divergence (peer heights, if published), semantic conflicts (red blocks + verify_mismatch rejects) — a lower bound; peer churn and stale_height/duplicate rejects are network DIAGNOSTICS and never enter ΔH_c. Also proposer structure (Δs bits, N_eff = 2^Δs, dominant share, staircase resolution), τ = measured finality time (512/block-rate), the legacy v1 K/K* (retained, NOT a Margolus–Levitin number), and the flux-kgauge crate's Eq.10/25 reference score. Appends to the series file and dispatches event `sigil_kgauge` to every registered webhook. Args: window_secs (10..600, default 60), webhook (default true), record (default true).",
         input_schema: json!({"type":"object","properties":{"window_secs":{"type":"number"},"webhook":{"type":"boolean"},"record":{"type":"boolean"}}}),
     }, flux_sigil_kgauge);
     registry.register(ToolDef {
@@ -918,6 +944,26 @@ pub fn register(registry: &mut ToolRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_label_is_what_the_node_says() {
+        let g3 = json!({"ok": true, "network": "sigil-g3", "notes": 1});
+        assert_eq!(network_from_anchor(Ok(&g3)), "sigil-g3");
+        let old = json!({"ok": true, "notes": 1});
+        assert_eq!(network_from_anchor(Ok(&old)), "sigil-g2", "absent field = sigil-g2 (sigil-api's own rule)");
+        assert_eq!(network_from_anchor(Err("connection refused")), "unknown", "a failed read is never a guess");
+    }
+
+    #[test]
+    fn block_rate_target_follows_the_chain() {
+        assert_eq!(steady_bps_of("sigil-g3"), 8.0);
+        assert_eq!(steady_bps_of("sigil-g2"), 0.83);
+        assert_eq!(steady_bps_of("unknown"), 0.0, "no target → no invented deviation");
+        // the 2026-11-15 reading: 8.05 blk/s on g3 read as a 9.7x deviation against the g2 number
+        let dev = |obs: f64, t: f64| (obs - t).abs() / t;
+        assert!(dev(8.05, steady_bps_of("sigil-g2")) > 8.0);
+        assert!(dev(8.05, steady_bps_of("sigil-g3")) < 0.01);
+    }
 
     fn base() -> ConsensusInputs {
         ConsensusInputs { blocks: 200, merging_blocks: 0, red_blocks: 0, accepted_delta: 150, rejects_delta: HashMap::new(),

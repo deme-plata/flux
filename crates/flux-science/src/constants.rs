@@ -136,6 +136,33 @@ mod tests {
         assert!((l - 2.871e-21).abs() / 2.871e-21 < 1e-3, "landauer = {l}");
     }
 
+    /// Every hand-typed constant above must equal its row in the BLAKE3-pinned NIST
+    /// CODATA 2022 listing that `electromagnetism` embeds. 1e-14 relative is far below the
+    /// smallest change a CODATA adjustment makes to any of these (≥ 1e-11), and above the
+    /// last-bit wobble of parsing a printed decimal.
+    #[test]
+    fn constants_are_the_pinned_codata_2022_rows() {
+        let t = crate::electromagnetism::CodataTable::nist_2022();
+        let rows: [(&str, f64, &str); 11] = [
+            ("SPEED_OF_LIGHT", SPEED_OF_LIGHT, "speed of light in vacuum"),
+            ("GRAVITATIONAL", GRAVITATIONAL, "Newtonian constant of gravitation"),
+            ("PLANCK_REDUCED", PLANCK_REDUCED, "reduced Planck constant"),
+            ("BOLTZMANN", BOLTZMANN, "Boltzmann constant"),
+            ("FINE_STRUCTURE_INV", FINE_STRUCTURE_INV, "inverse fine-structure constant"),
+            ("STANDARD_GRAVITY", STANDARD_GRAVITY, "standard acceleration of gravity"),
+            ("ELEMENTARY_CHARGE", ELEMENTARY_CHARGE, "elementary charge"),
+            ("ELECTRON_VOLT", ELECTRON_VOLT, "electron volt"),
+            ("PROTON_MASS", PROTON_MASS, "proton mass"),
+            ("ELECTRON_MASS", ELECTRON_MASS, "electron mass"),
+            ("PLANCK_H", PLANCK_H, "Planck constant"),
+        ];
+        for (name, code, row) in rows {
+            let nist = t.must(row).value;
+            let rel = ((code - nist) / nist).abs();
+            assert!(rel < 1e-14, "{name} = {code:e} but CODATA 2022 '{row}' = {nist:e} (rel {rel:.1e})");
+        }
+    }
+
     #[test]
     fn test_schwarzschild_solar() {
         let solar_mass = 1.989e30; // kg

@@ -27,6 +27,8 @@ pub mod blackhole;
 pub mod inflation;
 pub mod holographic;
 pub mod fisher;
+pub mod electromagnetism;
+pub mod antimatter_gravity;
 
 // Re-exports
 pub use constants::*;

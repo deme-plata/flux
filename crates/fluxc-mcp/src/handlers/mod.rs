@@ -336,3 +336,4 @@ pub mod supersonic;
 pub mod pulse;
 pub mod stardust;
 pub mod magic;
+pub mod science;

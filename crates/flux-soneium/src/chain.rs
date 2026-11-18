@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 
 pub const MAINNET_CHAIN_ID: u64 = 1868;
 pub const MINATO_CHAIN_ID: u64 = 1946;
+/// Base (Coinbase's OP-Stack L2). Same predeploys as Soneium, so the whole crate applies.
+/// Measured live from Epsilon 2026-11-09: `eth_chainId` 0x2105 / 0x14a34.
+pub const BASE_CHAIN_ID: u64 = 8453;
+pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
 
 /// OP-Stack predeploys — identical on every OP chain, Soneium included.
 pub const WETH_PREDEPLOY: &str = "0x4200000000000000000000000000000000000006";
@@ -78,10 +82,60 @@ impl Network {
         }
     }
 
+    /// Base mainnet (chain 8453). Added 2026-11-09 for the wSIGIL-on-Base plan.
+    /// Every address verified on-chain from Epsilon that day: the router's `factory()` answers
+    /// `0x8909dc15…` (3,076,298 pairs), `WETH()` answers the OP predeploy, the factory's
+    /// `getPair(WETH, USDC)` is `0x88a43bbd…`, and `0x833589fc…` answers `symbol()` = "USDC".
+    /// `usdc_e` here is Circle's NATIVE USDC on Base (6 dp), not a bridged twin — the field
+    /// name is historical (Soneium only has USDC.e).
+    pub fn base() -> Self {
+        Network {
+            name: "base",
+            chain_id: BASE_CHAIN_ID,
+            alchemy_slug: "base-mainnet",
+            public_rpcs: vec!["https://mainnet.base.org", "https://base.drpc.org"],
+            explorer: "https://basescan.org",
+            weth: WETH_PREDEPLOY,
+            usdc_e: Some("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+            usdt: None,
+            astr: None,
+            routers: vec![
+                // Uniswap V2 Router02 on Base, as listed on docs.base.org/chain/contracts and
+                // verified live 2026-11-09 (factory 0x8909dc15…, WETH = predeploy).
+                RouterCandidate { name: "uniswap-v2", router: "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24" },
+            ],
+        }
+    }
+
+    /// Base Sepolia (chain 84532) — the rehearsal network for the Base leg. Verified live
+    /// 2026-11-09: router `factory()` = `0x7ae58f10…` (11,078 pairs), `WETH()` = predeploy,
+    /// Circle testnet USDC `0x036cbd53…` answers "USDC" / 6 dp. Gas 0.006 gwei.
+    pub fn base_sepolia() -> Self {
+        Network {
+            name: "base-sepolia",
+            chain_id: BASE_SEPOLIA_CHAIN_ID,
+            alchemy_slug: "base-sepolia",
+            public_rpcs: vec!["https://sepolia.base.org"],
+            explorer: "https://sepolia.basescan.org",
+            weth: WETH_PREDEPLOY,
+            usdc_e: Some("0x036cbd53842c5426634e7929541ec2318f3dcf7e"),
+            usdt: None,
+            astr: None,
+            routers: vec![
+                RouterCandidate { name: "uniswap-v2", router: "0x1689e7b1f10000ae47ebfe339a4f69decd19f602" },
+            ],
+        }
+    }
+
+    /// Every network this crate knows, for tests and `--net` help text.
+    pub fn all() -> Vec<Self> { vec![Self::mainnet(), Self::minato(), Self::base(), Self::base_sepolia()] }
+
     pub fn by_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "soneium" | "mainnet" | "1868" => Some(Self::mainnet()),
             "minato" | "testnet" | "1946" => Some(Self::minato()),
+            "base" | "base-mainnet" | "8453" => Some(Self::base()),
+            "base-sepolia" | "basesepolia" | "base-testnet" | "84532" => Some(Self::base_sepolia()),
             _ => None,
         }
     }
@@ -110,8 +164,39 @@ mod tests {
     }
 
     #[test]
+    fn chain_ids_match_base_live_eth_chainid() {
+        // eth_chainId measured live from Epsilon 2026-11-09: mainnet.base.org 0x2105,
+        // sepolia.base.org 0x14a34.
+        assert_eq!(Network::base().chain_id, 0x2105);
+        assert_eq!(Network::base_sepolia().chain_id, 0x14a34);
+        assert_eq!(Network::by_name("base").unwrap().chain_id, 8453);
+        assert_eq!(Network::by_name("84532").unwrap().name, "base-sepolia");
+        assert_eq!(Network::by_name("BASE-SEPOLIA").unwrap().alchemy_slug, "base-sepolia");
+    }
+
+    #[test]
+    fn base_shares_the_op_stack_predeploys_with_soneium() {
+        // The reason the whole crate applies to Base unchanged: same WETH predeploy, same
+        // GasPriceOracle, same Uniswap-V2 router ABI.
+        assert_eq!(Network::base().weth, Network::mainnet().weth);
+        assert_eq!(Network::base_sepolia().weth, WETH_PREDEPLOY);
+        assert!(Network::base().routers.iter().any(|r| r.name == "uniswap-v2"));
+        assert!(Network::base_sepolia().routers.iter().any(|r| r.name == "uniswap-v2"));
+    }
+
+    #[test]
+    fn network_names_are_unique() {
+        let names: Vec<_> = Network::all().iter().map(|n| n.name).collect();
+        let mut dedup = names.clone(); dedup.sort(); dedup.dedup();
+        assert_eq!(names.len(), dedup.len());
+        let ids: Vec<_> = Network::all().iter().map(|n| n.chain_id).collect();
+        let mut d2 = ids.clone(); d2.sort(); d2.dedup();
+        assert_eq!(ids.len(), d2.len());
+    }
+
+    #[test]
     fn all_constants_parse() {
-        for n in [Network::mainnet(), Network::minato()] {
+        for n in Network::all() {
             let _ = n.weth_addr();
             let _ = n.usdc_e_addr();
             for a in [n.usdt, n.astr].into_iter().flatten() { let _ = parse(a); }

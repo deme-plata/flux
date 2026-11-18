@@ -1,5 +1,73 @@
 # Flux Foundation — Commit Log & Changelog
 
+## v0.44.0 — The CODATA release: physics numbers you can recompute (2026-11-18)
+
+Until now the physical constants in Flux were typed in by hand, and nothing checked them against
+the source. This release embeds NIST's own CODATA tables, pins each one by its BLAKE3 hash, and
+rebuilds the results that matter from them, so every number a paper or an MCP reply quotes can be
+recomputed from bytes that cannot drift.
+
+- **`flux_science::electromagnetism`** — NIST's CODATA 2018 and 2022 listings embedded
+  (`include_str!`, pinned by `NIST_2018_BLAKE3` / `NIST_2022_BLAKE3`); the electromagnetic block rebuilt
+  from four inputs (α⁻¹, R∞, mₑ/mₚ, aₑ) through the exact definitions of the 2019 SI. 12 tests pin
+  what it found: every pure-power constant moved 2018 → 2022 by its integer power of α; the three α
+  inputs (Cs 2018, Rb 2020, g−2 2023) disagree at χ² = 31 on 2 degrees of freedom, and widening their
+  errors ×2.5 reproduces CODATA's 137.035999178(21); μ₀/(4π·10⁻⁷) − 1 goes from +3.6 σ (2018) to
+  −0.8 σ (2022); the aₑ shift needs the updated tenth-order QED term. Binaries `codata_em` (the
+  paper) and `codata_song_258` (refuses to write a lyric if a check fails).
+- **`flux_science::antimatter_gravity`** — ALPHA-g, BASE and GBAR recomputed from CODATA 2022's matter
+  constants (CODATA has no antiparticle rows; CPT carries the matter values over). A refit of ALPHA-g's
+  Table 1 gives a balance of −0.752 g ± 0.064 from counting alone, so the 2023 measurement is limited
+  by its systematics, not by the number of atoms. One `summary()` feeds both the paper and the MCP
+  tool, and the paper binary regenerates the published paper byte-identical. 14 tests + 3.
+- **Two new MCP tools, pure (no network, no files):** `flux_science_codata` — any CODATA row, the 2022
+  value beside the 2018 value and the shift in 2018 standard deviations, both table hashes in every
+  reply; it understands everyday names, NIST's abbreviations (mag., mom., gyromag.), symbols
+  (case-sensitive: G is Newton's constant, g is standard gravity) and 60 aliases (α, ħ, μ₀, g−2, …).
+  `flux_science_antimatter_gravity` — the paper's numbers, optionally one section.
+- **`constants.rs` is now checked against the table:** the 11 hand-typed constants must equal their
+  rows in the pinned NIST 2022 listing (10⁻¹⁴ relative). All 11 match.
+- **fluxc-core drops an unused dependency on flux-science** (0 references in its source), so editing
+  flux-science no longer recompiles fluxc-core (~15k lines) and the crates above it.
+- **`fluxc test -p flux-science` is green again** (65 passed, 0 failed): `fisher::fuse`'s formula was
+  indented four spaces in its doc comment, so rustdoc compiled it as a doctest and failed — red since
+  2026-07-28, shipped that way in v0.43.0. Fenced as text; no code change.
+
+Not in this release: the uncommitted work other lanes keep in the shared tree (flux-driver,
+flux-legacy, fluxc-mcp ops/swarm, flux-skyskraber and paper generators) — it is theirs to finish and
+commit.
+
+## v0.43.0 — The PRINCE2 release: a roadmap that says when it went stale (2026-11-15)
+
+The roadmap in `FLUX-MASTER-OVERVIEW.md` §8 was written on 2026-06-24 and never checked again. Five
+months later nobody could say which items still mattered, and the v0.42.0 release itself had never
+reached the main line: v0.5.2-dev still said 0.41.0 and a clean checkout could not even load its
+workspace. This release adds the part of PRINCE2 that would have caught both, and nothing heavier.
+
+- **`flux_legacy::control::prince2` + the `flux-roadmap` CLI** — PRINCE2 Agile control for a roadmap, on
+  top of the existing operator plan (`control.rs`):
+  - *manage by stages*: a stage closes at its gate, and `end-stage` refuses while an exception is undecided;
+  - *manage by exception*: tolerances per board, stage or item (defaults: 8 h, ≥ 12 GB free memory,
+    ≤ 20 files, and any money move or production touch asks the board). `check` turns a forecast that
+    breaks one into an exception report; `decide` only RECORDS the board's word;
+  - *continued business justification*: every item states its benefit and the day it was last checked;
+    the highlight report lists benefits not re-checked in 30 days, and an item without a benefit is refused;
+  - *product-based planning*: every item names its done-check (one command that proves it runs);
+  - `import-overview` puts an old roadmap table in front of the board, dated as written.
+  The first board is `ROADMAP-PRINCE2.json`: `flux-roadmap --board ROADMAP-PRINCE2.json show`.
+- **`flux_sigil_kgauge` names the chain the node names.** It said `sigil-g2` (hardcoded) and judged the
+  live g3 chain against g2's 0.83 blk/s, reporting a 9.7× block-rate deviation on a healthy chain. The
+  network now comes from `/v1/shielded/anchor`, and the target follows it (g3 = 8.0, re-derived
+  2026-11-15: 481 blocks / 60 s). Diagnostic only; K_C and K_fix are unchanged.
+- **The main line carries v0.42.0.** Its 5 commits (signed releases, SIGIL key 2 in `flux_release_check`,
+  the install guard, the `sigil-rpc-wasm` exclusion, the ledger stamp) are merged into v0.5.2-dev.
+
+Also first released here (on the main line since v0.42.0 branched): the cortex **fold** (one action per
+crease, every site kept; 2,863 → 544), `fluxc magic` + `stardust` (guarded builds, binary provenance,
+arm64 stamp fix), libp2p connection limits, flux-legacy `money`/`referee`/`shadow` wards and the health
+fix, `fluxc serve` reading only the newest event files, flux-soneium Base + Base Sepolia, flux-commerce,
+the skyskraber treasury rules, and the CODATA paper/song generators.
+
 ## v0.42.0 — Signed releases (2026-10-23)
 
 Until now a Flux release was trusted on TLS alone. `fluxc self-update` curl'ed `fluxc-musl-x64` straight

@@ -10,6 +10,10 @@
 //!
 //! Pure + serde-persisted (serde_json, no new deps). Atomic save via tmp-file + rename.
 
+/// PRINCE2 Agile control for a roadmap: stages, tolerances → exception reports, continued business
+/// justification, done-checks, lessons, highlight report (Viktor 2026-11-15). CLI: `flux-roadmap`.
+pub mod prince2;
+
 use crate::RefactorTask;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};

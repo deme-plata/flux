@@ -76,8 +76,16 @@ pub async fn priced_gas(p: &DynProvider) -> Result<U256> {
     Ok(U256::from(g) * U256::from(105) / U256::from(100))
 }
 
+/// OP-Stack L1 data fee. Chains without the GasPriceOracle predeploy (Polygon PoS: 0 bytes of
+/// code there, measured 2026-11-19) have no L1 fee, so say 0 explicitly instead of relying on a
+/// failed call decoding to 0.
 async fn l1_fee(p: &DynProvider, data: &Bytes) -> U256 {
-    IGasPriceOracle::new(parse(GAS_PRICE_ORACLE), p.clone()).getL1Fee(data.clone()).call().await.unwrap_or(U256::ZERO)
+    let oracle = parse(GAS_PRICE_ORACLE);
+    match p.get_code_at(oracle).await {
+        Ok(code) if code.is_empty() => return U256::ZERO,
+        _ => {}
+    }
+    IGasPriceOracle::new(oracle, p.clone()).getL1Fee(data.clone()).call().await.unwrap_or(U256::ZERO)
 }
 
 async fn step(p: &DynProvider, label: &str, tx: Option<TransactionRequest>, calldata_for_l1: Bytes, fallback_gas: u64, gas_price: U256, value: U256) -> Step {

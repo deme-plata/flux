@@ -11,6 +11,11 @@ pub const MINATO_CHAIN_ID: u64 = 1946;
 /// Measured live from Epsilon 2026-11-09: `eth_chainId` 0x2105 / 0x14a34.
 pub const BASE_CHAIN_ID: u64 = 8453;
 pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
+/// Polygon PoS. NOT an OP-Stack chain: no WETH predeploy (the router's `WETH()` is WPOL) and no
+/// L1 data fee (no code at the GasPriceOracle address — measured 0 bytes, 2026-11-19).
+pub const POLYGON_CHAIN_ID: u64 = 137;
+/// Wrapped POL — what Polygon's Uniswap V2 router answers for `WETH()` (verified 2026-11-19).
+pub const WPOL: &str = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270";
 
 /// OP-Stack predeploys — identical on every OP chain, Soneium included.
 pub const WETH_PREDEPLOY: &str = "0x4200000000000000000000000000000000000006";
@@ -127,8 +132,32 @@ impl Network {
         }
     }
 
+    /// Polygon PoS (chain 137) — where wSIGIL3 and its Uniswap V2 pair already live. Added
+    /// 2026-11-19 (Viktor: "make wsigil usdc pair on uniswap polygon pool"). Verified live from
+    /// Epsilon that day: router `factory()` = `0x9e5A52f5…` (49,936 pairs — the canonical
+    /// deployment; Ethereum's V2 addresses hold a dead clone on Polygon with 274), `WETH()` =
+    /// WPOL, WPOL/USDC pair `0x1f0c5400…` (POL ≈ $0.083), USDC `0x3c499c54…` = Circle's NATIVE
+    /// USDC, 6 dp (`usdc_e` is the historical field name), USDT answers symbol "USDT0", 6 dp.
+    /// `weth` holds WPOL so `verify_router`'s `WETH()` check means "this chain's wrapped coin".
+    pub fn polygon() -> Self {
+        Network {
+            name: "polygon",
+            chain_id: POLYGON_CHAIN_ID,
+            alchemy_slug: "polygon-mainnet",
+            public_rpcs: vec!["https://polygon-bor-rpc.publicnode.com", "https://1rpc.io/matic"],
+            explorer: "https://polygonscan.com",
+            weth: WPOL,
+            usdc_e: Some("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"),
+            usdt: Some("0xc2132D05D31c914a87C6611C10748AEb04B58e8F"),
+            astr: None,
+            routers: vec![
+                RouterCandidate { name: "uniswap-v2", router: "0xedf6066a2b290C185783862C7F4776A2C8077AD1" },
+            ],
+        }
+    }
+
     /// Every network this crate knows, for tests and `--net` help text.
-    pub fn all() -> Vec<Self> { vec![Self::mainnet(), Self::minato(), Self::base(), Self::base_sepolia()] }
+    pub fn all() -> Vec<Self> { vec![Self::mainnet(), Self::minato(), Self::base(), Self::base_sepolia(), Self::polygon()] }
 
     pub fn by_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
@@ -136,6 +165,7 @@ impl Network {
             "minato" | "testnet" | "1946" => Some(Self::minato()),
             "base" | "base-mainnet" | "8453" => Some(Self::base()),
             "base-sepolia" | "basesepolia" | "base-testnet" | "84532" => Some(Self::base_sepolia()),
+            "polygon" | "polygon-mainnet" | "matic" | "137" => Some(Self::polygon()),
             _ => None,
         }
     }
@@ -215,7 +245,21 @@ mod tests {
     fn by_name_aliases() {
         assert_eq!(Network::by_name("MAINNET").unwrap().chain_id, 1868);
         assert_eq!(Network::by_name("1946").unwrap().name, "minato");
-        assert!(Network::by_name("polygon").is_none());
+        // Polygon joined the table 2026-11-19 (was `is_none()` until then, deliberately).
+        assert_eq!(Network::by_name("polygon").unwrap().chain_id, 137);
+        assert_eq!(Network::by_name("137").unwrap().name, "polygon");
+        assert!(Network::by_name("amoy").is_none());
+    }
+
+    #[test]
+    fn polygon_is_not_op_stack_and_pins_the_canonical_router() {
+        let p = Network::polygon();
+        assert_ne!(p.weth, WETH_PREDEPLOY, "Polygon's wrapped coin is WPOL, not the OP predeploy");
+        assert_eq!(p.weth_addr(), parse(WPOL));
+        // The canonical router — NOT Ethereum's 0x7a250d56…, which is a dead clone on Polygon.
+        assert_eq!(parse(p.routers[0].router), parse("0xedf6066a2b290C185783862C7F4776A2C8077AD1"));
+        assert_ne!(parse(p.routers[0].router), parse("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"));
+        assert_eq!(p.usdc_e_addr(), Some(parse("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")));
     }
 
     #[test]

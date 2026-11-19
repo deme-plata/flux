@@ -10,6 +10,10 @@
 //! `check`/`plan`/`deploy`/`pool` run there with `--net base` (see [`chain::Network::base`]).
 //! The crate name is now narrower than what it does; renaming it is an operator decision.
 //!
+//! 2026-11-19: **Polygon** (137) joined the table, plus [`existing`] for a pair that ALREADY
+//! exists (wSIGIL3/USDC `0x7e9C5d73…`): `pair` reads it, `mint-seed` mints labelled seed supply,
+//! `reprice` moves it to a chosen price with one exact swap, `add` deposits at that price.
+//!
 //! # What is measured vs assumed
 //! * Chain ids, WETH predeploy, USDC.e, USDT, ASTR, Permit2: from docs.soneium.org, and
 //!   re-checked live by [`rpc::connect`] (`eth_chainId`) and [`dex::verify_router`].
@@ -35,13 +39,14 @@
 
 pub mod chain;
 pub mod dex;
+pub mod existing;
 pub mod plan;
 pub mod pool;
 pub mod relay;
 pub mod rpc;
 pub mod wsigil;
 
-pub use chain::{Network, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, MAINNET_CHAIN_ID, MINATO_CHAIN_ID};
+pub use chain::{Network, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, MAINNET_CHAIN_ID, MINATO_CHAIN_ID, POLYGON_CHAIN_ID};
 pub use dex::{pick_router, verify_router, RouterVerdict};
 pub use plan::FundingPlan;
 pub use pool::{SeedPlan, Quote};
